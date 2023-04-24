@@ -130,3 +130,6 @@ dmypy.json
 
 # C extensions
 *.so
+
+# project related
+tests/logs/
