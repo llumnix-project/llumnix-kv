@@ -131,6 +131,9 @@ dmypy.json
 # C extensions
 *.so
 
+# IDEs
+/.vscode
+
 # project related
 tests/logs/
 tmp/
