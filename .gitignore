@@ -137,3 +137,6 @@ dmypy.json
 # project related
 tests/logs/
 tmp/
+
+# MacOS system
+.DS_Store
