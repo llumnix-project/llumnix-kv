@@ -143,3 +143,7 @@ tmp/
 
 # Ignore auto generated version file
 blade_llm/version.py
+
+# benchmark cache & log
+benchmark/cache/
+benchmark/log/
