@@ -140,3 +140,6 @@ tmp/
 
 # MacOS system
 .DS_Store
+
+# Ignore auto generated version file
+blade_llm/version.py
