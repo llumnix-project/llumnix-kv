@@ -147,3 +147,4 @@ blade_llm/version.py
 # benchmark cache & log
 benchmark/cache/
 benchmark/log/
+benchmark/.on_test/
