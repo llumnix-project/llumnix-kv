@@ -148,3 +148,4 @@ blade_llm/version.py
 benchmark/cache/
 benchmark/log/
 benchmark/.on_test/
+benchmark/multi_bench/
