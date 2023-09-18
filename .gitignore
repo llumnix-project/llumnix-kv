@@ -149,3 +149,8 @@ benchmark/cache/
 benchmark/log/
 benchmark/.on_test/
 benchmark/multi_bench/
+
+# blm_insight cache & log
+benchmark/blm_insight/.quant/
+benchmark/blm_insight/.split/
+benchmark/blm_insight/.log/

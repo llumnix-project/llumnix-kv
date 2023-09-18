@@ -3,4 +3,13 @@
 line-length = 120
 target-version = ['py38', 'py39', 'py310']
 skip-string-normalization = true
-exclude = '\/blade_llm\/third_party\/*|\/blade_llm\/version.py'
+exclude = '''
+(
+    /(
+        | blade_llm\/third_party\/*
+        | benchmark\/blm_insight\/\.quant\/*
+        | benchmark\/blm_insight\/\.split\/*
+    )/
+    | \/blade_llm\/version.py
+)
+'''
