@@ -6,7 +6,6 @@ skip-string-normalization = true
 exclude = '''
 (
     /(
-        | blade_llm\/evals\/human_eval\/*
         | blade_llm\/evals\/opencompass_extension\/configs\/*
         | blade_llm\/third_party\/*
         | benchmark\/blm_insight\/\.quant\/*
