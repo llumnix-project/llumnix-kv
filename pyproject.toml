@@ -12,7 +12,7 @@ exclude = '''
         | benchmark\/blm_insight\/\.split\/*
     )/
     | \/blade_llm\/version.py
-    | blade_llm\/service_v2\/proto\/bladellm_pb2.py
-    | blade_llm\/service_v2\/proto\/bladellm_pb2_grpc.py
+    | blade_llm\/service\/proto\/bladellm_pb2.py
+    | blade_llm\/service\/proto\/bladellm_pb2_grpc.py
 )
 '''
