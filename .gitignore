@@ -154,3 +154,5 @@ benchmark/multi_bench/
 benchmark/blm_insight/.quant/
 benchmark/blm_insight/.split/
 benchmark/blm_insight/.log/
+
+compile_commands.json
