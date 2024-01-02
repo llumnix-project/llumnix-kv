@@ -6,7 +6,6 @@ skip-string-normalization = true
 exclude = '''
 (
     /(
-        | blade_llm\/evals\/opencompass_extension\/configs\/*
         | blade_llm\/third_party\/*
         | benchmark\/blm_insight\/\.quant\/*
         | benchmark\/blm_insight\/\.split\/*
@@ -14,5 +13,6 @@ exclude = '''
     | \/blade_llm\/version.py
     | blade_llm\/service\/proto\/bladellm_pb2.py
     | blade_llm\/service\/proto\/bladellm_pb2_grpc.py
+    | blade_llm\/evals\/run_opencompass.py
 )
 '''
