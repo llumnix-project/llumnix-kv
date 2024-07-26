@@ -1,18 +1,54 @@
-[tool.black]
-# use flake8's line-length
+[tool.ruff]
 line-length = 120
-target-version = ['py38', 'py39', 'py310']
-skip-string-normalization = true
-exclude = '''
-(
-    /(
-        | blade_llm\/third_party\/*
-        | benchmark\/blm_insight\/\.quant\/*
-        | benchmark\/blm_insight\/\.split\/*
-    )/
-    | \/blade_llm\/version.py
-    | blade_llm\/service\/proto\/bladellm_pb2.py
-    | blade_llm\/service\/proto\/bladellm_pb2_grpc.py
-    | blade_llm\/evals\/run_opencompass.py
-)
-'''
+indent-width = 4
+exclude = [
+  '*_pb2.py',
+  '*_pb2_grpc.py',
+  'blade_llm/third_party/**',
+  '.git/',
+  './blade_llm/evals/opencompass_extension/bladellm_config.py',
+  './blade_llm/evals/run_opencompass.py',
+  './blade_llm/module/triton/*.py',
+  # TODO(xiafei.qiuxf): exclude triton code from checking, reopening soon.
+]
+target-version = "py38"
+
+[tool.ruff.lint]
+# The following are ruff defaults.
+# select = ['E4', 'E7', 'E9', 'F']
+# TODO(xiafei.qiuxf): We may still include more rules (as the following) step by step:
+# - I (isort)
+# - N
+# - ANN
+# - ASYNC
+# - LOG
+# - G
+# - PIE
+# - RSE
+# - RET
+# - SLF
+# - SIM
+# - TCH
+# - INT
+# - ARG
+# - PTH
+# - TD
+# - FUR
+# - PL
+# - RUF (except RUF001)
+select = ['E4', 'E7', 'E9', 'F', 'I', 'FLY', 'C901']
+ignore = [
+  'E402',
+  'E741',
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.ruff.lint.mccabe]
+# Flag errors (`C901`) whenever the complexity level exceeds 5.
+max-complexity = 10
+
+[tool.ruff.format]
+quote-style = 'preserve'
+docstring-code-format = true
