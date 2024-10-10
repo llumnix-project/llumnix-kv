@@ -1,0 +1,124 @@
+
+#ifndef KVTRANSFER_INCLUDE_COMMON_H_
+#define KVTRANSFER_INCLUDE_COMMON_H_
+#pragma once
+
+#include <cstdint>
+#include <atomic>
+#include <string>
+#include <vector>
+
+#define MAX_OTHER_INFO_LEN (8192)
+#define INVALID_INST_WORKER_ID (UINT32_MAX)
+#define KB (1ULL << 10ULL) // 1KB
+
+namespace blade_llm {
+
+class noncopyable {
+ public:
+  noncopyable(const noncopyable &) = delete;
+  void operator=(const noncopyable &) = delete;
+
+ protected:
+  noncopyable() = default;
+  ~noncopyable() = default;
+};
+
+typedef uint32_t InstanceId;
+typedef uint32_t WorkerId;
+typedef std::string RequestId;
+
+struct WorkerInfo {
+  InstanceId inst_id;
+  WorkerId worker_id;
+  uint32_t tp_size;
+  uint32_t worker_tp_rank;
+  uint32_t block_size;
+  uint32_t token_size;
+  uint32_t transfer_type{0};
+  char addr_url[64];
+  char other_info[MAX_OTHER_INFO_LEN];
+
+  WorkerInfo() :
+      inst_id(INVALID_INST_WORKER_ID),
+      worker_id(INVALID_INST_WORKER_ID),
+      tp_size(0),
+      worker_tp_rank(0),
+      block_size(0),
+      token_size(0) {};
+
+  WorkerInfo(InstanceId i_id, WorkerId w_id) :
+      inst_id(i_id),
+      worker_id(w_id),
+      tp_size(1),
+      worker_tp_rank(0),
+      block_size(16 * KB),
+      token_size(KB) {};
+
+  WorkerInfo(InstanceId inst_id,
+             WorkerId worker_id,
+             uint32_t tp_size,
+             uint32_t worker_tp_rank,
+             uint32_t block_size,
+             uint32_t token_size,
+             uint32_t transfer_type) :
+      inst_id(inst_id),
+      worker_id(worker_id),
+      tp_size(tp_size),
+      worker_tp_rank(worker_tp_rank),
+      block_size(block_size),
+      token_size(token_size),
+      transfer_type(transfer_type) {};
+};
+
+class RequestInfo {
+ public:
+  const InstanceId dst_inst_id_;
+  const WorkerId dst_worker_id_;
+  const RequestId req_id_;
+
+  RequestInfo(InstanceId dst_inst_id,
+              WorkerId dst_worker_id,
+              const RequestId &req_id,
+              const std::vector<uint32_t> &src_blocks,
+              const std::vector<uint32_t> &dst_blocks) :
+      dst_inst_id_(dst_inst_id),
+      dst_worker_id_(dst_worker_id),
+      is_all_transferred_(false),
+      req_id_(req_id),
+      src_blocks_(src_blocks),
+      dst_blocks_(dst_blocks) {};
+  RequestInfo(RequestInfo &&other) noexcept:
+      dst_inst_id_(other.dst_inst_id_),
+      dst_worker_id_(other.dst_worker_id_),
+      req_id_(other.req_id_),
+      src_blocks_(other.src_blocks_),
+      dst_blocks_(other.dst_blocks_),
+      seen_tokens_(other.seen_tokens_),
+      new_tokens_(other.new_tokens_),
+      reach_last_token_(other.reach_last_token_) {
+    is_all_transferred_ = other.is_all_transferred_.load(std::memory_order_relaxed);
+  }
+  RequestInfo &set_seen_tokens(uint32_t s_token);
+  RequestInfo &add_new_tokens(uint32_t n_token, bool has_last);
+
+  void clear_new_tokens() const;
+  void set_transfer_done() const;
+  [[nodiscard]] const std::vector<uint32_t> &src_blocks() const;
+  [[nodiscard]] const std::vector<uint32_t> &dst_blocks() const;
+  [[nodiscard]] uint32_t seen_tokens() const;
+  [[nodiscard]] uint32_t new_tokens() const;
+  [[nodiscard]] bool reach_last_token() const;
+  [[nodiscard]] bool is_all_transferred() const;
+
+ private:
+  uint32_t seen_tokens_{0};
+  uint32_t new_tokens_{0};
+  bool reach_last_token_{false};
+  std::vector<uint32_t> src_blocks_;
+  std::vector<uint32_t> dst_blocks_;
+  std::atomic_bool is_all_transferred_{false};
+};
+} // namespace blade_llm
+
+#endif //KVTRANSFER_INCLUDE_COMMON_H_
