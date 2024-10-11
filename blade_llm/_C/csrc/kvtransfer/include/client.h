@@ -12,6 +12,7 @@
 #include "context.h"
 #include "tx_stub.h"
 #include "utils/semaphore.h"
+#include "utils/thread_pool.h"
 #include "error.h"
 
 namespace blade_llm {
@@ -20,9 +21,8 @@ class KvTransferClient : public noncopyable {
 
  public:
   KvTransferClient(std::unique_ptr<Context> &&ctx,
-                   std::unique_ptr<IChannelFactory> &&chf = nullptr);
+                   std::unique_ptr<ISendStubFactory> &&factory);
   Result<bool> add_target(InstanceId, WorkerId, uint32_t start_layer, uint32_t num_layers);
-  Result<bool> add_target(InstanceId, WorkerId, SendStub &&stub);
   Result<bool> submit_req_send(InstanceId dst_inst,
                                WorkerId dst_worker,
                                const RequestId &,
@@ -50,7 +50,8 @@ class KvTransferClient : public noncopyable {
   std::unordered_map<RequestId, std::vector<RequestInfo>> reqs_;
   std::unordered_map<InstanceId, std::vector<SendStub>> targets_;
   std::queue<std::shared_ptr<StepGuard>> step_guards_;
-  std::unique_ptr<IChannelFactory> chf_;
+  std::unique_ptr<ISendStubFactory> stub_factory_;
+  ThreadPool single_thd_;
 };
 }
 #endif //KVTRANSFER_INCLUDE_CLIENT_H_

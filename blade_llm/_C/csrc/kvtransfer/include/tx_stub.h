@@ -8,6 +8,7 @@
 #include "common.h"
 #include "channel.h"
 #include "step.h"
+#include "utils/block_queue.h"
 
 namespace blade_llm {
 
@@ -28,11 +29,18 @@ struct BatchSendTask {
 
 class ISendStub {
  public:
-  virtual void connect(Context *ctx, std::unique_ptr<IChannel> &&ch, const WorkerInfo &dst_info) = 0;
-  virtual void send_batch(const BatchSendTask &batch) = 0;
+  virtual void connect(Context*, const WorkerInfo &dst) = 0;
+  virtual void send_batch(const BatchSendTask &) = 0;
   virtual bool is_running() = 0;
   virtual ~ISendStub() = default;
 };
+
 using SendStub = std::unique_ptr<ISendStub>;
+
+class ISendStubFactory {
+ public:
+  virtual SendStub create_stub(InstanceId, WorkerId, uint32_t start_layer, uint32_t num_layers) = 0;
+  virtual ~ISendStubFactory() = default;
+};
 }
 #endif //KVTRANSFER_INCLUDE_UTILS_TX_STUB_H_

@@ -73,25 +73,25 @@ struct WorkerInfo {
 
 class RequestInfo {
  public:
-  const InstanceId dst_inst_id_;
-  const WorkerId dst_worker_id_;
-  const RequestId req_id_;
+  const InstanceId dst_inst_id;
+  const WorkerId dst_worker_id;
+  const RequestId req_id;
 
   RequestInfo(InstanceId dst_inst_id,
               WorkerId dst_worker_id,
               const RequestId &req_id,
               const std::vector<uint32_t> &src_blocks,
               const std::vector<uint32_t> &dst_blocks) :
-      dst_inst_id_(dst_inst_id),
-      dst_worker_id_(dst_worker_id),
+      dst_inst_id(dst_inst_id),
+      dst_worker_id(dst_worker_id),
       is_all_transferred_(false),
-      req_id_(req_id),
+      req_id(req_id),
       src_blocks_(src_blocks),
       dst_blocks_(dst_blocks) {};
   RequestInfo(RequestInfo &&other) noexcept:
-      dst_inst_id_(other.dst_inst_id_),
-      dst_worker_id_(other.dst_worker_id_),
-      req_id_(other.req_id_),
+      dst_inst_id(other.dst_inst_id),
+      dst_worker_id(other.dst_worker_id),
+      req_id(other.req_id),
       src_blocks_(other.src_blocks_),
       dst_blocks_(other.dst_blocks_),
       seen_tokens_(other.seen_tokens_),

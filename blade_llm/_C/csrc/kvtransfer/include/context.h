@@ -8,6 +8,7 @@
 #include <cassert>
 #include "common.h"
 #include "protocol.h"
+
 namespace blade_llm {
 class ICUDABarrier {
  public:

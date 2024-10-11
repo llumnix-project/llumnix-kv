@@ -8,7 +8,7 @@ bool IpcBlock::operator==(const IpcBlock &other) const {
       length == other.length;
 }
 
-std::unique_ptr<IChannel> DefaultChannelFactory::create_channel(Context *ctx) {
+std::unique_ptr<IChannel> create_channel(Context *ctx) {
   auto type = ctx->transfer_type();
   switch (type) {
     case CUDA_IPC:

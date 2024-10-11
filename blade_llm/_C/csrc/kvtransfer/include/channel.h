@@ -31,17 +31,6 @@ class IChannel {
 };
 
 using Channel = std::unique_ptr<IChannel>;
-
-class IChannelFactory {
- public:
-  virtual std::unique_ptr<IChannel> create_channel(Context *ctx) = 0;
-  virtual ~IChannelFactory() = default;
-};
-
-class DefaultChannelFactory : public IChannelFactory {
- public:
-  DefaultChannelFactory() = default;
-  std::unique_ptr<IChannel> create_channel(Context *ctx) override;
-};
+std::unique_ptr<IChannel> create_channel(Context *ctx);
 }
 #endif //KVTRANSFER_INCLUDE_CHANNEL_H_

@@ -29,7 +29,7 @@ void StepGuard::wait_layers() {
     if (cu_barrier_ != nullptr) {
       cu_barrier_->wait(layer_i);
     }
-    step_->notify_layer_ready(layer_i);
+    step_->notify_layer_ready(layer_i + 1);
     ready_layers_.fetch_add(1, std::memory_order_seq_cst);
   }
 }
