@@ -41,18 +41,14 @@ target_include_directories(kvtransfer PUBLIC ${TARGET_INCLUDE_DIRS})
 target_link_libraries(kvtransfer PUBLIC ${TARGET_LINK_LIBS})
 
 if (BUILD_TESTS)
-    #    include(FetchContent)
-    #    FetchContent_Declare(
-    #            googletest
-    #            GIT_REPOSITORY https://github.com/google/googletest.git
-    #            GIT_TAG        703bd9caab50b139428cea1aaff9974ebee5742e # release-1.10.0
-    #    )
-    #    FetchContent_MakeAvailable(googletest)
     enable_testing()
-    find_package(GTest REQUIRED)
-    if(NOT GTest_FOUND)
-        message(FATAL_ERROR "GTest not found;")
-    endif ()
+    include(FetchContent)
+    FetchContent_Declare(
+            googletest
+            GIT_REPOSITORY https://github.com/google/googletest.git
+            GIT_TAG        b514bdc898e2951020cbdca1304b75f5950d1f59 # release-1.15.2
+    )
+    FetchContent_MakeAvailable(googletest)
     file(GLOB_RECURSE TESTS CONFIGURE_DEPENDS tests/*.cpp tests/*.cu)
     add_executable(kv_transfer_test ${TESTS})
     target_include_directories(kv_transfer_test PUBLIC include ${GTEST_INCLUDE_DIRS})
