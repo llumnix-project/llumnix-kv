@@ -26,9 +26,7 @@ bool Step::check_done() {
 void StepGuard::wait_layers() {
   for(auto layer_i = 0; layer_i < num_layers; layer_i ++ ) {
     record_signal_.wait(layer_i);
-    if (cu_barrier_ != nullptr) {
-      cu_barrier_->wait(layer_i);
-    }
+    cu_barrier_->wait(layer_i);
     step_->notify_layer_ready(layer_i + 1);
     ready_layers_.fetch_add(1, std::memory_order_seq_cst);
   }

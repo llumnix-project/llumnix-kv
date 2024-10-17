@@ -1,0 +1,18 @@
+#include "utils/timer.h"
+namespace blade_llm {
+TimeWatch::TimeWatch() {
+  start = std::chrono::system_clock::now();
+}
+
+size_t TimeWatch::get_elapse_ms() {
+  auto end = std::chrono::system_clock::now();
+  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+  return duration.count();
+}
+
+size_t TimeWatch::get_elapse_us() {
+  auto end = std::chrono::system_clock::now();
+  auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+  return duration.count();
+}
+}

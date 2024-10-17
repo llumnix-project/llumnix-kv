@@ -20,8 +20,8 @@ namespace blade_llm {
 class KvTransferClient : public noncopyable {
 
  public:
-  KvTransferClient(std::unique_ptr<Context> &&ctx,
-                   std::unique_ptr<ISendStubFactory> &&factory);
+  explicit KvTransferClient(std::unique_ptr<Context> &&ctx,
+                   std::unique_ptr<ISendStubFactory> &&factory = nullptr);
   Result<bool> add_target(InstanceId, WorkerId, uint32_t start_layer, uint32_t num_layers);
   Result<bool> submit_req_send(InstanceId dst_inst,
                                WorkerId dst_worker,

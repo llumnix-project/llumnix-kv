@@ -15,7 +15,7 @@ namespace blade_llm {
 struct BatchSendTask {
 
   BatchSendTask() = default;
-  BatchSendTask(std::vector<const RequestInfo *> &&ts) {
+  explicit BatchSendTask(std::vector<const RequestInfo *> &&ts) {
     tasks = std::make_shared<std::vector<const RequestInfo *>>(std::move(ts));
   };
   BatchSendTask(std::shared_ptr<Step> &s,
@@ -41,6 +41,43 @@ class ISendStubFactory {
  public:
   virtual SendStub create_stub(InstanceId, WorkerId, uint32_t start_layer, uint32_t num_layers) = 0;
   virtual ~ISendStubFactory() = default;
+};
+
+class KvSendStub : public ISendStub, public noncopyable {
+ public:
+  KvSendStub(InstanceId dst_inst_id,
+             WorkerId dst_worker_id,
+             uint32_t start_layer,
+             uint32_t num_layers,
+             Channel &&channel) :
+      dst_info_(dst_inst_id, dst_worker_id),
+      start_layer_(start_layer),
+      num_layers_(num_layers),
+      ch_(std::move(channel)) {};
+  KvSendStub(KvSendStub &&other) noexcept;
+  void connect(Context *, const WorkerInfo &dst_info) override;
+  void send_batch(const BatchSendTask &) override;
+  bool is_running() override;
+  ~KvSendStub() override;
+ private:
+  WorkerInfo dst_info_;
+  uint32_t start_layer_{0};
+  uint32_t num_layers_{0};
+  std::unique_ptr<IChannel> ch_;
+  std::atomic_bool is_running_{false};
+  BlockingQueue<BatchSendTask> send_tasks_{};
+  std::optional<std::thread> send_backend_;
+};
+
+class KvSendStubFactory : public ISendStubFactory {
+ public:
+  explicit KvSendStubFactory(Context *ctx) : ctx_(ctx) {}
+  SendStub create_stub(InstanceId dst_inst_id,
+                       WorkerId dst_worker_id,
+                       uint32_t start_layer,
+                       uint32_t num_layers) override;
+ private:
+  Context *ctx_;
 };
 }
 #endif //KVTRANSFER_INCLUDE_UTILS_TX_STUB_H_

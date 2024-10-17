@@ -13,26 +13,26 @@
 namespace blade_llm {
 class ReqRecvTask : public noncopyable {
  public:
-  const RequestId req_id_;
-  const InstanceId src_inst_id_;
-  const WorkerId src_worker_id_;
+  const RequestId req_id;
+  const InstanceId src_inst_id;
+  const WorkerId src_worker_id;
 
   ReqRecvTask(InstanceId src_inst_id, WorkerId src_worker_id, const RequestId &req_id) :
-      req_id_(req_id),
-      src_inst_id_(src_inst_id),
-      src_worker_id_(src_worker_id) {};
+      req_id(req_id),
+      src_inst_id(src_inst_id),
+      src_worker_id(src_worker_id) {};
   ReqRecvTask(InstanceId src_inst_id,
               WorkerId src_worker_id,
               const RequestId &req_id,
               std::vector<uint32_t> &&blocks) :
-      req_id_(req_id),
-      src_inst_id_(src_inst_id),
-      src_worker_id_(src_worker_id),
+      req_id(req_id),
+      src_inst_id(src_inst_id),
+      src_worker_id(src_worker_id),
       dst_blocks_(std::move(blocks)) {};
   ReqRecvTask(ReqRecvTask &&other) :
-      req_id_(other.req_id_),
-      src_inst_id_(other.src_inst_id_),
-      src_worker_id_(other.src_worker_id_),
+      req_id(other.req_id),
+      src_inst_id(other.src_inst_id),
+      src_worker_id(other.src_worker_id),
       dst_blocks_(std::move(other.dst_blocks_)) {};
   void set_dst_blocks(const std::vector<uint32_t> &block_ids);
   const std::vector<uint32_t> &dst_blocks() const;

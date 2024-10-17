@@ -1,17 +1,35 @@
-
 #include <cassert>
+#include <stdexcept>
 #include "context.h"
+
 namespace blade_llm {
+
+class NoCudaBarrier : public ICUDABarrier {
+ public:
+  NoCudaBarrier() = default;
+  void wait(uint32_t layer_idx) override {
+    // do nothing;
+  }
+};
+
+Context::Context(InstanceId inst_id, WorkerId worker_id) :
+  worker_info_(inst_id, worker_id),
+  cuda_barrier_(std::make_unique<NoCudaBarrier>()) {};
+
 void Context::set_tp(uint32_t tp_size, uint32_t worker_tp_rank) {
   worker_info_.tp_size = tp_size;
   worker_info_.worker_tp_rank = worker_tp_rank;
 }
 
-void Context::set_transfer_type(uint32_t type) {
-  transfer_type_ = type_from(type);
+void Context::set_transfer_type(TransferType t_type) {
+  transfer_type_ = t_type;
 }
 
 void Context::set_block_params(uint32_t block_size, uint32_t token_size, uint32_t layer_num_blocks) {
+  if (block_size < token_size || block_size % token_size != 0) {
+    throw std::runtime_error("block_size must be a multiple of token_size");
+  }
+
   worker_info_.block_size = block_size;
   worker_info_.token_size = token_size;
   layer_num_blocks_ = layer_num_blocks;
@@ -24,6 +42,9 @@ void Context::set_layer_data_address(uint32_t device_id, const std::vector<uint6
 }
 
 void Context::set_cuda_barrier(std::unique_ptr<ICUDABarrier> &&barrier) {
+  if (barrier == nullptr) {
+    throw std::runtime_error("cuda barrier can't be null;");
+  }
   cuda_barrier_ = std::move(barrier);
 }
 
@@ -32,6 +53,7 @@ WorkerInfo *Context::worker_info_mutable() {
 }
 
 ICUDABarrier *Context::cuda_barrier() {
+  assert(cuda_barrier_ != nullptr);
   return cuda_barrier_.get();
 }
 

@@ -18,10 +18,9 @@ class ICUDABarrier {
 
 class Context : noncopyable {
  public:
-  Context(InstanceId inst_id, WorkerId worker_id) : worker_info_(inst_id, worker_id) {};
-
+  Context(InstanceId inst_id, WorkerId worker_id);
   void set_tp(uint32_t tp_size, uint32_t worker_tp_rank);
-  void set_transfer_type(uint32_t type);
+  void set_transfer_type(TransferType);
   void set_block_params(uint32_t block_size, uint32_t token_size, uint32_t layer_num_blocks);
   void set_layer_data_address(uint32_t device_id, const std::vector<uint64_t> &layers);
   void set_cuda_barrier(std::unique_ptr<ICUDABarrier> &&barrier);
