@@ -1,6 +1,7 @@
 #include <memory>
 #include <stdexcept>
 #include "protocol.h"
+#include "protocol/rdma_protocol.h"
 
 namespace blade_llm {
 
@@ -22,8 +23,11 @@ std::unique_ptr<IProtocolCtx> create_protocol_ctx(const WorkerInfo &info,
       return nullptr;
     case RDMA_DIRECT: {
 #ifdef ENABLE_RDMA
-      // TODO
-      throw std::runtime_error("RDMA Direct transport todo;");
+      auto gpu_dev_id = info.device_id;
+      uint64_t layer_size = info.block_size * layer_num_blocks;
+      return std::make_unique<CliBarexCtx>(gpu_dev_id, "prefill-mp", "prefill", 4,
+                                           std::make_unique<CliCtxCallback>(),
+                                           layer_addrs, layer_size);
 #else
       throw std::runtime_error("RDMA Direct transport not support yet;");
 #endif

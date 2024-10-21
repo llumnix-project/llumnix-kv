@@ -43,7 +43,7 @@ void Context::set_block_params(uint32_t block_size, uint32_t token_size, uint32_
 }
 
 void Context::set_layer_data_address(uint32_t device_id, const std::vector<uint64_t> &layers) {
-  device_id_ = (int)device_id;
+  worker_info_.device_id = (int)device_id;
   num_layers_ = layers.size();
   layer_data_address_ = layers;
 }
@@ -72,7 +72,7 @@ const std::vector<uint64_t> &Context::layer_data_address() const {
 }
 
 int Context::device_id() const {
-  return device_id_;
+  return worker_info_.device_id;
 }
 
 uint32_t Context::num_layers() const {

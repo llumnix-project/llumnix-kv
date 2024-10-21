@@ -54,7 +54,6 @@ class Context : noncopyable {
   }
 
  private:
-  int device_id_{-1};
   WorkerInfo worker_info_;
   TransferType transfer_type_{};
   uint32_t num_layers_{};

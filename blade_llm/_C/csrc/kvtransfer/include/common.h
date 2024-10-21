@@ -36,6 +36,7 @@ struct WorkerInfo {
   uint32_t block_size;
   uint32_t token_size;
   uint32_t transfer_type{0};
+  int device_id;
   char addr_url[64];
   char other_info[MAX_OTHER_INFO_LEN];
 
