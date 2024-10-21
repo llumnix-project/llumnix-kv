@@ -77,6 +77,8 @@ Result<bool> KvTransferClient::submit_req_send(InstanceId dst_inst_id,
         return ret;
       }
     } else {
+      LOG(ERROR) << "KVT client: submit request(" << req_id << ") to unknown target ("
+                 << dst_inst_id << ":" << dst_worker_id << ");";
       return Result<bool>::error(ErrorCode::TARGET_DISCONNECTED, "target worker not connect;");
     }
   }

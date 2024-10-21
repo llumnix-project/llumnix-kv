@@ -24,6 +24,7 @@ bool Step::check_done() {
 }
 
 void StepGuard::wait_layers() {
+  step_->notify_layer_ready(0);
   for(auto layer_i = 0; layer_i < num_layers; layer_i ++ ) {
     record_signal_.wait(layer_i);
     cu_barrier_->wait(layer_i);

@@ -26,3 +26,4 @@ TEST(ContextTest, TestContextBasicMethod) {
   EXPECT_THROW(ctx.set_block_params(KB, 300, 1), std::runtime_error);
   EXPECT_THROW(ctx.set_cuda_barrier(nullptr), std::runtime_error);
 }
+

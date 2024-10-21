@@ -1,5 +1,6 @@
 #include <stdexcept>
 #include "channel.h"
+#include "protocol/cuda_ipc.h"
 
 namespace blade_llm {
 bool IpcBlock::operator==(const IpcBlock &other) const {
@@ -12,8 +13,7 @@ std::unique_ptr<IChannel> create_channel(Context *ctx) {
   auto type = ctx->transfer_type();
   switch (type) {
     case CUDA_IPC:
-      //TODO: return std::make_unique<CudaIpcChannel>(ctx);
-      throw std::runtime_error("cuda channel todo;");
+      return std::make_unique<CudaIpcChannel>(ctx);
     case RDMA_DIRECT:
 #ifdef ENABLE_RDMA
       //TODO: return std::make_unique<RDMAChannel>(ctx);

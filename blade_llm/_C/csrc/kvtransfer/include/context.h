@@ -9,11 +9,21 @@
 #include "common.h"
 #include "protocol.h"
 
+#define MAX_WORKERS_PER_INST (8)
+
 namespace blade_llm {
 class ICUDABarrier {
  public:
   virtual ~ICUDABarrier() = default;
   virtual void wait(uint32_t layer_idx) = 0;
+};
+
+class CudaEventBarrier : public ICUDABarrier {
+ public:
+  explicit CudaEventBarrier(const std::vector<uint64_t> event_addr) : event_addrs_(event_addr) {}
+  void wait(uint32_t layer_idx) override;
+ private:
+  std::vector<uint64_t> event_addrs_;
 };
 
 class Context : noncopyable {

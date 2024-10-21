@@ -69,7 +69,7 @@ class KvSendStub : public ISendStub, public noncopyable {
   std::optional<std::thread> send_backend_;
 };
 
-class KvSendStubFactory : public ISendStubFactory {
+class KvSendStubFactory : public ISendStubFactory, public noncopyable {
  public:
   explicit KvSendStubFactory(Context *ctx) : ctx_(ctx) {}
   SendStub create_stub(InstanceId dst_inst_id,

@@ -104,14 +104,18 @@ TEST(KVTransferClientTest, SendTo1) {
                                       req1.src_blocks(), req1.dst_blocks());
     EXPECT_TRUE(ret.is_ok());
     client.start_send();
+    client.notify_event_record();
     client.flush_send();
   }
   {
+    auto unknown_submit = client.submit_delta_send("UNKNOWN_REQ_ID", 1, 1, false);
+    EXPECT_FALSE(unknown_submit.is_ok());
     req1.set_seen_tokens(1).add_new_tokens(1, true);
     auto ret = client.submit_delta_send(req1.req_id, 1,
                                         1, req1.reach_last_token());
     EXPECT_TRUE(ret.is_ok());
     client.start_send();
+    client.notify_event_record();
     client.flush_send();
   }
 }
@@ -169,6 +173,7 @@ TEST(KVTransferClientTest, SendTo2) {
     EXPECT_TRUE(ret.is_ok());
   }
   client.start_send();
+  client.notify_event_record();
   client.flush_send();
 }
 
@@ -221,5 +226,6 @@ TEST(KVTransferClientTest, SendToPP2) {
     EXPECT_TRUE(ret.is_ok());
   }
   client.start_send();
+  client.notify_event_record();
   client.flush_send();
 }

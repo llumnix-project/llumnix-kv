@@ -1,6 +1,7 @@
 #include <cassert>
 #include <stdexcept>
 #include "context.h"
+#include "utils/cuda_helper.h"
 
 namespace blade_llm {
 
@@ -11,6 +12,12 @@ class NoCudaBarrier : public ICUDABarrier {
     // do nothing;
   }
 };
+
+void CudaEventBarrier::wait(uint32_t layer_idx) {
+  if (layer_idx < event_addrs_.size()) {
+    cuda_wait_event(event_addrs_[layer_idx]);
+  }
+}
 
 Context::Context(InstanceId inst_id, WorkerId worker_id) :
   worker_info_(inst_id, worker_id),

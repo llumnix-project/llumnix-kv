@@ -110,7 +110,6 @@ static void pull_send(size_t start_layer,
   auto dst_worker_id = dst_info->worker_id;
   std::vector<IpcBlock> send_blocks;
   std::vector<const RequestInfo *> send_reqs;
-  running->store(true, std::memory_order_release);
   LOG(INFO) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id
             << "): start to send kv of layer[" << start_layer << ", " << num_layers << ");";
 
@@ -170,7 +169,7 @@ static void pull_send(size_t start_layer,
     batch.step->finish_one();
     LOG(INFO) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id
               << "): finish send " << send_reqs.size() << " requests("
-              << sb_num << "->" << cnt << " blocks), elapse: total use"
+              << sb_num << "->" << cnt << " blocks), elapse: total use "
               << elapse << "us, wait use " << wait_time_us << "us;";
     auto iter = Iterator<const RequestInfo *>::copy_from(send_reqs)
         .filter([](auto t) { return t->reach_last_token(); });
@@ -219,6 +218,7 @@ void KvSendStub::connect(Context *ctx, const WorkerInfo &dst_info) {
   dst_info_ = dst_info;
   send_backend_.emplace(&pull_send, start_layer_, num_layers_, &ctx->worker_info(),
                         &dst_info_, ch_.get(), &is_running_, &send_tasks_);
+  is_running_.store(true, std::memory_order_release);
 }
 
 void KvSendStub::send_batch(const BatchSendTask& batch) {
