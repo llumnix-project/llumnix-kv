@@ -25,6 +25,7 @@ class IProtocolCtx {
 std::unique_ptr<IProtocolCtx> create_protocol_ctx(const WorkerInfo &info, TransferType type,
                                                   uint32_t layer_num_blocks,
                                                   const std::vector<uint64_t> &layer_addrs);
+std::vector<TransferType> get_supported_transfer_types();
 
 } // namespace blade_llm
 

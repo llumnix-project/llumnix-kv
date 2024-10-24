@@ -125,7 +125,7 @@ TEST(KVTransferClientTest, TestKernelSyncAndDataTransfer) {
   auto ret = client.submit_req_send(0, 0, TEST_REQ_ID, 16 * 4, true, {0, 1, 2, 3}, dst_blocks);
   EXPECT_TRUE(ret.is_ok());
   client.start_send();
-  std::this_thread::sleep_for(std::chrono::milliseconds (100));
+  std::this_thread::sleep_for(std::chrono::milliseconds (100)); // let start_send to run;
   // mock layer 0
   clientTestKernel<<<blocks, threads, 0, stream>>>((char *)(layer_0), data_size,  10);
   cudaEventRecord(events[0], stream);
@@ -134,6 +134,8 @@ TEST(KVTransferClientTest, TestKernelSyncAndDataTransfer) {
   clientTestKernel<<<blocks, threads, 0, stream>>>((char *)(layer_1), data_size,  20);
   cudaEventRecord(events[1], stream);
   client.notify_event_record();
+  cudaStreamSynchronize(stream);
+  LOG(INFO) << "cuda stream synced;";
   client.flush_send();
 
   int cnt = 0;

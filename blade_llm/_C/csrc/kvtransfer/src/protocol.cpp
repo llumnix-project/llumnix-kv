@@ -35,4 +35,13 @@ std::unique_ptr<IProtocolCtx> create_protocol_ctx(const WorkerInfo &info,
     default:throw std::runtime_error("Unknown transport type;");
   }
 }
+
+std::vector<TransferType> get_supported_transfer_types() {
+  std::vector<TransferType> ret;
+  ret.push_back(CUDA_IPC);
+#ifdef ENABLE_RDMA
+  ret.push_back(RDMA_DIRECT);
+#endif
+  return ret;
+}
 }
