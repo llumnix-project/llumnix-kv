@@ -117,9 +117,6 @@ static void pull_send(size_t start_layer,
   size_t max_block_n = 0;
   size_t total_block_n = 0;
   size_t finished_req_n = 0;
-  size_t min_size = std::numeric_limits<size_t>::max();
-  size_t max_size = 0;
-  size_t total_size = 0;
 
   for (;;) {
     BatchSendTask batch;
@@ -152,9 +149,6 @@ static void pull_send(size_t start_layer,
 
     auto const sb_num = send_blocks.size();
     auto const [min, max, total, cnt] = merge_interval(send_blocks);
-    min_size = std::min(min, min_size);
-    max_size = std::max(max, max_size);
-    total_size += total;
 
     for (auto i = start_layer; i < num_layers; ++i) {
       TimeWatch wait_start;
@@ -169,7 +163,9 @@ static void pull_send(size_t start_layer,
     batch.step->finish_one();
     LOG(INFO) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id
               << "): finish send " << send_reqs.size() << " requests("
-              << sb_num << "->" << cnt << " blocks), elapse: total use "
+              << sb_num << "->" << cnt << " blocks), block_size(min=" << min
+              <<",max=" << max << ",total=" << total
+              << "), elapse: total use "
               << elapse << "us, wait use " << wait_time_us << "us;";
     auto iter = Iterator<const RequestInfo *>::copy_from(send_reqs)
         .filter([](auto t) { return t->reach_last_token(); });
@@ -194,8 +190,7 @@ static void pull_send(size_t start_layer,
 
     if (step_idx > 0 && (step_idx & 15) == 0) {
       LOG(INFO) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id
-                << ") metric: block_size(min=" << min_size << ",max=" << max_size << "total=" << total_size
-                << "), req_blocks(min=" << min_block_n << ",max=" << max_block_n << ", total=" << total_block_n
+                << ") metric: req_blocks(min=" << min_block_n << ",max=" << max_block_n << ",total=" << total_block_n
                 << "), finished_reqs=" << finished_req_n << ")";
     }
   }
