@@ -44,7 +44,7 @@ Result<bool> KvTransferService::submit_recv(InstanceId src_inst_id,
       .set_dst_blocks(dst_block_ids);
   LOG(INFO) << "KVT service: accept request(" << req_id << ") recv from worker("
             << src_inst_id << "," << src_worker_id << ")";
-  return { true };
+  return {true};
 }
 
 Result<bool> KvTransferService::check_recv_done(const RequestId &req_id) {
@@ -53,7 +53,7 @@ Result<bool> KvTransferService::check_recv_done(const RequestId &req_id) {
     LOG(ERROR) << "request " << req_id << " not submit to recv;";
     return Result<bool>::error(REQUEST_NOT_FOUND, "receive of request not submit;");
   }
-  for(const auto &r: f->second) {
+  for (const auto &r : f->second) {
     bool is_done = false;
     std::shared_lock<std::shared_mutex> rlock(conn_m_);
     if (auto inst = recv_conns_.find(r.src_inst_id);
@@ -74,7 +74,7 @@ Result<bool> KvTransferService::check_recv_done(const RequestId &req_id) {
     }
   }
   auto fa = reqs_.find(req_id);
-  for(const auto &r: fa->second) {
+  for (const auto &r : fa->second) {
     std::shared_lock<std::shared_mutex> rlock(conn_m_);
     recv_conns_[r.src_inst_id][r.src_worker_id]->earse(r.req_id);
   }

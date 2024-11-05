@@ -1,47 +1,56 @@
-#include <memory>
-#include <stdexcept>
 #include "protocol.h"
-#include "protocol/rdma_protocol.h"
 
 namespace blade_llm {
 
-TransferType type_from(uint32_t v) {
-  switch (v) {
-    case 1:return CUDA_IPC;
-    case 2:return RDMA_DIRECT;
-    default:return UNKNOWN;
-  }
+TransferProtocol TransferProtocol::cuda_ipc() {
+  return {TransferProtocol::Kind::CUDA_IPC};
 }
 
-std::unique_ptr<IProtocolCtx> create_protocol_ctx(const WorkerInfo &info,
-                                                  TransferType type,
-                                                  uint32_t layer_num_blocks,
-                                                  const std::vector<uint64_t> &layer_addrs) {
+TransferProtocol TransferProtocol::rdma_direct() {
+  return {TransferProtocol::Kind::RDMA_DIRECT};
+}
+
+std::string TransferProtocol::to_string() const {
   switch (type) {
-    case CUDA_IPC:
-      // cuda ipc does not need the ctx.
-      return nullptr;
-    case RDMA_DIRECT: {
-#ifdef ENABLE_RDMA
-      auto gpu_dev_id = info.device_id;
-      uint64_t layer_size = info.block_size * layer_num_blocks;
-      return std::make_unique<CliBarexCtx>(gpu_dev_id, "prefill-mp", "prefill", 4,
-                                           std::make_unique<CliCtxCallback>(),
-                                           layer_addrs, layer_size);
-#else
-      throw std::runtime_error("RDMA Direct transport not support yet;");
-#endif
-    }
-    default:throw std::runtime_error("Unknown transport type;");
+    case Kind::CUDA_IPC:return "CUDA_IPC";
+    case Kind::RDMA_DIRECT:return "RDMA_DIRECT";
+    default:return "UNKNOWN";
   }
 }
 
-std::vector<TransferType> get_supported_transfer_types() {
-  std::vector<TransferType> ret;
-  ret.push_back(CUDA_IPC);
+void SupportTransferProtocols::set_support(const TransferProtocol &t) {
+  protocols_ |= t.type;
+}
+
+void SupportTransferProtocols::set_support(TransferProtocol::Kind t) {
+  protocols_ |= t;
+}
+
+bool SupportTransferProtocols::is_support(TransferProtocol::Kind t) const {
+  return (protocols_ & t) > 0;
+}
+
+bool SupportTransferProtocols::is_support(const TransferProtocol &t) const {
+  return (protocols_ & t.type) > 0;
+}
+
+std::vector<TransferProtocol> SupportTransferProtocols::as_vector() const {
+  std::vector<TransferProtocol> v;
+  if (is_support(TransferProtocol::Kind::CUDA_IPC)) {
+    v.push_back(TransferProtocol::cuda_ipc());
+  }
+  if (is_support(TransferProtocol::Kind::RDMA_DIRECT)) {
+    v.push_back(TransferProtocol::rdma_direct());
+  }
+  return v;
+}
+
+SupportTransferProtocols get_library_support_protocols() {
+  SupportTransferProtocols s;
+  s.set_support(TransferProtocol::Kind::CUDA_IPC);
 #ifdef ENABLE_RDMA
-  ret.push_back(RDMA_DIRECT);
+  s.set_support(TransferProtocol::Kind::RDMA_DIRECT);
 #endif
-  return ret;
+  return s;
 }
 }

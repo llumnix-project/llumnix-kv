@@ -10,18 +10,31 @@ bool IpcBlock::operator==(const IpcBlock &other) const {
       length == other.length;
 }
 
-std::unique_ptr<IChannel> create_channel(Context *ctx) {
-  auto type = ctx->transfer_type();
-  switch (type) {
-    case CUDA_IPC:
-      return std::make_unique<CudaIpcChannel>(ctx);
-    case RDMA_DIRECT:
+std::unique_ptr<IChannel> create_channel(Context *ctx, const TransferProtocol &proto) {
+  if (!ctx->check_transfer_support(proto)) {
+    throw std::runtime_error("unsupported transfer protocol: " + proto.to_string());
+  }
+  switch (proto.type) {
+    case TransferProtocol::Kind::CUDA_IPC: {
+      auto proto_ctx = ctx->get_protocol_ctx<CudaIpcContext>(proto);
+      if (proto_ctx == nullptr) {
+        throw std::runtime_error("cuda channel context not registered;");
+      }
+      return std::make_unique<CudaIpcChannel>(ctx->inst_id, ctx->worker_id, proto_ctx);
+    }
+    case TransferProtocol::Kind::RDMA_DIRECT: {
 #ifdef ENABLE_RDMA
-      return std::make_unique<RDMAChannel>(ctx);
+      auto proto_ctx = ctx->get_protocol_ctx<RDMAProtoContext>(proto);
+      if (proto_ctx == nullptr) {
+        throw std::runtime_error("RDMA channel context not registered;");
+      }
+      return std::make_unique<RDMAChannel>(ctx->inst_id, ctx->worker_id, proto_ctx->cli_barex_ctx());
+
 #else
       throw std::runtime_error("RDMA Direct transport not support yet;");
 #endif
-    default:throw std::runtime_error("Unknown transport type;");
+    }
+    default:throw std::runtime_error("Unknown transport protocol;");
   }
 }
 }

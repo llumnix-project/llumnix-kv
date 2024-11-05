@@ -3,30 +3,42 @@
 
 #pragma once
 
+#include <string>
 #include <vector>
-#include <memory>
-#include "common.h"
 
 namespace blade_llm {
 
-enum TransferType {
-  UNKNOWN = 0,
-  CUDA_IPC = 1,
-  RDMA_DIRECT = 2,
-};
-
-TransferType type_from(uint32_t v);
-
-class IProtocolCtx {
+struct TransferProtocol {
  public:
-  virtual ~IProtocolCtx() = default;
+  enum Kind {
+    CUDA_IPC = 1,
+    RDMA_DIRECT = 1U << 1
+  };
+
+  TransferProtocol(Kind p): type(p) {}
+  static TransferProtocol cuda_ipc();
+  static TransferProtocol rdma_direct();
+  [[nodiscard]] std::string to_string() const;
+
+  Kind type;
 };
 
-std::unique_ptr<IProtocolCtx> create_protocol_ctx(const WorkerInfo &info, TransferType type,
-                                                  uint32_t layer_num_blocks,
-                                                  const std::vector<uint64_t> &layer_addrs);
-std::vector<TransferType> get_supported_transfer_types();
+class SupportTransferProtocols {
+ public:
+  SupportTransferProtocols() = default;
+  explicit SupportTransferProtocols(unsigned char p) : protocols_(p) {};
 
-} // namespace blade_llm
+  void set_support(const TransferProtocol& t);
+  void set_support(TransferProtocol::Kind t);
+  [[nodiscard]] bool is_support(TransferProtocol::Kind t) const;
+  [[nodiscard]] bool is_support(const TransferProtocol& t) const;
+  [[nodiscard]] std::vector<TransferProtocol> as_vector() const;
+  [[nodiscard]] unsigned char value() const { return protocols_; }
+ private:
+  unsigned char protocols_{0};
+};
 
+SupportTransferProtocols get_library_support_protocols();
+
+}
 #endif //KVTRANSFER_INCLUDE_PROTOCOL_H_

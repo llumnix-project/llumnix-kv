@@ -4,33 +4,37 @@
 #include "service.h"
 #include "server.h"
 #include "naming.h"
+#include "naming/shm_naming.h"
+#include "naming/tcpstore_naming.h"
 #include "protocol.h"
+#include "logging.h"
 
 namespace blade_llm {
 
-static KvTransferClient *KV_CLIENT = nullptr;
+static std::unique_ptr<KvTransferClient> KV_CLIENT = nullptr;
 static ITransferServer *KV_SERVER = nullptr;
 static KvTransferService *KV_SERVICE = nullptr;
+
 static thread_local std::optional<Error> ERROR_OPT = std::nullopt;
+static std::vector<TransferProtocol> LIBRARY_SUPPORT_TRANSFER_PROTOCOLS;
 
-static std::vector<std::string> LIBRARY_SUPPORT_TRANSFER_TYP;
+static NamingManager* init_naming() {
+  auto naming = new NamingManager();
+  naming->register_factory(std::make_unique<ShmNamingClientFactory>());
+#ifdef TORCH_FOUND
+  naming->register_factory(std::make_unique<TCPStoreNamingFactory>());
+#endif
+  return naming;
+}
 
-const std::vector<std::string>& support_transfer_types() {
-  if (LIBRARY_SUPPORT_TRANSFER_TYP.empty()) {
-    auto supported = get_supported_transfer_types();
-    for(auto t: supported) {
-      switch (t) {
-        case CUDA_IPC:
-          LIBRARY_SUPPORT_TRANSFER_TYP.push_back("CUDA_IPC");
-          break;
-        case RDMA_DIRECT:
-          LIBRARY_SUPPORT_TRANSFER_TYP.push_back("RDMA_DIRECT");
-          break;
-        default:break;
-      }
-    }
+static NamingManager *NAMING_MANAGER = init_naming();
+
+const std::vector<TransferProtocol> &support_transfer_protocols() {
+  if (LIBRARY_SUPPORT_TRANSFER_PROTOCOLS.empty()) {
+    auto supported = get_library_support_protocols();
+    LIBRARY_SUPPORT_TRANSFER_PROTOCOLS = supported.as_vector();
   }
-  return LIBRARY_SUPPORT_TRANSFER_TYP;
+  return LIBRARY_SUPPORT_TRANSFER_PROTOCOLS;
 }
 
 void init_kv_transfer_client(uint32_t inst_id,
@@ -41,29 +45,34 @@ void init_kv_transfer_client(uint32_t inst_id,
                              uint32_t block_size,
                              uint32_t token_size,
                              uint32_t layer_num_blocks,
-                             uint32_t transfer_type,
                              const std::string &naming_url,
                              const std::vector<uint64_t> &events,
-                             const std::vector<uint64_t> &layers) {
+                             const std::vector<uint64_t> &layers,
+                             const std::vector<TransferProtocol> &protocols) {
 
   if (KV_CLIENT == nullptr) {
+    auto lib_support = get_library_support_protocols();
     assert(block_size % token_size == 0);
-    connect_naming(naming_url);
     auto context = std::make_unique<Context>(inst_id, worker_id);
     context->set_tp(tp_size, worker_tp_rank);
     context->set_block_params(block_size, token_size, layer_num_blocks);
     context->set_layer_data_address(device_id, layers);
     context->set_cuda_barrier(std::make_unique<CudaEventBarrier>(events));
-    context->set_transfer_type(type_from(transfer_type));
-    KV_CLIENT = new KvTransferClient(std::move(context));
+    auto naming_client = NAMING_MANAGER->connect_naming(naming_url);
+    auto stub_factory = std::make_unique<KvSendStubFactory>(context.get(), std::move(naming_client));
+    KV_CLIENT = KvTransferClient::create(std::move(context), protocols, std::move(stub_factory));
     // disable auto connect after python runtime ready;
     KV_CLIENT->enable_auto_connect();
   }
 }
 
-void add_target(uint32_t inst_id, uint32_t worker_id, uint32_t start_layer, uint32_t num_layers) {
+void add_target(uint32_t inst_id,
+                uint32_t worker_id,
+                uint32_t start_layer,
+                uint32_t num_layers,
+                std::optional<TransferProtocol> protocol) {
   if (KV_CLIENT != nullptr) {
-    auto ret = KV_CLIENT->add_target(inst_id, worker_id, start_layer, num_layers);
+    auto ret = KV_CLIENT->add_target(inst_id, worker_id, start_layer, num_layers, protocol);
     if (ret.is_err()) {
       ERROR_OPT.emplace(std::move(ret.err()));
     }
@@ -165,22 +174,44 @@ void init_kv_transfer_server(uint32_t inst_id,
                              uint32_t block_size,
                              uint32_t token_size,
                              uint32_t layer_num_blocks,
-                             uint32_t transfer_type,
                              const std::string &naming_url,
-                             const std::vector<uint64_t> &layers) {
+                             const std::vector<uint64_t> &layers,
+                             const std::vector<TransferProtocol> &protocols) {
   if (KV_SERVER == nullptr) {
-    connect_naming(naming_url);
+    auto naming_client = NAMING_MANAGER->connect_naming(naming_url);
     auto context = std::make_unique<Context>(inst_id, worker_id);
     context->set_tp(tp_size, worker_tp_rank);
     context->set_block_params(block_size, token_size, layer_num_blocks);
     context->set_layer_data_address(device_id, layers);
-    context->set_transfer_type(type_from(transfer_type));
 
-    KV_SERVER = create_transfer_server(context->transfer_type());
+    if (protocols.size() > 1) {
+      throw std::runtime_error("multi-protocols server not support temporarily");
+    }
+
     KV_SERVICE = new KvTransferService(std::move(context));
     auto ctx = KV_SERVICE->get_context();
-    KV_SERVER->start_server(KV_SERVICE, ctx);
-    naming()->register_worker(ctx->worker_info());
+    if (protocols.empty()) {
+      for(auto &p: support_transfer_protocols()) {
+        try {
+          KV_SERVER = create_transfer_server(p);
+          KV_SERVER->start_server(KV_SERVICE, ctx);
+          LOG(INFO) << "KVT: start kvtransfer server with protocol: " + p.to_string();
+          break;
+        } catch (const std::exception &e) {
+          KV_SERVER = nullptr;
+          LOG(INFO) << "KVT: transfer protocol: " + p.to_string() + " not support, try next ...";
+        }
+      }
+      if (KV_SERVER == nullptr) {
+        throw std::runtime_error("start kvtransfer server failed, because no transfer protocol support");
+      }
+    } else {
+      KV_SERVER = create_transfer_server(protocols[0]);
+      KV_SERVER->start_server(KV_SERVICE, ctx);
+    }
+    auto worker_info = ctx->worker_info();
+    worker_info.transfer_protocols = ctx->support_protocols().value();
+    naming_client->register_worker(worker_info);
   }
 }
 
@@ -204,7 +235,7 @@ void submit_req_recv(uint32_t src_inst_id,
 
 bool check_recv_done(const std::string &req_id) {
   if (KV_SERVICE != nullptr) {
-    auto ret =  KV_SERVICE->check_recv_done(req_id);
+    auto ret = KV_SERVICE->check_recv_done(req_id);
     if (ret.is_err()) {
       ERROR_OPT.emplace(std::move(ret.err()));
     } else {
@@ -227,21 +258,33 @@ std::string check_error() {
 }
 }
 
+namespace py = pybind11;
 PYBIND11_MODULE(kvtransfer_ops, m) {
-m.def("support_transfer_types", &blade_llm::support_transfer_types, "get supported transfer types");
-// client
-m.def("init_kv_transfer_client", &blade_llm::init_kv_transfer_client, "init kv transfer client;");
-m.def("add_target", &blade_llm::add_target, "add target to kv client;");
-m.def("submit_req_send", &blade_llm::submit_req_send, "submit kv send to kv client;");
-m.def("submit_delta_send", &blade_llm::submit_delta_send, "submit kv token to kv client;");
-m.def("start_send", &blade_llm::start_send, "start to send submitted kv data;");
-m.def("notify_event_record", &blade_llm::notify_event_record, "record kv send events;");
-m.def("flush_send", &blade_llm::flush_send, "check if all kv send tasks are done;");
-m.def("check_transfer_done", &blade_llm::check_transfer_done, "check if all kv data of a request are sent;");
-// server
-m.def("init_kv_transfer_server", &blade_llm::init_kv_transfer_server, "init kv transfer server;");
-m.def("submit_req_recv", &blade_llm::submit_req_recv, "submit kv recv task to kv server;");
-m.def("check_recv_done", &blade_llm::check_recv_done, "check if all kv data of a request are received;");
-// common
-m.def("check_error", &blade_llm::check_error, "check error message;");
+  py::class_<blade_llm::TransferProtocol> protocol(m, "TransferProtocol");
+  protocol.def(py::init<blade_llm::TransferProtocol::Kind>())
+      .def_readwrite("type", &blade_llm::TransferProtocol::type)
+      .def("to_string", &blade_llm::TransferProtocol::to_string)
+      .def("__str__", &blade_llm::TransferProtocol::to_string)
+      .def("__repr__", &blade_llm::TransferProtocol::to_string);
+  py::enum_<blade_llm::TransferProtocol::Kind>(protocol, "Kind")
+      .value("CUDA_IPC", blade_llm::TransferProtocol::Kind::CUDA_IPC)
+      .value("RDMA_DIRECT", blade_llm::TransferProtocol::Kind::RDMA_DIRECT)
+      .export_values();
+
+  // client
+  m.def("init_kv_transfer_client", &blade_llm::init_kv_transfer_client, "init kv transfer client;");
+  m.def("add_target", &blade_llm::add_target, "add target to kv client;");
+  m.def("submit_req_send", &blade_llm::submit_req_send, "submit kv send to kv client;");
+  m.def("submit_delta_send", &blade_llm::submit_delta_send, "submit kv token to kv client;");
+  m.def("start_send", &blade_llm::start_send, "start to send submitted kv data;");
+  m.def("notify_event_record", &blade_llm::notify_event_record, "record kv send events;");
+  m.def("flush_send", &blade_llm::flush_send, "check if all kv send tasks are done;");
+  m.def("check_transfer_done", &blade_llm::check_transfer_done, "check if all kv data of a request are sent;");
+  // server
+  m.def("init_kv_transfer_server", &blade_llm::init_kv_transfer_server, "init kv transfer server;");
+  m.def("submit_req_recv", &blade_llm::submit_req_recv, "submit kv recv task to kv server;");
+  m.def("check_recv_done", &blade_llm::check_recv_done, "check if all kv data of a request are received;");
+  // common
+  m.def("check_error", &blade_llm::check_error, "check error message;");
+  m.def("lib_support_transfer_protocols", &blade_llm::support_transfer_protocols, "get supported transfer types");
 }

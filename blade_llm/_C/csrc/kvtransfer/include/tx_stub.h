@@ -1,13 +1,15 @@
-#ifndef KVTRANSFER_INCLUDE_UTILS_TX_STUB_H_
-#define KVTRANSFER_INCLUDE_UTILS_TX_STUB_H_
+#ifndef KVTRANSFER_INCLUDE_TX_STUB_H_
+#define KVTRANSFER_INCLUDE_TX_STUB_H_
 
 #pragma once
 #include <memory>
 #include <vector>
 #include <thread>
+#include <optional>
 #include "common.h"
 #include "channel.h"
 #include "step.h"
+#include "naming.h"
 #include "utils/block_queue.h"
 
 namespace blade_llm {
@@ -27,11 +29,20 @@ struct BatchSendTask {
   std::shared_ptr<std::vector<const RequestInfo *>> tasks;
 };
 
+enum StubState {
+  INIT = 0,
+  WORKING = 1,
+  POISONED = 2,
+  STOPPING = 3,
+  DISCARD = 4
+};
+
 class ISendStub {
  public:
-  virtual void connect(Context*, const WorkerInfo &dst) = 0;
+  virtual void start() = 0;
   virtual void send_batch(const BatchSendTask &) = 0;
-  virtual bool is_running() = 0;
+  virtual StubState check_state() = 0;
+  virtual void stop() = 0;
   virtual ~ISendStub() = default;
 };
 
@@ -39,45 +50,57 @@ using SendStub = std::unique_ptr<ISendStub>;
 
 class ISendStubFactory {
  public:
-  virtual SendStub create_stub(InstanceId, WorkerId, uint32_t start_layer, uint32_t num_layers) = 0;
+  virtual SendStub create_stub(InstanceId,
+                               WorkerId,
+                               uint32_t start_layer,
+                               uint32_t num_layers,
+                               std::optional<TransferProtocol>) = 0;
   virtual ~ISendStubFactory() = default;
 };
 
 class KvSendStub : public ISendStub, public noncopyable {
  public:
-  KvSendStub(InstanceId dst_inst_id,
-             WorkerId dst_worker_id,
+  KvSendStub(const WorkerInfo &dst_info,
+             const WorkerInfo &src_info,
              uint32_t start_layer,
              uint32_t num_layers,
              Channel &&channel) :
-      dst_info_(dst_inst_id, dst_worker_id),
+      dst_info_(dst_info),
+      src_info_(src_info),
       start_layer_(start_layer),
       num_layers_(num_layers),
       ch_(std::move(channel)) {};
   KvSendStub(KvSendStub &&other) noexcept;
-  void connect(Context *, const WorkerInfo &dst_info) override;
+  void start() override;
   void send_batch(const BatchSendTask &) override;
-  bool is_running() override;
+  StubState check_state() override;
+  void stop() override;
   ~KvSendStub() override;
  private:
-  WorkerInfo dst_info_;
+  void start_async();
+  const WorkerInfo dst_info_;
+  const WorkerInfo src_info_;
   uint32_t start_layer_{0};
   uint32_t num_layers_{0};
   std::unique_ptr<IChannel> ch_;
-  std::atomic_bool is_running_{false};
   BlockingQueue<BatchSendTask> send_tasks_{};
+  std::atomic<StubState> state_{INIT};
   std::optional<std::thread> send_backend_;
 };
 
 class KvSendStubFactory : public ISendStubFactory, public noncopyable {
  public:
-  explicit KvSendStubFactory(Context *ctx) : ctx_(ctx) {}
+  KvSendStubFactory(Context *ctx, std::unique_ptr<INamingClient> &&naming) :
+      ctx_(ctx),
+      naming_(std::move(naming)) {}
   SendStub create_stub(InstanceId dst_inst_id,
                        WorkerId dst_worker_id,
                        uint32_t start_layer,
-                       uint32_t num_layers) override;
+                       uint32_t num_layers,
+                       std::optional<TransferProtocol> = std::nullopt) override;
  private:
   Context *ctx_;
+  std::unique_ptr<INamingClient> naming_;
 };
 }
-#endif //KVTRANSFER_INCLUDE_UTILS_TX_STUB_H_
+#endif //KVTRANSFER_INCLUDE_TX_STUB_H_

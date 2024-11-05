@@ -1,7 +1,7 @@
 
 #pragma once
 
-#ifdef ENABLE_RDMA
+#ifdef TORCH_FOUND
 
 #include "naming.h"
 #include <vector>
@@ -13,9 +13,10 @@ namespace blade_llm {
 // torch.TcpStore, url: tcp://$ip:$port
 const static std::string TCP_NAMING_SCHEMA = "tcpstore";
 
-class TCPStoreNaming : public INamingService {
+class TCPStoreNaming : public INamingClient {
 public:
-  bool init(const std::string &url) override;
+  TCPStoreNaming() = default;
+  void connect(const Schema& schema, const std::string &url) override;
 
   bool register_worker(const WorkerInfo& worker_info) override;
 
@@ -28,6 +29,15 @@ private:
   std::optional<c10d::TCPStore> tcp_store_;
 };
 
-}  // namespace blade_llm {
+class TCPStoreNamingFactory : public INamingClientFactory {
+ public:
+  const Schema & get_schema() override {
+    return TCP_NAMING_SCHEMA;
+  }
+  std::unique_ptr<INamingClient> create() override {
+    return std::make_unique<TCPStoreNaming>();
+  }
+};
 
-#endif  // #ifdef ENABLE_RDMA
+}  // namespace blade_llm {
+#endif  // #ifdef TORCH_FOUND

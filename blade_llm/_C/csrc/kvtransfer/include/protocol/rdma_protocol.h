@@ -26,8 +26,10 @@
 #include <arpa/inet.h>
 #include <thread>
 #include <future>
+#include "logging.h"
 
 namespace blade_llm {
+
 struct XMempoolDeleter {
   void operator()(accl::barex::XSimpleMempool *mp);
 };
@@ -79,10 +81,13 @@ class BarexMRGuard : public noncopyable {
   ~BarexMRGuard();
 };
 
-struct BarexCtx : public IProtocolCtx, public noncopyable {
-  BarexCtx(int gpu_dev_id, std::string mp_name, std::string tp_name, int tpcnt,
-           std::unique_ptr<accl::barex::XChannelCallback> ctxcb,
-           const std::vector<uint64_t> &layp, uint64_t layer_blk_size);
+struct BarexCtx : public noncopyable {
+  BarexCtx(std::string mp_name,
+           std::string tp_name,
+           int tpcnt,
+           Context *ctx,
+           std::unique_ptr<accl::barex::XChannelCallback> ctxcb);
+
   ~BarexCtx();
 
   const auto &layer_mr() const noexcept {
@@ -113,9 +118,11 @@ struct BarexCtx : public IProtocolCtx, public noncopyable {
 };
 
 struct CliBarexCtx : public BarexCtx {
-  CliBarexCtx(int gpu_dev_id, std::string mp_name, std::string tp_name, int tpcnt,
-              std::unique_ptr<accl::barex::XChannelCallback> ctxcb,
-              const std::vector<uint64_t> &layp, uint64_t layer_blk_size);
+  CliBarexCtx(std::string mp_name,
+              std::string tp_name,
+              int tpcnt,
+              Context *ctx,
+              std::unique_ptr<accl::barex::XChannelCallback> ctxcb);
 
   auto *connector() const noexcept {
     return this->connector_.get();
@@ -143,10 +150,10 @@ static_assert(sizeof(RDMAInfo) <= MAX_OTHER_INFO_LEN);
 
 class RDMAChannel : public IChannel, public noncopyable {
  public:
-  RDMAChannel(Context *ctx) noexcept:
-      src_inst_id_(ctx->worker_info().inst_id),
-      src_worker_id_(ctx->worker_info().worker_id),
-      ctx_(ctx->protocol_ctx<CliBarexCtx>()) {}
+  RDMAChannel(InstanceId inst_id, WorkerId worker_id, CliBarexCtx *ctx) noexcept:
+      src_inst_id_(inst_id),
+      src_worker_id_(worker_id),
+      ctx_(ctx) {}
 
   // init 在主线程调用, 尽量不要阻塞.
   // write 在后台线程调用, 可以阻塞,
@@ -190,7 +197,7 @@ class RDMAChannel : public IChannel, public noncopyable {
 class RDMAServer : public ITransferServer {
  public:
   void start_server(ITransferService *service, Context *ctx) override;
- private:
+  private:
   class CtxCallback : public accl::barex::XChannelCallback {
     ITransferService *ser_;
    public:
@@ -202,7 +209,6 @@ class RDMAServer : public ITransferServer {
                     accl::barex::x_msg_header header) override;
   };
  private:
-  std::optional<BarexCtx> ctx_;
   std::unique_ptr<accl::barex::XListener, XListenerDeleter> listener_;
 };
 
@@ -215,7 +221,56 @@ class CliCtxCallback : public accl::barex::XChannelCallback {
                   accl::barex::x_msg_header header) override {}
 };
 
-}  // namespace blade_llm
+class RDMAProtoContext : public IProtocolContext {
+ public:
+  const std::string name_prefix;
+  const int num_threads;
+  const bool is_server;
 
+  static std::unique_ptr<RDMAProtoContext> server_context(std::string &&name,
+                                                          int num_threads,
+                                                          std::unique_ptr<accl::barex::XChannelCallback> &&);
+
+  static std::unique_ptr<RDMAProtoContext> client_context(std::string &&name,
+                                                          int num_threads);
+
+  RDMAProtoContext(std::string &&name,
+                   int num_threads,
+                   bool is_server,
+                   std::unique_ptr<accl::barex::XChannelCallback> &&cb) :
+      name_prefix(std::move(name)),
+      num_threads(num_threads),
+      is_server(is_server),
+      callback_(std::move(cb)) {}
+
+  bool check_support() override;
+  void init(Context *ctx) override;
+  [[nodiscard]] const TransferProtocol &protocol() const override {
+    return this->protocol_;
+  };
+  BarexCtx *barex_ctx() {
+    if (is_server) {
+      return barex_ctx_.get();
+    } else {
+      return nullptr;
+    }
+  }
+
+  CliBarexCtx *cli_barex_ctx() {
+    if (is_server) {
+      return nullptr;
+    } else {
+      return cli_barex_ctx_.get();
+    }
+  }
+
+ private:
+  std::unique_ptr<BarexCtx> barex_ctx_{nullptr};
+  std::unique_ptr<CliBarexCtx> cli_barex_ctx_{nullptr};
+  std::unique_ptr<accl::barex::XChannelCallback> callback_{nullptr};
+  TransferProtocol protocol_{TransferProtocol::Kind::RDMA_DIRECT};
+};
+
+}  // namespace blade_llm
 #endif  // ENABLE_RDMA
 #endif // KVTRANSFER_RDMA_PROTOCOL

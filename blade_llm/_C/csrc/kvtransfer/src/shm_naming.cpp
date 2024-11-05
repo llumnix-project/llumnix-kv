@@ -23,17 +23,45 @@ typedef struct instInfoList_st {
   instInfo instances[MAX_INSTANCES];
 } instInfoList;
 
-ShmNaming::ShmNaming(sharedMemoryInfo info) : is_manager_(true), info_(info) {}
+void ShmNamingServer::start() {
+  volatile instInfoList *shm = nullptr;
+  auto ret = sharedMemoryCreate(path_.data(), sizeof(*shm), &info_);
+  if (ret != 0) {
+    if (ret == EEXIST) {
+      if (sharedMemoryOpen(path_.data(), sizeof(*shm), &info_) != 0) {
+        throw std::runtime_error("failed to open shared memory naming service;");
+      }
+    }
+  }
+  shm = (volatile instInfoList *) info_.addr;
+  memset((void *) shm, 0, sizeof(*shm));
+  for (auto i = 0; i < MAX_INSTANCES; i++) {
+    for (auto j = 0; j < MAX_WORKS; j++) {
+      volatile workerInfo *info = &shm->instances[i].workers[j];
+      info->valid = false;
+    }
+  }
+}
 
-bool ShmNaming::init(const std::string &url) {
-  auto ret = sharedMemoryOpen(url.data(), sizeof(instInfoList), &info_);
+void ShmNamingServer::close() {
+  sharedMemoryClose(&info_);
+}
+
+ShmNamingServer::~ShmNamingServer() {
+  close();
+}
+
+void ShmNamingClient::connect(const Schema &schema, const std::string &path) {
+  if (schema != SHARE_MEMORY_NAMING_SCHEMA) {
+    throw std::runtime_error("invalid schema: " + schema);
+  }
+  auto ret = sharedMemoryOpen(path.data(), sizeof(instInfoList), &info_);
   if (ret != 0 && ret == ENOENT) {
     throw std::runtime_error("share memory not mounted;");
   }
-  return true;
 };
 
-bool ShmNaming::register_worker(const WorkerInfo &worker_info) {
+bool ShmNamingClient::register_worker(const WorkerInfo &worker_info) {
   volatile auto *shm = (volatile instInfoList *) info_.addr;
   auto worker = &shm->instances[worker_info.inst_id]
       .workers[worker_info.worker_id];
@@ -42,7 +70,7 @@ bool ShmNaming::register_worker(const WorkerInfo &worker_info) {
   return true;
 }
 
-std::optional<WorkerInfo> ShmNaming::get_worker_info(uint32_t inst_id, uint32_t worker_id) {
+std::optional<WorkerInfo> ShmNamingClient::get_worker_info(uint32_t inst_id, uint32_t worker_id) {
   volatile auto *shm = (volatile instInfoList *) info_.addr;
   volatile workerInfo *info = &shm->instances[inst_id].workers[worker_id];
   if (!info->valid) {
@@ -52,27 +80,5 @@ std::optional<WorkerInfo> ShmNaming::get_worker_info(uint32_t inst_id, uint32_t 
   WorkerInfo wi;
   memcpy(&wi, (void *) info->info, sizeof(WorkerInfo));
   return wi;
-}
-
-ShmNaming::~ShmNaming() {
-  if (is_manager_) {
-    sharedMemoryClose(&info_);
-  }
-}
-
-std::shared_ptr<INamingService> create_shm_naming(const std::string &url) {
-  volatile instInfoList *shm = nullptr;
-  sharedMemoryInfo info;
-  auto ret = sharedMemoryCreate(url.data(), sizeof(*shm), &info);
-  if (ret != 0) {
-    if (ret == EEXIST) {
-      if (sharedMemoryOpen(url.data(), sizeof(*shm), &info) != 0) {
-        throw std::runtime_error("failed to open shared memory naming service;");
-      }
-    }
-  }
-  shm = (volatile instInfoList *) info.addr;
-  memset((void *) shm, 0, sizeof(*shm));
-  return std::make_shared<ShmNaming>(info);
 }
 }

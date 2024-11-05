@@ -99,19 +99,13 @@ std::tuple<size_t, size_t, size_t, size_t> merge_interval(std::vector<IpcBlock> 
   return {min_size, max_size, total_size, cnt};
 }
 
-static void pull_send(size_t start_layer,
-                      size_t num_layers,
-                      const WorkerInfo *src_info,
-                      const WorkerInfo *dst_info,
-                      IChannel *channel,
-                      std::atomic_bool *running,
-                      BlockingQueue<BatchSendTask> *send_tasks) {
-  auto dst_id = dst_info->inst_id;
-  auto dst_worker_id = dst_info->worker_id;
+void KvSendStub::start_async() {
+  auto dst_id = dst_info_.inst_id;
+  auto dst_worker_id = dst_info_.worker_id;
   std::vector<IpcBlock> send_blocks;
   std::vector<const RequestInfo *> send_reqs;
   LOG(INFO) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id
-            << "): start to send kv of layer[" << start_layer << ", " << num_layers << ");";
+            << "): start to send kv of layer[" << start_layer_ << ", " << num_layers_ << ");";
 
   size_t min_block_n = std::numeric_limits<size_t>::max();
   size_t max_block_n = 0;
@@ -120,9 +114,9 @@ static void pull_send(size_t start_layer,
 
   for (;;) {
     BatchSendTask batch;
-    send_tasks->pop(batch);
+    send_tasks_.pop(batch);
     if (batch.step == nullptr) {
-      assert(send_tasks->is_closed());
+      assert(send_tasks_.is_closed());
       break;
     }
 
@@ -137,7 +131,7 @@ static void pull_send(size_t start_layer,
         continue;
       }
       send_reqs.push_back(task);
-      parse_block_send(src_info, dst_info, task, send_blocks);
+      parse_block_send(&src_info_, &dst_info_, task, send_blocks);
     }
     if (send_reqs.empty()) {
       continue;
@@ -150,42 +144,49 @@ static void pull_send(size_t start_layer,
     auto const sb_num = send_blocks.size();
     auto const [min, max, total, cnt] = merge_interval(send_blocks);
 
-    for (auto i = start_layer; i < num_layers; ++i) {
-      TimeWatch wait_start;
-      batch.step->wait_layer_ready(i);
-      wait_time_us += wait_start.get_elapse_us();
+    try {
+      for (auto i = start_layer_; i < num_layers_; ++i) {
+        TimeWatch wait_start;
+        batch.step->wait_layer_ready(i);
+        wait_time_us += wait_start.get_elapse_us();
 
-      // NOTE: write 可能是异步的! write 返回并不意味着数据发送了!
-      channel->send_data(i, send_blocks);
-    }
-    channel->flush();
-    auto elapse = start.get_elapse_us();
-    batch.step->finish_one();
-    LOG(INFO) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id
-              << "): finish send " << send_reqs.size() << " requests("
-              << sb_num << "->" << cnt << " blocks), block_size(min=" << min
-              <<",max=" << max << ",total=" << total
-              << "), elapse: total use "
-              << elapse << "us, wait use " << wait_time_us << "us;";
-    auto iter = Iterator<const RequestInfo *>::copy_from(send_reqs)
-        .filter([](auto t) { return t->reach_last_token(); });
-    if (iter.has_next()) {
-      channel->send_notification(&iter);
-    }
-
-    for (auto task : send_reqs) {
-      task->clear_new_tokens();
-      if (!task->reach_last_token()) {
-        continue;
+        // NOTE: write 可能是异步的! write 返回并不意味着数据发送了!
+        ch_->send_data(i, send_blocks);
       }
-      task->set_transfer_done();
-      const auto block_n = task->dst_blocks().size();
-      min_block_n = std::min(min_block_n, block_n);
-      max_block_n = std::max(max_block_n, block_n);
-      total_block_n += block_n;
-      finished_req_n += 1;
+      ch_->flush();
+      auto elapse = start.get_elapse_us();
+      batch.step->finish_one();
       LOG(INFO) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id
-                << "): send finish notification of request(" << task->req_id << ");";
+                << "): finish send " << send_reqs.size() << " requests("
+                << sb_num << "->" << cnt << " blocks), block_size(min=" << min
+                << ",max=" << max << ",total=" << total
+                << "), elapse: total use "
+                << elapse << "us, wait use " << wait_time_us << "us;";
+      auto iter = Iterator<const RequestInfo *>::copy_from(send_reqs)
+          .filter([](auto t) { return t->reach_last_token(); });
+      if (iter.has_next()) {
+        ch_->send_notification(&iter);
+      }
+
+      for (auto task : send_reqs) {
+        task->clear_new_tokens();
+        if (!task->reach_last_token()) {
+          continue;
+        }
+        task->set_transfer_done();
+        const auto block_n = task->dst_blocks().size();
+        min_block_n = std::min(min_block_n, block_n);
+        max_block_n = std::max(max_block_n, block_n);
+        total_block_n += block_n;
+        finished_req_n += 1;
+        LOG(INFO) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id
+                  << "): send finish notification of request(" << task->req_id << ");";
+      }
+    } catch (std::exception &e) {
+      LOG(ERROR) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id
+                 << "): fail to send data, caused by: " << e.what() << ";";
+      state_.store(StubState::POISONED, std::memory_order_release);
+      break;
     }
 
     if (step_idx > 0 && (step_idx & 15) == 0) {
@@ -194,29 +195,35 @@ static void pull_send(size_t start_layer,
                 << "), finished_reqs=" << finished_req_n << ")";
     }
   }
-  running->store(false, std::memory_order_release);
+  auto state = state_.load(std::memory_order_relaxed);
+  if (state == StubState::STOPPING) {
+    if (!state_.compare_exchange_weak(state, StubState::DISCARD, std::memory_order_seq_cst)) {
+      state_.store(StubState::POISONED, std::memory_order_seq_cst);
+    }
+  }
+
   LOG(INFO) << "KVT tx_stub: stop to send kv of to worker("
             << dst_id << ":" << dst_worker_id << ");";
 }
 
 KvSendStub::KvSendStub(KvSendStub &&other) noexcept:
     dst_info_(other.dst_info_),
+    src_info_(other.src_info_),
     start_layer_(other.start_layer_),
     num_layers_(other.num_layers_),
-    ch_(std::move(other.ch_)),
-    is_running_(false) {
-  assert(!other.is_running());
+    ch_(std::move(other.ch_)) {
 }
 
-void KvSendStub::connect(Context *ctx, const WorkerInfo &dst_info) {
-  ch_->connect(dst_info);
-  dst_info_ = dst_info;
-  send_backend_.emplace(&pull_send, start_layer_, num_layers_, &ctx->worker_info(),
-                        &dst_info_, ch_.get(), &is_running_, &send_tasks_);
-  is_running_.store(true, std::memory_order_release);
+void KvSendStub::start() {
+  auto state = state_.load(std::memory_order_relaxed);
+  if (state == StubState::INIT) {
+    if (state_.compare_exchange_weak(state, StubState::WORKING, std::memory_order_seq_cst)) {
+      send_backend_.emplace(&KvSendStub::start_async, this);
+    }
+  }
 }
 
-void KvSendStub::send_batch(const BatchSendTask& batch) {
+void KvSendStub::send_batch(const BatchSendTask &batch) {
   auto num_tasks = batch.tasks->size();
   if (num_tasks > 0) {
     auto task = batch;
@@ -225,22 +232,76 @@ void KvSendStub::send_batch(const BatchSendTask& batch) {
   }
 }
 
-bool KvSendStub::is_running() {
-  return is_running_.load(std::memory_order_relaxed);
+void KvSendStub::stop() {
+  auto state = state_.load(std::memory_order_relaxed);
+  while (state == StubState::WORKING || state == StubState::INIT) {
+    if (state_.compare_exchange_weak(state, StubState::STOPPING, std::memory_order_seq_cst)) {
+      send_tasks_.close();
+      break;
+    }
+  }
+}
+
+StubState KvSendStub::check_state() {
+  return state_.load(std::memory_order_relaxed);
 }
 
 KvSendStub::~KvSendStub() {
-  send_tasks_.close();
-  if (send_backend_.has_value()) {
-    send_backend_.value().join();
-    send_backend_.reset();
+  auto state = state_.load(std::memory_order_relaxed);
+  if (state != StubState::DISCARD && state != StubState::POISONED) {
+    LOG(WARNING) << "KVT: SendStub(" << dst_info_.inst_id << ":" << dst_info_.worker_id
+                 << ") was not been dropped gracefully.";
+    send_tasks_.close();
   }
+  if (send_backend_.has_value()) {
+    send_backend_->join();
+  }
+  send_backend_.reset();
 }
+
 SendStub KvSendStubFactory::create_stub(InstanceId dst_inst_id,
                                         WorkerId dst_worker_id,
                                         uint32_t start_layer,
-                                        uint32_t num_layers) {
-  auto ch = create_channel(ctx_);
-  return std::make_unique<KvSendStub>(dst_inst_id, dst_worker_id, start_layer, num_layers, create_channel(ctx_));
+                                        uint32_t num_layers,
+                                        std::optional<TransferProtocol> proto_opt) {
+
+  auto info_opt = naming_->get_worker_info(dst_inst_id, dst_worker_id);
+  if (info_opt.has_value()) {
+    auto info = info_opt.value();
+    Channel ch;
+    SupportTransferProtocols target_supports(info.transfer_protocols);
+    if (proto_opt.has_value()) {
+      auto &proto = proto_opt.value();
+      if (target_supports.is_support(proto)) {
+        ch = create_channel(ctx_, proto);
+        ch->connect(info);
+      } else {
+        LOG(ERROR) << "KVT: target worker(" << dst_inst_id << ":" << dst_worker_id << ") does not support protocol("
+                   << proto.to_string() << ");";
+        throw std::runtime_error("target worker not support protocol: " + proto.to_string());
+      }
+    } else {
+      auto protos = target_supports.as_vector();
+      // TODO : set priority for each protocol;
+      for (const auto &p : protos) {
+        try {
+          ch = create_channel(ctx_, p);
+          ch->connect(info);
+          LOG(INFO) << "KVT : connect target worker(" << dst_inst_id << ":" << dst_worker_id << ") use "
+                    << p.to_string() << " protocol;";
+          break;
+        } catch (std::exception &e) {
+          LOG(WARNING) << "KVT : can't connect target worker(" << dst_inst_id << ":" << dst_worker_id
+                       << ") with " << p.to_string() << " protocol, try other protocol ...";
+        }
+      }
+    }
+    return std::make_unique<KvSendStub>(info, ctx_->worker_info(), start_layer, num_layers, std::move(ch));
+  } else {
+    LOG(ERROR) << "KVT: can't find worker(" << dst_inst_id << ":" << dst_worker_id << ") from naming service;";
+    throw std::runtime_error("can not find worker(" +
+        std::to_string(dst_inst_id) + ":" + std::to_string(dst_worker_id) +
+        ") from naming service;");
+  }
 }
 }

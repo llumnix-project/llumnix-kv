@@ -90,8 +90,12 @@ TEST(CudaIpcTest, TestCudaWrite) {
     Context ctx(0, 1);
     ctx.set_block_params(4 * KB, KB, 1);
     ctx.set_layer_data_address(0, layer_addrs);
-
-    CudaIpcWrite cu_writer(&ctx);
+    auto cuda_ctx = std::make_unique<CudaIpcContext>(ctx.device_id());
+    EXPECT_TRUE(cuda_ctx->check_support());
+    ctx.register_protocol(std::move(cuda_ctx));
+    auto proto_ctx = ctx.get_protocol_ctx<CudaIpcContext>(TransferProtocol::Kind::CUDA_IPC);
+    EXPECT_TRUE(proto_ctx != nullptr);
+    CudaIpcWrite cu_writer(proto_ctx);
     sharedMemoryInfo shm_info_c;
     volatile cudaWriteSyncInfo* sync_info;
     sharedMemoryOpen(sync_file, sizeof(*sync_info), &shm_info_c);
@@ -116,7 +120,7 @@ TEST(CudaIpcTest, TestSocketWrite) {
   EXPECT_TRUE(server_sock != -1);
   std::thread t([&]() {
     WorkerInfo src(1, 4);
-    SocketWriter sock_writer(src);
+    SocketWriter sock_writer(1, 4);
 
     WorkerInfo dst(0, 0);
     strncpy(dst.addr_url, sock_file, sizeof(dst.addr_url));
@@ -166,7 +170,8 @@ class MockTransferService : public ITransferService {
 };
 
 TEST(CudaIpcTest, TestTransfer) {
-  auto n = create_shm_naming(shm_naming_file);
+  auto n_server = ShmNamingServer(shm_naming_file);
+  n_server.start();
   auto pid = fork();
   if (pid > 0) {
     // parent process as server side;
@@ -195,8 +200,8 @@ TEST(CudaIpcTest, TestTransfer) {
       recv_done.store(true, std::memory_order_release);
     });
     server.start_server(&service, &ctx);
-    ShmNaming naming;
-    naming.init(shm_naming_file);
+    ShmNamingClient naming;
+    naming.connect(SHARE_MEMORY_NAMING_SCHEMA, shm_naming_file);
     naming.register_worker(ctx.worker_info());
 
     for (int i = 0; i < 128; ++i) {
@@ -241,16 +246,20 @@ TEST(CudaIpcTest, TestTransfer) {
     Context ctx(1, 0);
     ctx.set_block_params(KB, 128, 4);
     ctx.set_layer_data_address(1, layer_addrs);
-    ctx.set_transfer_type(TransferType::CUDA_IPC);
-    auto channel = create_channel(&ctx);
-    ShmNaming naming;
-    naming.init(shm_naming_file);
+    auto cuda_ctx = std::make_unique<CudaIpcContext>(ctx.device_id());
+    EXPECT_TRUE(cuda_ctx->check_support());
+    ctx.register_protocol(std::move(cuda_ctx));
+    TransferProtocol proto = TransferProtocol::cuda_ipc();
+    auto channel = create_channel(&ctx, proto);
+    ShmNamingClient naming;
+    naming.connect(SHARE_MEMORY_NAMING_SCHEMA, shm_naming_file);
     auto info_opt = naming.get_worker_info(0, 0);
     for(auto i=0;i < 128; i ++) {
       if (!info_opt.has_value()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         info_opt = naming.get_worker_info(0, 0);
       } else {
+        LOG(INFO) << "get worker info, addr_url =  " << info_opt->addr_url;
         break;
       }
     }

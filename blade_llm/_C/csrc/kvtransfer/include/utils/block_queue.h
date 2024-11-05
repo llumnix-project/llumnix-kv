@@ -7,6 +7,7 @@
 #include <queue>
 #include <condition_variable>
 #include <cassert>
+#include "logging.h"
 
 namespace blade_llm {
 template<typename T>
@@ -22,14 +23,11 @@ class BlockingQueue {
 
   void pop(T &t) {
     std::unique_lock<std::mutex> lock(mutex_);
-    if (queue_.empty()) {
-      cond_.wait(lock, [this] {
-        return
-            closed_.load(std::memory_order_relaxed) || !this->queue_.empty();
-      });
+    while (queue_.empty() && !closed_.load(std::memory_order_relaxed)) {
+      cond_.wait(lock);
     }
-    if (!closed_) {
-      assert(!queue_.empty());
+
+    if (!queue_.empty()) {
       t = std::move(queue_.front());
       queue_.pop();
     }

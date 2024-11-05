@@ -1,7 +1,9 @@
 #include <cstdlib>
+#include <stdexcept>
+#include <cassert>
 #include "naming/tcpstore_naming.h"
 
-#ifdef ENABLE_RDMA
+#ifdef TORCH_FOUND
 
 namespace blade_llm {
 
@@ -22,13 +24,15 @@ static std::pair<std::string, int> parse_url(const std::string& url) {
 }
 
 // url: //ip:port
-bool TCPStoreNaming::init(const std::string &url)  {
+void TCPStoreNaming::connect(const Schema& schema, const std::string &url)  {
+  if(schema != TCP_NAMING_SCHEMA) {
+    throw std::runtime_error("unknown schema: " + schema);
+  }
   auto& self = *this;
   auto [addr, port] = parse_url(url);
   c10d::TCPStoreOptions opts;
   opts.port = port;
   self.tcp_store_.emplace(addr, opts);
-  return true;
 }
 
 std::string TCPStoreNaming::get_key(uint32_t inst_id, uint32_t worker_id) {
@@ -73,4 +77,4 @@ std::optional<WorkerInfo> TCPStoreNaming::get_worker_info(uint32_t inst_id, uint
 
 }  // namespace blade_llm {
 
-#endif // ENABLE_RDMA
+#endif // TORCH_FOUND

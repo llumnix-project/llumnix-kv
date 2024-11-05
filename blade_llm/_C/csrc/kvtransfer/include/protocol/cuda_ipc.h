@@ -9,9 +9,33 @@
 #include "utils/thread_pool.h"
 
 namespace blade_llm {
+
+class CudaIpcContext : public IProtocolContext {
+ public:
+  explicit CudaIpcContext(int device, bool is_server = false) : device_id_(device), is_server_(is_server) {}
+  void init(Context *) override;
+  bool check_support() override;
+  [[nodiscard]] const TransferProtocol &protocol() const override;
+  [[nodiscard]] const void *get_layer_ptr(uint32_t layer_idx) const;
+  [[nodiscard]] const cudaIpcHandles &get_ipc_handles() const;
+  [[nodiscard]] size_t num_layers() const;
+ private:
+  bool is_server_;
+  int device_id_{0};
+  bool is_cuda_ipc_supported_{false};
+  std::vector<const void *> src_layer_ptrs_;
+  cudaIpcHandles ipc_handles_;
+  TransferProtocol protocol_{TransferProtocol::Kind::CUDA_IPC};
+};
+
 class CudaIpcWrite : public noncopyable {
  public:
-  explicit CudaIpcWrite(Context *);
+  explicit CudaIpcWrite(CudaIpcContext *ctx) : ctx_(ctx), is_connected_(false) {
+    if (ctx_ == nullptr) {
+      throw std::runtime_error("cuda context not registered;");
+    }
+  };
+
   void init(const cudaIpcHandles *);
   void write(uint32_t layer_idx, const std::vector<IpcBlock> &data);
   void close();
@@ -19,29 +43,31 @@ class CudaIpcWrite : public noncopyable {
  private:
   bool is_connected_;
   std::vector<void *> dst_ipc_ptr_;
-  std::vector<const void *> src_ptr_;
+  CudaIpcContext *ctx_;
 };
 
 class SocketWriter : public noncopyable {
  public:
-  explicit SocketWriter(const WorkerInfo &src);
+  SocketWriter(InstanceId inst_id, WorkerId worker_id) :
+      src_inst_id_(inst_id),
+      src_worker_id_(worker_id) {};
   void connect(const WorkerInfo &dst);
   void write(const RequestId &, const std::vector<uint32_t> &block_ids);
   void close();
   ~SocketWriter();
  private:
   int socket_fd_{-1};
-  uint32_t src_inst_id_;
-  uint32_t src_worker_id_;
-  uint32_t dst_inst_id_{INVALID_INST_WORKER_ID};
-  uint32_t dst_worker_id_{INVALID_INST_WORKER_ID};
+  InstanceId src_inst_id_;
+  WorkerId src_worker_id_;
+  InstanceId dst_inst_id_{INVALID_INST_WORKER_ID};
+  WorkerId dst_worker_id_{INVALID_INST_WORKER_ID};
 };
 
 class CudaIpcChannel : public IChannel, public noncopyable {
  public:
-  explicit CudaIpcChannel(Context *ctx) :
+  CudaIpcChannel(InstanceId inst_id, WorkerId worker_id, CudaIpcContext *ctx) :
       data_writer_(ctx),
-      notify_writer_(ctx->worker_info()) {};
+      notify_writer_(inst_id, worker_id) {};
   void connect(const WorkerInfo &dst) override;
   void send_data(size_t layer_index, const std::vector<IpcBlock> &data) override;
   void send_notification(IIterator<const RequestInfo *> *reqs) override;

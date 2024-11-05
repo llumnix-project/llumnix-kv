@@ -4,7 +4,6 @@
 #include "logging.h"
 
 using ::testing::Return;
-using ::testing::_;
 using ::testing::Field;
 using ::testing::Eq;
 using ::testing::WhenSorted;
@@ -36,9 +35,10 @@ MATCHER_P(batchCheck, expect, "unexpected batch") {
 class MockSendStub : public ISendStub {
  public:
   MockSendStub() = default;
-  MOCK_METHOD(void, connect, (Context *, const WorkerInfo&), (override));
-  MOCK_METHOD(bool, is_running, (), (override));
+  MOCK_METHOD(void, start, (), (override));
   MOCK_METHOD(void, send_batch, (const BatchSendTask&), (override));
+  MOCK_METHOD(StubState, check_state, (), (override));
+  MOCK_METHOD(void, stop, (), (override));
 };
 
 class ProxyStub : public ISendStub {
@@ -47,14 +47,21 @@ class ProxyStub : public ISendStub {
   WorkerId dst_worker;
   MockSendStub *stub;
   ProxyStub(InstanceId i, WorkerId w, MockSendStub *s) : dst_inst(i), dst_worker(w), stub(s) {}
-  void connect(Context *ctx, const WorkerInfo &dst_info) override {
-    stub->connect(ctx, dst_info);
+
+  void start() override {
+    stub->start();
   }
-  bool is_running() override {
-    return stub->is_running();
-  }
+
   void send_batch(const BatchSendTask &batch) override {
     stub->send_batch(batch);
+  }
+
+  StubState check_state() override {
+    return stub->check_state();
+  }
+
+  void stop() override {
+    stub->stop();
   }
 };
 
@@ -63,7 +70,8 @@ class FakeStubFactory : public ISendStubFactory {
   std::vector<std::unique_ptr<ProxyStub>> stubs;
 
   FakeStubFactory() = default;
-  SendStub create_stub(InstanceId dst_inst, WorkerId dst_worker, uint32_t, uint32_t) override {
+  SendStub create_stub(InstanceId dst_inst, WorkerId dst_worker, uint32_t, uint32_t,
+                       std::optional<TransferProtocol> p) override {
     for (auto i = 0; i < stubs.size(); ++i) {
       if (stubs[i] != nullptr) {
         if (stubs[i]->dst_inst == dst_inst && stubs[i]->dst_worker == dst_worker) {
@@ -75,16 +83,19 @@ class FakeStubFactory : public ISendStubFactory {
   }
 };
 
-
 TEST(KVTransferClientTest, SendTo1) {
   auto ctx = std::make_unique<Context>(1, 1);
   RequestInfo req1(2, 1, "REQ00000001", {0, 1}, {0, 1});
   req1.add_new_tokens(1, false);
   std::vector<const RequestInfo *> expect_reqs{&req1};
   MockSendStub stub;
-  EXPECT_CALL(stub, is_running())
+
+  EXPECT_CALL(stub, start())
+      .Times(1);
+  EXPECT_CALL(stub, check_state())
       .Times(4)
-      .WillRepeatedly(Return(true));
+      .WillRepeatedly(Return(StubState::WORKING));
+
   EXPECT_CALL(stub, send_batch(batchCheck(expect_reqs))).Times(2);
   auto factory = std::make_unique<FakeStubFactory>();
   factory->stubs.push_back(std::make_unique<ProxyStub>(2, 1, &stub));
@@ -96,7 +107,7 @@ TEST(KVTransferClientTest, SendTo1) {
                                       req1.new_tokens(), req1.reach_last_token(),
                                       req1.src_blocks(), req1.dst_blocks());
     EXPECT_TRUE(ret.is_err());
-    EXPECT_EQ(ret.err().code, ErrorCode::TARGET_DISCONNECTED);
+    EXPECT_EQ(ret.err().code, ErrorCode::TARGET_NOT_FOUND);
   }
   {
     auto ret = client.submit_req_send(2, 1, req1.req_id,
@@ -129,20 +140,20 @@ TEST(KVTransferClientTest, SendTo2) {
   std::vector<const RequestInfo *> expect_reqs{&req0, &req1};
 
   MockSendStub stub0;
-  EXPECT_CALL(stub0, is_running())
+  EXPECT_CALL(stub0, check_state())
       .Times(4)
-      .WillRepeatedly(Return(true));
+      .WillRepeatedly(Return(StubState::WORKING));
   EXPECT_CALL(stub0, send_batch(batchCheck(expect_reqs))).Times(2);
   MockSendStub stub1;
-  EXPECT_CALL(stub1, is_running())
+  EXPECT_CALL(stub1, check_state())
       .Times(4)
-      .WillRepeatedly(Return(true));
+      .WillRepeatedly(Return(StubState::WORKING));
   EXPECT_CALL(stub1, send_batch(batchCheck(expect_reqs))).Times(2);
   auto factory = std::make_unique<FakeStubFactory>();
   factory->stubs.push_back(std::make_unique<ProxyStub>(2, 1, &stub0));
   factory->stubs.push_back(std::make_unique<ProxyStub>(3, 1, &stub1));
 
-  KvTransferClient client(std::move(ctx),  std::move(factory));
+  KvTransferClient client(std::move(ctx), std::move(factory));
   client.add_target(2, 1, 0, 2);
   client.add_target(3, 1, 0, 2);
   {
@@ -186,21 +197,21 @@ TEST(KVTransferClientTest, SendToPP2) {
   std::vector<const RequestInfo *> expect_reqs{&req0, &req1};
 
   MockSendStub stub0;
-  EXPECT_CALL(stub0, is_running())
+  EXPECT_CALL(stub0, check_state())
       .Times(4)
-      .WillRepeatedly(Return(true));
+      .WillRepeatedly(Return(StubState::WORKING));
   EXPECT_CALL(stub0, send_batch(batchCheck(expect_reqs))).Times(2);
   MockSendStub stub1;
-  EXPECT_CALL(stub1, is_running())
+  EXPECT_CALL(stub1, check_state())
       .Times(4)
-      .WillRepeatedly(Return(true));
+      .WillRepeatedly(Return(StubState::WORKING));
   EXPECT_CALL(stub1, send_batch(batchCheck(expect_reqs))).Times(2);
 
   auto factory = std::make_unique<FakeStubFactory>();
   factory->stubs.push_back(std::make_unique<ProxyStub>(2, 1, &stub0));
   factory->stubs.push_back(std::make_unique<ProxyStub>(3, 1, &stub1));
 
-  KvTransferClient client(std::move(ctx),  std::move(factory));
+  KvTransferClient client(std::move(ctx), std::move(factory));
   client.add_target(2, 1, 0, 2);
   client.add_target(3, 1, 0, 2);
   {

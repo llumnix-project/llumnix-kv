@@ -10,7 +10,7 @@
 
 namespace blade_llm {
 
-bool start_uds_server(const char* path, int *sock_fd) {
+bool start_uds_server(const char *path, int *sock_fd) {
   *sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (*sock_fd == -1) {
     LOG(ERROR) << "KVT socket server: fail to create server socket, errorno = " << errno;
@@ -36,7 +36,7 @@ bool start_uds_server(const char* path, int *sock_fd) {
   return true;
 }
 
-bool try_connect_uds(const char* path, int *sock_fd) {
+bool try_connect_uds(const char *path, int *sock_fd) {
   struct sockaddr_un addr;
   *sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (*sock_fd == -1) {
@@ -89,7 +89,7 @@ int try_read(int sock_fd, char *buf, size_t buf_size, int timeout_ms) {
 
   FD_ZERO(&read_fds);
   FD_SET(sock_fd, &read_fds);
-  auto activity =  select(sock_fd + 1, &read_fds, nullptr, nullptr, &timeout);
+  auto activity = select(sock_fd + 1, &read_fds, nullptr, nullptr, &timeout);
   if (activity > 0) {
     if (FD_ISSET(sock_fd, &read_fds)) {
       return recv(sock_fd, buf, buf_size, 0);
@@ -114,7 +114,7 @@ int wait_conn(int sock_fd, int timeout_sec) {
   FD_SET(sock_fd, &readfds);
   if (select(sock_fd + 1, &readfds, NULL, NULL, &timeout) > 0) {
     if (FD_ISSET(sock_fd, &readfds)) {
-      int s = accept(sock_fd,  (struct sockaddr *)&peer_addr, &len);
+      int s = accept(sock_fd, (struct sockaddr *) &peer_addr, &len);
       LOG(INFO) << "KVT socket server: accept connection from " << inet_ntoa(peer_addr.sin_addr);
       return s;
     }

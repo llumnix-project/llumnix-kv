@@ -2,6 +2,7 @@
 #include <stdexcept>
 #include "context.h"
 #include "utils/cuda_helper.h"
+#include "logging.h"
 
 namespace blade_llm {
 
@@ -19,31 +20,28 @@ void CudaEventBarrier::wait(uint32_t layer_idx) {
   }
 }
 
-Context::Context(InstanceId inst_id, WorkerId worker_id) :
-  worker_info_(inst_id, worker_id),
-  cuda_barrier_(std::make_unique<NoCudaBarrier>()) {};
+Context::Context(const InstanceId &inst, const WorkerId &worker) :
+    inst_id(inst),
+    worker_id(worker),
+    worker_info_(inst, worker),
+    cuda_barrier_(std::make_unique<NoCudaBarrier>()) {};
 
 void Context::set_tp(uint32_t tp_size, uint32_t worker_tp_rank) {
   worker_info_.tp_size = tp_size;
   worker_info_.worker_tp_rank = worker_tp_rank;
 }
 
-void Context::set_transfer_type(TransferType t_type) {
-  transfer_type_ = t_type;
-}
-
 void Context::set_block_params(uint32_t block_size, uint32_t token_size, uint32_t layer_num_blocks) {
   if (block_size < token_size || block_size % token_size != 0) {
     throw std::runtime_error("block_size must be a multiple of token_size");
   }
-
   worker_info_.block_size = block_size;
   worker_info_.token_size = token_size;
   layer_num_blocks_ = layer_num_blocks;
 }
 
-void Context::set_layer_data_address(uint32_t device_id, const std::vector<uint64_t> &layers) {
-  worker_info_.device_id = (int)device_id;
+void Context::set_layer_data_address(uint8_t device_id, const std::vector<uint64_t> &layers) {
+  device_id_ = (int) device_id;
   num_layers_ = layers.size();
   layer_data_address_ = layers;
 }
@@ -72,7 +70,7 @@ const std::vector<uint64_t> &Context::layer_data_address() const {
 }
 
 int Context::device_id() const {
-  return worker_info_.device_id;
+  return device_id_;
 }
 
 uint32_t Context::num_layers() const {
@@ -82,11 +80,32 @@ uint32_t Context::num_layers() const {
 uint32_t Context::layer_num_blocks() const {
   return layer_num_blocks_;
 }
-TransferType Context::transfer_type() const {
-  return transfer_type_;
-}
 
 size_t Context::block_size() const {
   return worker_info_.block_size;
+}
+const SupportTransferProtocols &Context::support_protocols() const {
+  return transfer_protos_;
+}
+
+bool Context::check_transfer_support(TransferProtocol t) const {
+  return transfer_protos_.is_support(t);
+}
+void Context::register_protocol(std::unique_ptr<IProtocolContext> &&ctx) {
+  if (!ctx->check_support()) {
+    throw std::runtime_error("register unsupported protocol: " + ctx->protocol().to_string());
+  }
+  if (!ctx->is_initialized()) {
+    try {
+      ctx->init(this);
+    } catch (const std::exception &e) {
+      throw std::runtime_error("init protocol context failed: " + std::string(e.what()));
+    }
+    LOG(INFO) << "KVT: init " << ctx->protocol().to_string() << " protocol context successfully";
+  }
+  auto p = ctx->protocol();
+  auto ret = protocol_ctxs_.emplace(p.type, std::move(ctx));
+  assert(ret.second);
+  transfer_protos_.set_support(p);
 }
 }

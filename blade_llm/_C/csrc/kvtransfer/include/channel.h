@@ -31,6 +31,6 @@ class IChannel {
 };
 
 using Channel = std::unique_ptr<IChannel>;
-std::unique_ptr<IChannel> create_channel(Context *ctx);
+std::unique_ptr<IChannel> create_channel(Context *ctx, const TransferProtocol&);
 }
 #endif //KVTRANSFER_INCLUDE_CHANNEL_H_

@@ -19,7 +19,7 @@ class ITransferServer : public noncopyable {
   virtual void start_server(ITransferService *service, Context *ctx) = 0;
   virtual ~ITransferServer() = default;
 };
-ITransferServer *create_transfer_server(TransferType type);
+ITransferServer *create_transfer_server(const TransferProtocol& protocol);
 }
 
 #endif //KVTRANSFER_INCLUDE_SERVER_H_

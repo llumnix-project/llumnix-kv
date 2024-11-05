@@ -25,7 +25,7 @@ class CMakeBuild(build_ext):
             f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}{os.sep}",
             f"-DCMAKE_BUILD_TYPE={cfg}",
             "-DBUILD_TESTS=OFF",
-            "-DBUILD_RDMA=OFF",
+            "-DBUILD_RDMA=ON",
             "-DBUILD_PYTHON_BIND=ON",
         ]
         build_args = []

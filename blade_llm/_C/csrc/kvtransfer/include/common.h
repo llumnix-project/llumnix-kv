@@ -35,10 +35,9 @@ struct WorkerInfo {
   uint32_t worker_tp_rank;
   uint32_t block_size;
   uint32_t token_size;
-  uint32_t transfer_type{0};
-  int device_id;
-  char addr_url[64];
-  char other_info[MAX_OTHER_INFO_LEN];
+  uint8_t transfer_protocols{0};
+  char addr_url[64]{};
+  char other_info[MAX_OTHER_INFO_LEN]{};
 
   WorkerInfo() :
       inst_id(INVALID_INST_WORKER_ID),
@@ -48,7 +47,7 @@ struct WorkerInfo {
       block_size(0),
       token_size(0) {};
 
-  WorkerInfo(InstanceId i_id, WorkerId w_id) :
+  WorkerInfo(const InstanceId &i_id, const WorkerId &w_id) :
       inst_id(i_id),
       worker_id(w_id),
       tp_size(1),
@@ -62,14 +61,14 @@ struct WorkerInfo {
              uint32_t worker_tp_rank,
              uint32_t block_size,
              uint32_t token_size,
-             uint32_t transfer_type) :
+             uint32_t protocols) :
       inst_id(inst_id),
       worker_id(worker_id),
       tp_size(tp_size),
       worker_tp_rank(worker_tp_rank),
       block_size(block_size),
       token_size(token_size),
-      transfer_type(transfer_type) {};
+      transfer_protocols(protocols) {};
 };
 
 class RequestInfo {

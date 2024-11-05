@@ -108,13 +108,15 @@ TEST(SendStubTest, UseFakeChannel) {
   dst_info.token_size = ts;
 
   auto fbc = std::make_shared<FakeChannel>();
+  fbc->connect(dst_info);
   auto q = &fbc->q;
   Context ctx(0, 1);
   ctx.set_block_params(bs, ts, 8);
   ctx.set_layer_data_address(0, {0, 8 * bs});
   uint32_t num_layers = 2;
-  auto tx = KvSendStub(1, 0, 0, num_layers, std::make_unique<ProxyChannel>(fbc.get()));
-  tx.connect(&ctx, dst_info);
+  auto tx = KvSendStub(dst_info, src_info, 0, num_layers, std::make_unique<ProxyChannel>(fbc.get()));
+  tx.start();
+  EXPECT_EQ(tx.check_state(), StubState::WORKING);
   {
     std::vector<const RequestInfo *> reqs;
     // the first send;
@@ -238,7 +240,7 @@ class MockChannel : public IChannel {
   MOCK_METHOD(void, send_notification, (IIterator<const RequestInfo *> * reqs), (override));
 };
 
-TEST(KvSendStubTest, UseMockChannel) {
+TEST(SendStubTest, UseMockChannel) {
   uint32_t bs = 16 * KB;
   uint32_t ts = KB;
   WorkerInfo src_info(0, 0);
@@ -261,14 +263,13 @@ TEST(KvSendStubTest, UseMockChannel) {
   IpcBlock expect_data(0, 4 * bs, 8 * ts);
 
   MockChannel channel;
-  EXPECT_CALL(channel, connect(Field(&WorkerInfo::inst_id, Eq(1)))).Times(1);
   EXPECT_CALL(channel, send_data(Eq(0), ElementsAre(expect_data))).Times(1);
   EXPECT_CALL(channel, send_data(Eq(1), ElementsAre(expect_data))).Times(1);
   EXPECT_CALL(channel, flush()).Times(1);
   EXPECT_CALL(channel, send_notification(_)).Times(0);
 
-  auto tx = KvSendStub(1, 0, 0, num_layers, std::make_unique<ProxyChannel>(&channel));
-  tx.connect(&ctx, dst_info);
+  auto tx = KvSendStub(dst_info, src_info, 0, num_layers, std::make_unique<ProxyChannel>(&channel));
+  tx.start();
   auto step_0 = std::make_shared<Step>(0);
   BatchSendTask task(step_0, std::move(reqs));
   tx.send_batch(task);
@@ -280,7 +281,7 @@ TEST(KvSendStubTest, UseMockChannel) {
 
 std::tuple<size_t, size_t, size_t, size_t> merge_interval(std::vector<IpcBlock> &input);
 
-TEST(KvSendStubTest, MergeIntervalTest) {
+TEST(SendStubTest, MergeIntervalTest) {
   {
     std::vector<IpcBlock> data;
     auto [min_size, max_size, total_size, cnt] = merge_interval(data);

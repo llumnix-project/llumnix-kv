@@ -4,17 +4,16 @@
 
 namespace blade_llm {
 
-ITransferServer *create_transfer_server(TransferType type) {
-  switch (type) {
-    case CUDA_IPC:
-      return new CudaTransferServer();
-    case RDMA_DIRECT:
+ITransferServer *create_transfer_server(const TransferProtocol &protocol) {
+  switch (protocol.type) {
+    case TransferProtocol::Kind::CUDA_IPC:return new CudaTransferServer();
+    case TransferProtocol::Kind::RDMA_DIRECT:
 #ifdef ENABLE_RDMA
       return new RDMAServer();
 #else
       throw std::runtime_error("RDMA Direct transport not support yet;");
 #endif
-    default:throw std::runtime_error("Unknown transport type;");
+    default:throw std::runtime_error("Unknown transport protocol;");
   }
 }
 }

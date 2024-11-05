@@ -11,16 +11,9 @@
 #define SOCK_PATH "/tmp/kvt-ipc-%d-%d.sock"
 
 namespace blade_llm {
-CudaIpcWrite::CudaIpcWrite(Context *ctx) : is_connected_(false) {
-  auto &src_layers = ctx->layer_data_address();
-  src_ptr_.resize(src_layers.size());
-  for (auto i = 0; i < src_layers.size(); ++i) {
-    src_ptr_[i] = reinterpret_cast<const void *>(src_layers[i]);
-  }
-}
 
 void CudaIpcWrite::init(const cudaIpcHandles *handles) {
-  auto num_layers = src_ptr_.size();
+  auto num_layers = ctx_->num_layers();
   dst_ipc_ptr_.resize(num_layers);
   cuda_open_ipc_handle(handles, num_layers, dst_ipc_ptr_.data());
   is_connected_ = true;
@@ -32,7 +25,8 @@ void CudaIpcWrite::write(uint32_t layer_idx, const std::vector<IpcBlock> &data) 
   }
 
   for (auto &block : data) {
-    const char *src = (const char *) src_ptr_[layer_idx] + block.src_offset;
+    const char *src_ptr = (const char *) ctx_->get_layer_ptr(layer_idx);
+    const char *src = src_ptr + block.src_offset;
     char *dst = (char *) dst_ipc_ptr_[layer_idx] + block.dst_offset;
     cuda_d2d_mem_copy(dst, src, block.length);
   }
@@ -50,10 +44,6 @@ void CudaIpcWrite::close() {
 CudaIpcWrite::~CudaIpcWrite() noexcept {
   close();
 }
-
-SocketWriter::SocketWriter(const WorkerInfo &src_info) :
-    src_inst_id_(src_info.inst_id),
-    src_worker_id_(src_info.worker_id) {};
 
 void SocketWriter::connect(const WorkerInfo &dst_info) {
   if (socket_fd_ == -1) {
@@ -101,8 +91,7 @@ void CudaIpcChannel::connect(const blade_llm::WorkerInfo &dst_info) {
   data_writer_.init(&ipc_handles);
   notify_writer_.connect(dst_info);
 }
-void CudaIpcChannel::send_data(size_t layer_index,
-                               const std::vector<IpcBlock> &data) {
+void CudaIpcChannel::send_data(size_t layer_index, const std::vector<IpcBlock> &data) {
   data_writer_.write(layer_index, data);
 }
 void CudaIpcChannel::send_notification(IIterator<const RequestInfo *> *reqs) {
@@ -160,39 +149,42 @@ void recv_transfer_done(InstanceId inst_id,
   close_sock(sock_fd);
 }
 
-CudaTransferServer::CudaTransferServer(): pool_(8) {};
+CudaTransferServer::CudaTransferServer() : pool_(8) {};
 
 void CudaTransferServer::start_server(ITransferService *service, Context *ctx) {
   if (service == nullptr) {
     throw std::runtime_error("KvTransferService should not be null;");
   }
 
-  auto *worker_info = ctx->worker_info_mutable();
-  if (!cuda_check_ipc_support(ctx->device_id())) {
-    throw std::runtime_error("cuda ipc not support; ");
+  auto proto_ctx = std::make_unique<CudaIpcContext>(ctx->device_id(), true);
+  if (!proto_ctx->check_support()) {
+    throw std::runtime_error("can't start cuda transfer server as cuda_ipc protocol not support;");
   }
-
+  ctx->register_protocol(std::move(proto_ctx));
+  TransferProtocol proto = TransferProtocol::cuda_ipc();
+  auto *worker_info = ctx->worker_info_mutable();
   service_ = service;
   inst_id_ = worker_info->inst_id;
   worker_id_ = worker_info->worker_id;
-  auto layers = ctx->layer_data_address();
-  if (layers.empty()) {
-    throw std::runtime_error("layer data address should not be empty;");
+
+  auto cuda_ctx = ctx->get_protocol_ctx<CudaIpcContext>(proto);
+  if (cuda_ctx == nullptr) {
+    throw std::runtime_error("cuda ipc context not found;");
   }
-  cudaIpcHandles ipc_handles;
-  cuda_create_ipc_handles(layers.data(), layers.size(), &ipc_handles);
+  const auto &ipc_handles = cuda_ctx->get_ipc_handles();
   static_assert(sizeof(ipc_handles) <= MAX_OTHER_INFO_LEN);
   memcpy(worker_info->other_info, ipc_handles.buf, sizeof(ipc_handles));
-  char* sock_path = worker_info->addr_url;
+  char *sock_path = worker_info->addr_url;
   sprintf(sock_path, SOCK_PATH, inst_id_, worker_id_);
   start_uds_server(sock_path, &socket_fd_);
   pool_.spawn(&CudaTransferServer::handle_connect_reqs, this);
-  LOG(INFO) << "CudaTransferServer at " << inst_id_ << ":" << worker_id_ << " started; ";
+  LOG(INFO) << "KVT: CudaTransferServer of (" << inst_id_ << ":" << worker_id_ << ") started at "
+            << worker_info->addr_url;
 }
 
 void CudaTransferServer::handle_connect_reqs() {
   while (!shutdown_.load(std::memory_order_relaxed)) {
-    LOG(INFO) << "KVT cuda_ipc server: (" << inst_id_ << ":" << worker_id_ << ") wait connection ...; ";
+    LOG(INFO) << "KVT: cuda_ipc server: (" << inst_id_ << ":" << worker_id_ << ") wait connection ...; ";
     int client_sock = wait_conn(socket_fd_, 2);
     if (client_sock != -1) {
       uint32_t src_inst_id;
@@ -228,5 +220,41 @@ void CudaTransferServer::shutdown() {
 }
 CudaTransferServer::~CudaTransferServer() {
   shutdown();
+}
+
+void CudaIpcContext::init(Context *ctx) {
+  auto &layer_addrs = ctx->layer_data_address();
+  src_layer_ptrs_.resize(layer_addrs.size());
+  for (auto i = 0; i < layer_addrs.size(); ++i) {
+    src_layer_ptrs_[i] = reinterpret_cast<const void *>(layer_addrs[i]);
+  }
+  cuda_create_ipc_handles(layer_addrs.data(), layer_addrs.size(), &ipc_handles_);
+  is_inited_ = true;
+}
+
+bool CudaIpcContext::check_support() {
+  if (is_server_) {
+    if (!is_cuda_ipc_supported_) {
+      is_cuda_ipc_supported_ = cuda_check_ipc_support(device_id_);
+      return is_cuda_ipc_supported_;
+    }
+  }
+  return true;
+}
+
+const TransferProtocol &CudaIpcContext::protocol() const {
+  return protocol_;
+}
+const void *CudaIpcContext::get_layer_ptr(uint32_t layer_idx) const {
+  if (layer_idx > src_layer_ptrs_.size()) {
+    LOG(FATAL) << "KVT cuda_ipc: invalid layer index: " << layer_idx;
+  }
+  return src_layer_ptrs_[layer_idx];
+}
+const cudaIpcHandles &CudaIpcContext::get_ipc_handles() const {
+  return ipc_handles_;
+}
+size_t CudaIpcContext::num_layers() const {
+  return src_layer_ptrs_.size();
 }
 } // namespace blade_llm

@@ -21,41 +21,40 @@ namespace blade_llm {
     } \
 } while (0)
 
-
-void XContextDeleter::operator()(accl::barex::XContext* ctx) {
+void XContextDeleter::operator()(accl::barex::XContext *ctx) {
   ctx->Shutdown();
   ctx->WaitStop();
   delete ctx;
 }
 
-void XMempoolDeleter::operator()(accl::barex::XSimpleMempool* mempool) {
+void XMempoolDeleter::operator()(accl::barex::XSimpleMempool *mempool) {
   mempool->Shutdown();
   mempool->WaitStop();
   delete mempool;
 }
 
-void XThreadpoolDeleter::operator()(accl::barex::XThreadpool* tp) {
+void XThreadpoolDeleter::operator()(accl::barex::XThreadpool *tp) {
   tp->Shutdown();
   tp->WaitStop();
   delete tp;
 }
 
-void XListenerDeleter::operator()(accl::barex::XListener* tp) {
+void XListenerDeleter::operator()(accl::barex::XListener *tp) {
   tp->Shutdown();
   tp->WaitStop();
   delete tp;
 }
 
-void XConnectorDeleter::operator()(accl::barex::XConnector* tp) {
+void XConnectorDeleter::operator()(accl::barex::XConnector *tp) {
   tp->Shutdown();
   tp->WaitStop();
   delete tp;
 }
 
 BarexMRGuard::~BarexMRGuard() {
-  auto& self = *this;
+  auto &self = *this;
   if (self.mp_ == nullptr) {
-    return ;  // moved
+    return;  // moved
   }
   BarexResult result;
   if (release_) {
@@ -66,14 +65,14 @@ BarexMRGuard::~BarexMRGuard() {
   RTCHECK(result == accl::barex::BAREX_SUCCESS);
 }
 
-auto BarexCtx::choose_nic(const std::vector<XDevice*>& nic_devs, int gpu_dev) -> XDevice* {
+auto BarexCtx::choose_nic(const std::vector<XDevice *> &nic_devs, int gpu_dev) -> XDevice * {
   // TODO(zhanyi.ww): 选择离 gpu_dev 最近的网卡.
   assert(gpu_dev >= 0);
   assert(!nic_devs.empty());
   return gpu_dev >= nic_devs.size() ? nic_devs[0] : nic_devs[gpu_dev];
 }
 
-static void BarexCtxMain(XContext* ctx, std::atomic<bool>* stop_flag) {
+static void BarexCtxMain(XContext *ctx, std::atomic<bool> *stop_flag) {
   int evfd = ctx->GetEventFd();
   constexpr int EVENT_MAX = 8;
   struct epoll_event events[EVENT_MAX];
@@ -84,52 +83,54 @@ static void BarexCtxMain(XContext* ctx, std::atomic<bool>* stop_flag) {
     }
     RTCHECK(ret >= 0);
 
-    while(ctx->ProgressEvents() > 0) {
+    while (ctx->ProgressEvents() > 0) {
       // pass
     }
   }
-
   ctx->Shutdown();
   ctx->WaitStop();
-  return ;
+  return;
 }
 
-BarexCtx::BarexCtx(int gpu_dev_id, std::string mp_name,
-  std::string tp_name, int tpcnt,
-  std::unique_ptr<accl::barex::XChannelCallback> ctxcb,
-  const std::vector<uint64_t>& layer_ptr, uint64_t layer_blk_size) {
-  auto& self = *this;
+BarexCtx::BarexCtx(std::string mp_name,
+                   std::string tp_name,
+                   int tpcnt,
+                   Context *ctx,
+                   std::unique_ptr<accl::barex::XChannelCallback> ctxcb) {
+  auto &self = *this;
   XDeviceManager *manager = nullptr;
   auto result = XDeviceManager::Singleton(manager);
   RTCHECK(result == accl::barex::BAREX_SUCCESS);
   auto all_nic_devs = manager->AllDevices();
   RTCHECK(!all_nic_devs.empty());
-  auto* nic_dev = choose_nic(all_nic_devs, gpu_dev_id);
+  auto *nic_dev = choose_nic(all_nic_devs, ctx->device_id());
 
   XSimpleMempool *mempool = nullptr;
   result = XSimpleMempool::NewInstance(mempool, std::move(mp_name), {nic_dev});
   RTCHECK(result == accl::barex::BAREX_SUCCESS);
   self.mp_.reset(mempool);
 
+  const auto &layer_ptr = ctx->layer_data_address();
   // accl.barex 注册 MR 个数最大为 65536, 即要求 layer_ptr.size <= 65536.
   // 考虑到 LAYER_NUM_MAX 远小于 65536, 所以只需要 LAYER_NUM_MAX 限制即可.
   RTCHECK(layer_ptr.size() <= LAYER_NUM_MAX);
   // 每个 mr 默认大小限制为 1GB.
   int max_mr_size = 1 * 1024 * 1024 * 1024;
-  const char* max_mr_gb_str = getenv("ACCL_MAX_USER_MR_GB");
+  const char *max_mr_gb_str = getenv("ACCL_MAX_USER_MR_GB");
   if (max_mr_gb_str != nullptr) {
     auto tmp_max_mr_gb = atoi(max_mr_gb_str);
     if (tmp_max_mr_gb > 0) {
       max_mr_size = tmp_max_mr_gb * 1024 * 1024 * 1024;
     }
   }
+  auto layer_blk_size = ctx->block_size() * ctx->layer_num_blocks();
   // 如果这里跪了, 需要配置环境变量 ACCL_MAX_USER_MR_GB
   RTCHECK(layer_blk_size <= max_mr_size);
 
   self.layer_mr_.reserve(layer_ptr.size());
   for (auto layer_p : layer_ptr) {
     memp_t out;
-    auto layer_blk_p = reinterpret_cast<void*>(layer_p);
+    auto layer_blk_p = reinterpret_cast<void *>(layer_p);
     // 虽然注释上提到 RegUserMr 要求对齐. 但钉钉确认了, 只要是 cudaMalloc 返回的地址都可以.
     result = self.mp_->RegUserMr(out, layer_blk_p, layer_blk_size, GPU);
     RTCHECK(result == accl::barex::BAREX_SUCCESS);
@@ -144,26 +145,26 @@ BarexCtx::BarexCtx(int gpu_dev_id, std::string mp_name,
   XContext *context = nullptr;
   ContextConfig config = XConfigUtil::DefaultContextConfig();
   result = XContext::NewInstance(context, config, ctxcb.get(), nic_dev, mempool, threadpool);
-  ctxcb.release(); // context保留控制权，无论是否创建和初始化成功，channel_cbk都不能再被使用
+  ctxcb.release();
   RTCHECK(result == accl::barex::BAREX_SUCCESS);
   self.xctx_.reset(context);
 
-  self.ctx_loop_thd_.emplace([context, this] () {
+  self.ctx_loop_thd_.emplace([context, this]() {
     BarexCtxMain(context, &this->stopped_);
   });
-  return;
 }
 
 BarexCtx::~BarexCtx() {
   this->stopped_.store(true);
   this->ctx_loop_thd_->join();
-  return;
 }
 
-CliBarexCtx::CliBarexCtx(int gpu_dev_id, std::string mp_name, std::string tp_name, int tpcnt,
-    std::unique_ptr<accl::barex::XChannelCallback> ctxcb,
-    const std::vector<uint64_t>& layp, uint64_t layer_blk_size):
-  BarexCtx(gpu_dev_id, std::move(mp_name), std::move(tp_name), tpcnt, std::move(ctxcb), layp, layer_blk_size) {
+CliBarexCtx::CliBarexCtx(std::string mp_name,
+                         std::string tp_name,
+                         int tpcnt,
+                         Context *ctx,
+                         std::unique_ptr<accl::barex::XChannelCallback> ctxcb) :
+    BarexCtx(std::move(mp_name), std::move(tp_name), tpcnt, ctx, std::move(ctxcb)) {
 
   XConnector *connector = nullptr;
   // 处理建联/断链的线程个数, 2 来自 barex write-client example~
@@ -171,7 +172,7 @@ CliBarexCtx::CliBarexCtx(int gpu_dev_id, std::string mp_name, std::string tp_nam
   auto result = XConnector::NewInstance(connector, CONN_THD_CNT, TIMER_3S, {this->xctx()});
   RTCHECK(result == accl::barex::BAREX_SUCCESS);
   this->connector_.reset(connector);
-  return ;
+  return;
 }
 
 static constexpr uint32_t SEND_MAGIC = 0x53456e64;  /* SEnd */
@@ -187,7 +188,7 @@ void RDMAServer::CtxCallback::OnRecvCall(XChannel *_ch, char *in_buf, size_t len
     // bad data, ignore.
     return;
   }
-  const char* const end_buf = in_buf + len;
+  const char *const end_buf = in_buf + len;
 
   uint32_t magic, inst_id, worker_id, num_block;
   memcpy(&magic, in_buf, sizeof(uint32_t));
@@ -200,7 +201,7 @@ void RDMAServer::CtxCallback::OnRecvCall(XChannel *_ch, char *in_buf, size_t len
   in_buf += sizeof(uint32_t);
   if (magic != SEND_MAGIC) {
     // bad data, ignore
-    return ;
+    return;
   }
   if (len < sizeof(uint32_t) * (4 + num_block) + 1) {
     // +1 for reqid null terminator
@@ -218,7 +219,7 @@ void RDMAServer::CtxCallback::OnRecvCall(XChannel *_ch, char *in_buf, size_t len
   reqid_len -= 1;
   if (reqid[reqid_len] != '\0') {
     // bad data, ignore
-    return ;
+    return;
   }
   std::string reqidstr(reqid, reqid_len);
 
@@ -229,8 +230,8 @@ void RDMAServer::CtxCallback::OnRecvCall(XChannel *_ch, char *in_buf, size_t len
 
 class FdGuard {
   int const fd_;
-public:
-  FdGuard(int fd) noexcept : fd_(fd) {}
+ public:
+  FdGuard(int fd) noexcept: fd_(fd) {}
   ~FdGuard() {
     ::close(this->fd_);
   }
@@ -250,12 +251,12 @@ static int get_port() {
   serv_addr.sin_family = AF_INET;
   serv_addr.sin_addr.s_addr = INADDR_ANY;
   serv_addr.sin_port = htons(portno);
-  if (bind(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+  if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
     return -1;
   }
 
   socklen_t len = sizeof(serv_addr);
-  if (getsockname(sockfd, (struct sockaddr *)&serv_addr, &len) == -1) {
+  if (getsockname(sockfd, (struct sockaddr *) &serv_addr, &len) == -1) {
     return -1;
   }
   assert(serv_addr.sin_family == AF_INET);
@@ -266,13 +267,13 @@ static int get_port() {
 }
 
 // barex listen 实现是 bind INADDR_ANY, 因此我们随便返回一个对外可用的 ip 地址均可.
-static void get_ip(RDMAInfo* out) {
+static void get_ip(RDMAInfo *out) {
   // SUSv2 guarantees that "Host names are limited to 255 bytes".
   char hostname[256];
   int status = gethostname(hostname, sizeof(hostname));
   RTCHECK(status == 0);
 
-  struct addrinfo* res = nullptr;
+  struct addrinfo *res = nullptr;
   struct addrinfo hints;
   memset(&hints, 0, sizeof(hints));
   hints.ai_family = AF_INET;
@@ -283,34 +284,41 @@ static void get_ip(RDMAInfo* out) {
 
   assert(res->ai_family == AF_INET);
   assert(res->ai_addr->sa_family == AF_INET);
-  auto* ipaddr = (struct sockaddr_in *)res->ai_addr;
-  auto* ret = inet_ntop(ipaddr->sin_family, &ipaddr->sin_addr, out->ip, sizeof(out->ip));
+  auto *ipaddr = (struct sockaddr_in *) res->ai_addr;
+  auto *ret = inet_ntop(ipaddr->sin_family, &ipaddr->sin_addr, out->ip, sizeof(out->ip));
   RTCHECK(ret != nullptr);
-  return ;
+  return;
 }
 
-
 void RDMAServer::start_server(ITransferService *service, Context *ctx) {
-  auto& self = *this;
+  auto &self = *this;
   if (service == nullptr) {
     throw std::runtime_error("KvTransferService should not be null;");
   }
+  auto rdma_ctx = RDMAProtoContext::server_context("KVTServer", 4, std::make_unique<CtxCallback>(service));
+  if (!rdma_ctx->check_support()) {
+    throw std::runtime_error("can't start RDMA transfer server as RDMA protocol not support;");
+  }
+  ctx->register_protocol(std::move(rdma_ctx));
 
-  WorkerInfo* winfo = ctx->worker_info_mutable();
+  WorkerInfo *winfo = ctx->worker_info_mutable();
   auto layer_num_blocks = ctx->layer_num_blocks();
   const uint64_t layer_blk_size = layer_num_blocks * winfo->block_size;
   auto layer_ptr = ctx->layer_data_address();
-  self.ctx_.emplace(winfo->device_id, "RDMAServer-mp", "RDMAServer-tp", 4,
-    std::make_unique<CtxCallback>(service),
-    layer_ptr, layer_blk_size);
-
+  auto device_id = ctx->device_id();
+  auto proto = TransferProtocol::rdma_direct();
+  auto proto_ctx = ctx->get_protocol_ctx<RDMAProtoContext>(proto);
+  if (proto_ctx == nullptr) {
+    throw std::runtime_error("KVT server: rdma context not register.");
+  }
   RDMAInfo info;
   info.layer_num = layer_ptr.size();
   info.layer_blk_size = layer_blk_size;
-  assert(info.layer_num == self.ctx_->layer_mr().size());
+  auto barex_ctx = proto_ctx->barex_ctx();
+  assert(info.layer_num == barex_ctx->layer_mr().size());
   for (int idx = 0; idx < layer_ptr.size(); ++idx) {
-    auto& out = self.ctx_->layer_mr()[idx].mr();
-    auto layer_blk_p = reinterpret_cast<void*>(layer_ptr[idx]);
+    auto &out = barex_ctx->layer_mr()[idx].mr();
+    auto layer_blk_p = reinterpret_cast<void *>(layer_ptr[idx]);
     info.hnds[idx].ptr = layer_blk_p;
     info.hnds[idx].lkey = out.mr->lkey;
     info.hnds[idx].rkey = out.mr->rkey;
@@ -323,58 +331,62 @@ void RDMAServer::start_server(ITransferService *service, Context *ctx) {
   // 处理建联/断链的线程个数, 2 来自 barex write-client example~
   constexpr int LISTEN_THD_CNT = 2;
   XListener *listener = nullptr;
-  auto result = XListener::NewInstance(listener, LISTEN_THD_CNT, info.port, TIMER_3S, {self.ctx_->xctx()});
+  auto xctx = barex_ctx->xctx();
+  if (xctx == nullptr) {
+    LOG(ERROR) << "xctx is nullptr";
+  }
+  auto result = XListener::NewInstance(listener, LISTEN_THD_CNT, info.port, TIMER_3S, {xctx});
   RTCHECK(result == accl::barex::BAREX_SUCCESS);
   self.listener_.reset(listener);
-  result = listener->Listen();
+  result = self.listener_->Listen();
   RTCHECK(result == accl::barex::BAREX_SUCCESS);
-
   static_assert(sizeof(info) <= MAX_OTHER_INFO_LEN);
+
   memcpy(winfo->other_info, &info, sizeof(info));
-  LOG(INFO) << "RDMAServer.start_server: ip=" << info.ip << " port=" << info.port << " layer_num_blocks=" << layer_num_blocks;
-  return;
+  LOG(INFO) << "RDMAServer.start_server: ip=" << info.ip << " port=" << info.port << " layer_num_blocks="
+            << layer_num_blocks;
 }
 
 void RDMAChannel::connect(const WorkerInfo &dst_info) {
-  auto& self = *this;
+  auto &self = *this;
   assert(sizeof(self.dst_) <= MAX_OTHER_INFO_LEN);
   memcpy(&self.dst_, &dst_info.other_info, sizeof(self.dst_));
   assert(self.dst_.layer_num == self.ctx_->layer_mr().size());
   assert(self.dst_.layer_blk_size == self.ctx_->layer_mr()[0].mr().buf_len);
 }
 
-template <typename T, typename E>
+template<typename T, typename E>
 static std::future<T> make_exp_future(E ex) {
   std::promise<T> pr;
   pr.set_exception(std::make_exception_ptr(std::move(ex)));
   return pr.get_future();
 }
 
-[[nodiscard]] static std::future<XChannel*> Connect(XConnector& self, std::string server_addr, int port) {
+[[nodiscard]] static std::future<XChannel *> Connect(XConnector &self, std::string server_addr, int port) {
   // std::promise<XChannel*> pr;
-  auto pr = std::make_shared<std::promise<XChannel*>>();
+  auto pr = std::make_shared<std::promise<XChannel *>>();
   auto fut = pr->get_future();
 
   auto result = self.Connect(std::move(server_addr), port,
-    [pr=std::move(pr)] (XChannel *res, Status s) mutable {
-      if (!s.IsOk()) {
-        auto ex = std::make_exception_ptr(std::runtime_error("Connect ERR: " + s.ErrMsg()));
-        pr->set_exception(std::move(ex));
-        return;
-      }
-      pr->set_value(res);
-    }
+                             [pr = std::move(pr)](XChannel *res, Status s) mutable {
+                               if (!s.IsOk()) {
+                                 auto ex = std::make_exception_ptr(std::runtime_error("Connect ERR: " + s.ErrMsg()));
+                                 pr->set_exception(std::move(ex));
+                                 return;
+                               }
+                               pr->set_value(res);
+                             }
   );
 
   if (result != BAREX_SUCCESS) {
     auto ex = std::runtime_error("Connect Submit Err: " + Status(result).ErrMsg());
-    return make_exp_future<XChannel*>(std::move(ex));
+    return make_exp_future<XChannel *>(std::move(ex));
   }
   return fut;
 }
 
 static int get_send_parallel() {
-  const char* valstr = getenv("BLLM_KVTRANS_RDMA_SP");
+  const char *valstr = getenv("BLLM_KVTRANS_RDMA_SP");
   if (valstr == nullptr) {
     return 1;
   }
@@ -386,43 +398,46 @@ static int get_send_parallel() {
 }
 
 void RDMAChannel::do_init() {
-  auto& self = *this;
+  auto &self = *this;
   if (!self.chs_.empty()) {
-    return ;
+    return;
   }
   const int sp = get_send_parallel();
   assert(sp > 0);
 
   self.chs_.reserve(sp);
-  auto futs = std::vector<std::future<XChannel*>>();
+  auto futs = std::vector<std::future<XChannel *>>();
   futs.reserve(sp);
-  for (int i = 0 ; i < sp; ++i) {
-    auto fut = Connect(*self.ctx_->connector(), self.dst_.ip, self.dst_.port);
+  auto conn = self.ctx_->connector();
+  assert(conn != nullptr);
+  LOG(INFO) << "KVT: rdma connect to : " << self.dst_.ip << ":" << self.dst_.port;
+  for (int i = 0; i < sp; ++i) {
+    auto fut = Connect(*conn, self.dst_.ip, self.dst_.port);
     futs.emplace_back(std::move(fut));
   }
 
-  for (auto& fut : futs) {
+  for (auto &fut : futs) {
     self.chs_.emplace_back(fut.get());
   }
   assert(!self.chs_.empty());
   return;
 }
 
-[[nodiscard]] static std::future<void> WriteSingle(XChannel* ch, memp_t sdata, uint64_t raddr, uint32_t rkey) {
+[[nodiscard]] static std::future<void> WriteSingle(XChannel *ch, memp_t sdata, uint64_t raddr, uint32_t rkey) {
   // std::promise<void> pr;
   auto pr = std::make_shared<std::promise<void>>();
   auto fut = pr->get_future();
 
   // LOG(INFO) << "zydebug WriteSingle: raddr=" << raddr << " rkey=" << rkey;
   auto result = ch->WriteSingle(std::move(sdata), raddr, rkey, false, 0,
-    [pr=std::move(pr)](Status s) mutable {
-      if (!s.IsOk()) {
-        auto ex = std::make_exception_ptr(std::runtime_error("Write ERR: " + s.ErrMsg()));
-        pr->set_exception(std::move(ex));
-        return;
-      }
-      pr->set_value();
-    }
+                                [pr = std::move(pr)](Status s) mutable {
+                                  if (!s.IsOk()) {
+                                    auto ex = std::make_exception_ptr(std::runtime_error("Write ERR: " + s.ErrMsg()));
+                                    pr->set_exception(std::move(ex));
+                                    return;
+                                  }
+                                  pr->set_value();
+                                }
   );
   if (result != BAREX_SUCCESS) {
     auto ex = std::runtime_error("Write Submit Err: " + Status(result).ErrMsg());
@@ -432,22 +447,22 @@ void RDMAChannel::do_init() {
   return fut;
 }
 
-[[nodiscard]] static std::future<void> WriteBatch(XChannel* ch, std::shared_ptr<std::vector<rw_memp_t>> datasp) {
+[[nodiscard]] static std::future<void> WriteBatch(XChannel *ch, std::shared_ptr<std::vector<rw_memp_t>> datasp) {
   // std::promise<void> pr;
   auto pr = std::make_shared<std::promise<void>>();
   auto fut = pr->get_future();
-  auto& datas = *datasp;
+  auto &datas = *datasp;
 
   auto result = ch->WriteBatch(datas,
-    [pr=std::move(pr), d=std::move(datasp)](Status s) mutable {
-      // WriteBatch 要求 datasp 直至 callback 中才能回收.
-      if (!s.IsOk()) {
-        auto ex = std::make_exception_ptr(std::runtime_error("Write ERR: " + s.ErrMsg()));
-        pr->set_exception(std::move(ex));
-        return;
-      }
-      pr->set_value();
-    }
+                               [pr = std::move(pr), d = std::move(datasp)](Status s) mutable {
+                                 // WriteBatch 要求 datasp 直至 callback 中才能回收.
+                                 if (!s.IsOk()) {
+                                   auto ex = std::make_exception_ptr(std::runtime_error("Write ERR: " + s.ErrMsg()));
+                                   pr->set_exception(std::move(ex));
+                                   return;
+                                 }
+                                 pr->set_value();
+                               }
   );
 
   if (result != BAREX_SUCCESS) {
@@ -458,19 +473,18 @@ void RDMAChannel::do_init() {
   return fut;
 }
 
-accl::barex::XChannel* RDMAChannel::ch() noexcept {
-  auto& self = *this;
+accl::barex::XChannel *RDMAChannel::ch() noexcept {
+  auto &self = *this;
   int n = self.chs_.size();
   int idx = (++self.prev_ch_idx_) % n;
   return self.chs_[idx];
 }
 
 void RDMAChannel::send_data(size_t layer_idx, const std::vector<IpcBlock> &data) {
-  auto& self = *this;
+  auto &self = *this;
   self.do_init();
-
   auto datasp = std::make_shared<std::vector<rw_memp_t>>();
-  for (const auto& [src_offset, dst_offset, len] : data) {
+  for (const auto &[src_offset, dst_offset, len] : data) {
     if (len <= 0) {
       continue;
     }
@@ -486,26 +500,26 @@ void RDMAChannel::send_data(size_t layer_idx, const std::vector<IpcBlock> &data)
     src_mr.buf_len = len;
 
     auto rkey = self.dst_.hnds[layer_idx].rkey;
-    auto* rladdr = reinterpret_cast<char*>(self.dst_.hnds[layer_idx].ptr);
+    auto *rladdr = reinterpret_cast<char *>(self.dst_.hnds[layer_idx].ptr);
     assert(rladdr);
     uint64_t raddr = reinterpret_cast<uint64_t>(rladdr + dst_offset);
 
     datasp->emplace_back(rw_memp_t{std::move(src_mr), raddr, rkey});
   }
   if (datasp->empty()) {
-    return ;
+    return;
   }
 
   auto fut = WriteBatch(self.ch(), std::move(datasp));
   self.write_futs_.emplace_back(std::move(fut));
-  return ;
+  return;
 }
 
 void RDMAChannel::do_write(uint32_t layer_idx,
                            size_t src_offset,
                            size_t dst_offset,
                            size_t len) {
-  auto& self = *this;
+  auto &self = *this;
   self.do_init();
 
   assert(src_offset < self.dst_.layer_blk_size);
@@ -520,30 +534,30 @@ void RDMAChannel::do_write(uint32_t layer_idx,
   src_mr.buf_len = len;
 
   auto rkey = self.dst_.hnds[layer_idx].rkey;
-  auto* rladdr = reinterpret_cast<char*>(self.dst_.hnds[layer_idx].ptr);
+  auto *rladdr = reinterpret_cast<char *>(self.dst_.hnds[layer_idx].ptr);
   assert(rladdr);
   uint64_t raddr = reinterpret_cast<uint64_t>(rladdr + dst_offset);
 
   WriteSingle(self.ch(), std::move(src_mr), raddr, rkey).get();
-  return ;
+  return;
 }
 
-static void when_all_succeed(std::vector<std::future<void>>& futs) {
-  for (auto& fut : futs) {
+static void when_all_succeed(std::vector<std::future<void>> &futs) {
+  for (auto &fut : futs) {
     fut.get();
   }
-  return ;
+  return;
 }
 
 void RDMAChannel::flush() {
-  auto& self = *this;
+  auto &self = *this;
   std::vector<std::future<void>> futs;
   std::swap(futs, self.write_futs_);
   when_all_succeed(futs);
-  return ;
+  return;
 }
 
-static void Encode(char* ptr, uint32_t inst_id, uint32_t worker_id,
+static void Encode(char *ptr, uint32_t inst_id, uint32_t worker_id,
                    const std::string &reqid, const std::vector<uint32_t> &block_ids) {
   const uint32_t num_block = block_ids.size();
   const uint32_t magic = SEND_MAGIC;
@@ -562,29 +576,29 @@ static void Encode(char* ptr, uint32_t inst_id, uint32_t worker_id,
 
   // *(s.begin() + s.size()) has value CharT() (a null terminator)
   memcpy(ptr, reqid.data(), reqid.size() + 1);
-  return ;
+  return;
 }
 
 // Send will release sdata
-[[nodiscard]] static std::future<void> Send(XChannel* ch, memp_t sdata) {
+[[nodiscard]] static std::future<void> Send(XChannel *ch, memp_t sdata) {
   // barex Send 要求 callback copyable...
   // std::promise<void> pr;
   auto pr = std::make_shared<std::promise<void>>();
   auto fut = pr->get_future();
   auto bufptr = sdata.buf;
-  auto bufdev= sdata.d_type;
+  auto bufdev = sdata.d_type;
 
   auto result = ch->Send(std::move(sdata), /* auto_release */ true, {0},
-    [pr=std::move(pr), bufptr, bufdev, ch](Status s) mutable {
-      if (!s.IsOk()) {
-        // send 失败时, auto_release 不会 release.
-        ch->ReleaseBuffer(bufptr, bufdev);
-        auto ex = std::make_exception_ptr(std::runtime_error("Send ERR: " + s.ErrMsg()));
-        pr->set_exception(std::move(ex));
-        return;
-      }
-      pr->set_value();
-    }
+                         [pr = std::move(pr), bufptr, bufdev, ch](Status s) mutable {
+                           if (!s.IsOk()) {
+                             // send 失败时, auto_release 不会 release.
+                             ch->ReleaseBuffer(bufptr, bufdev);
+                             auto ex = std::make_exception_ptr(std::runtime_error("Send ERR: " + s.ErrMsg()));
+                             pr->set_exception(std::move(ex));
+                             return;
+                           }
+                           pr->set_value();
+                         }
   );
   if (result != BAREX_SUCCESS) {
     ch->ReleaseBuffer(bufptr, bufdev);
@@ -596,16 +610,16 @@ static void Encode(char* ptr, uint32_t inst_id, uint32_t worker_id,
 }
 
 void RDMAChannel::send_notification(IIterator<const RequestInfo *> *reqs) {
-  auto& self = *this;
+  auto &self = *this;
   self.do_init();
   // self.send_futs_.reserve(data.size());
   assert(self.send_futs_.empty());
 
   auto opt = reqs->next();
-  while(opt.has_value()) {
+  while (opt.has_value()) {
     auto r = opt.value();
-    const auto& reqid = r->req_id;
-    const auto& block_ids = r->dst_blocks();
+    const auto &reqid = r->req_id;
+    const auto &block_ids = r->dst_blocks();
 
     // 编码规则见 RDMAServer::CtxCallback::OnRecvCall
     memp_t bufmr;
@@ -614,7 +628,7 @@ void RDMAChannel::send_notification(IIterator<const RequestInfo *> *reqs) {
     RTCHECK(result == accl::barex::BAREX_SUCCESS);
     Encode(bufmr.buf, self.src_inst_id_, self.src_worker_id_, reqid, block_ids);
 
-    auto* use_ch = self.ch();
+    auto *use_ch = self.ch();
     assert(use_ch->GetMempool() == self.ctx_->mp());
     auto fut = Send(use_ch, std::move(bufmr));
     self.send_futs_.emplace_back(std::move(fut));
@@ -623,12 +637,12 @@ void RDMAChannel::send_notification(IIterator<const RequestInfo *> *reqs) {
 
   when_all_succeed(self.send_futs_);
   self.send_futs_.clear();
-  return ;
+  return;
 }
 
 void RDMAChannel::do_notify_send_done(const std::string &reqid,
                                       const std::vector<uint32_t> &block_ids) {
-  auto& self = *this;
+  auto &self = *this;
   self.do_init();
 
   // 编码规则见 RDMAServer::CtxCallback::OnRecvCall
@@ -643,7 +657,41 @@ void RDMAChannel::do_notify_send_done(const std::string &reqid,
   // LOG(INFO) << "zydebug notify_send_done reqid=" << reqid <<  " block_ids.size=" << block_ids.size();
   Send(self.ch(), mrguard.mr()).get();
   // LOG(INFO) << "zydebug notify_send_done done reqid=" << reqid <<  " block_ids.size=" << block_ids.size();
-  return ;
+  return;
+}
+
+bool RDMAProtoContext::check_support() {
+  try {
+    XDeviceManager *manager = nullptr;
+    auto result = XDeviceManager::Singleton(manager);
+    if (result != accl::barex::BAREX_SUCCESS) {
+      return false;
+    }
+    auto all_nic_devs = manager->AllDevices();
+    if (all_nic_devs.empty()) {
+      return false;
+    }
+  } catch (const std::exception &e) {
+    LOG(ERROR) << "RDMAProtoContext::check_support: " << e.what() << " return false;";
+    return false;
+  }
+  return true;
+}
+void RDMAProtoContext::init(Context *ctx) {
+  if (is_server) {
+    barex_ctx_ = std::make_unique<BarexCtx>(name_prefix + "mp", name_prefix + "tp", 4, ctx, std::move(callback_));
+  } else {
+    cli_barex_ctx_ =
+        std::make_unique<CliBarexCtx>(name_prefix + "mp", name_prefix + "tp", 4, ctx, std::move(callback_));
+  }
+}
+std::unique_ptr<RDMAProtoContext> RDMAProtoContext::server_context(std::string &&name,
+                                                                   int num_threads,
+                                                                   std::unique_ptr<accl::barex::XChannelCallback> &&bk) {
+  return std::make_unique<RDMAProtoContext>(std::move(name), num_threads, true, std::move(bk));
+}
+std::unique_ptr<RDMAProtoContext> RDMAProtoContext::client_context(std::string &&name, int num_threads) {
+  return std::make_unique<RDMAProtoContext>(std::move(name), num_threads, false, std::make_unique<CliCtxCallback>());
 }
 
 }  // namespace blade_llm {

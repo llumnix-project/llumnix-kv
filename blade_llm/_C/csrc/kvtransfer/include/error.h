@@ -11,6 +11,7 @@ enum ErrorCode {
   // connection related
   INVALID_TARGET,
   TARGET_NOT_FOUND,
+  TARGET_CONNOT_CONNECT,
   TARGET_DISCONNECTED,
   // request related
   REQUEST_NOT_FOUND,
