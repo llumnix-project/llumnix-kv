@@ -4,42 +4,133 @@
 #include "channel.h"
 
 namespace blade_llm {
-static inline void parse_block_send(const WorkerInfo *src_worker_info,
-                                    const WorkerInfo *dst_worker_info,
-                                    const RequestInfo *task,
-                                    std::vector<IpcBlock> &send_blocks) {
-  if (src_worker_info->tp_size == dst_worker_info->tp_size) {
-    // as tp size is same, token size should be same;
-    assert(src_worker_info->token_size == dst_worker_info->token_size);
-    auto token_size = src_worker_info->token_size;
 
-    // ntpb: number tokens per block
-    uint32_t src_ntpb = src_worker_info->block_size / token_size;
-    uint32_t dst_ntpb = dst_worker_info->block_size / token_size;
+static void parse_block_send_p_eq_d(
+  const WorkerInfo *src_worker_info,
+  const WorkerInfo *dst_worker_info,
+  const RequestInfo *task,
+  std::vector<IpcBlock> &send_blocks) {
+  // as tp size is same, token size should be same;
+  assert(src_worker_info->tp_size == dst_worker_info->tp_size);
+  assert(src_worker_info->token_size == dst_worker_info->token_size);
+  assert(src_worker_info->block_size == dst_worker_info->block_size);
+  assert(src_worker_info->worker_tp_rank == dst_worker_info->worker_tp_rank);
+  auto token_size = src_worker_info->token_size;
+  size_t block_size = src_worker_info->block_size;
 
-    auto wrote_tokens = task->seen_tokens();
-    auto left_tokens = task->new_tokens();
-    const auto &src_blocks = task->src_blocks();
-    const auto &dst_blocks = task->dst_blocks();
+  // ntpb: number tokens per block
+  uint32_t src_ntpb = block_size / token_size;
+  uint32_t dst_ntpb = block_size / token_size;
+  assert(src_ntpb == dst_ntpb);
 
-    while (left_tokens > 0) {
-      auto src_block_idx = wrote_tokens / src_ntpb;
-      auto src_token_idx = wrote_tokens % src_ntpb;
-      size_t src_offset = src_blocks[src_block_idx] * src_worker_info->block_size
-          + src_token_idx * token_size;
-      auto tokens = std::min(src_ntpb - src_token_idx, left_tokens);
-      auto dst_block_idx = wrote_tokens / dst_ntpb;
-      auto dst_token_idx = wrote_tokens % dst_ntpb;
-      size_t dst_offset = dst_blocks[dst_block_idx] * dst_worker_info->block_size
-          + dst_token_idx * token_size;
-      size_t length = tokens * token_size;
-      send_blocks.emplace_back(src_offset, dst_offset, length);
-      wrote_tokens += tokens;
-      left_tokens -= tokens;
-    }
-  } else {
-    throw std::runtime_error("different tp size is not support now;");
+  auto wrote_tokens = task->seen_tokens();
+  auto left_tokens = task->new_tokens();
+  const auto &src_blocks = task->src_blocks();
+  const auto &dst_blocks = task->dst_blocks();
+  assert(src_blocks.size() == dst_blocks.size());
+
+  while (left_tokens > 0) {
+    auto src_block_idx = wrote_tokens / src_ntpb;
+    auto src_token_idx = wrote_tokens % src_ntpb;
+    size_t src_offset = src_blocks[src_block_idx] * block_size
+        + src_token_idx * token_size;
+    auto tokens = std::min(src_ntpb - src_token_idx, left_tokens);
+    auto dst_block_idx = wrote_tokens / dst_ntpb;
+    auto dst_token_idx = wrote_tokens % dst_ntpb;
+    size_t dst_offset = dst_blocks[dst_block_idx] * block_size
+        + dst_token_idx * token_size;
+    size_t length = tokens * token_size;
+    send_blocks.emplace_back(src_offset, dst_offset, length);
+    wrote_tokens += tokens;
+    left_tokens -= tokens;
   }
+}
+
+static void do_parse_block_send(
+  const WorkerInfo *p_info,  // src
+  const std::vector<uint32_t>& p_blocks,
+  const WorkerInfo *d_info,  // dst
+  const std::vector<uint32_t>& d_blocks,
+  uint32_t wrote_tokens,
+  uint32_t left_tokens,
+  std::vector<IpcBlock> &send_blocks) {
+  assert(p_info->tp_size > d_info->tp_size);
+  assert((p_info->tp_size % d_info->tp_size) == 0);
+  const uint32_t group_n = p_info->tp_size / d_info->tp_size;
+  assert(p_info->worker_tp_rank / group_n == d_info->worker_tp_rank);
+  const uint32_t group_off = p_info->worker_tp_rank % group_n;
+  assert(d_info->token_size == p_info->token_size * group_n);
+  assert(d_info->token_size % 2 == 0);
+  assert(p_info->token_size % 2 == 0);
+  // cache shape [num_gpu_blocks, block_size, 2, num_kv_heads, head_dim]
+  const size_t p_k_size = p_info->token_size / 2;
+  const size_t d_k_size = d_info->token_size / 2;
+  assert(d_k_size == p_k_size * group_n);
+  // p_info->block_size: uint32_t 类型, 需要先转 size_t 不然仍有溢出风险.
+  size_t p_block_size = p_info->block_size;
+  size_t d_block_size = d_info->block_size;
+  size_t p_token_size = p_info->token_size;
+  size_t d_token_size = d_info->token_size;
+  // ntpb: number tokens per block
+  const uint32_t ntpb = p_block_size / p_info->token_size;
+  assert(ntpb * p_info->token_size == p_block_size);
+  assert(ntpb * d_info->token_size == d_block_size);
+  assert(p_blocks.size() == d_blocks.size());
+
+  while (left_tokens > 0) {
+    const uint32_t block_idx = wrote_tokens / ntpb;
+    const uint32_t token_idx_base = wrote_tokens % ntpb;
+    const size_t p_blk_off = p_blocks[block_idx] * p_block_size;
+    const size_t d_blk_off = d_blocks[block_idx] * d_block_size;
+    const uint32_t tokens = std::min(ntpb - token_idx_base, left_tokens);
+
+    for (uint32_t idx = 0; idx < tokens; ++idx) {
+      const uint32_t token_idx = token_idx_base + idx;
+      const size_t pk_token_off = p_blk_off + token_idx * p_token_size;
+      const size_t pv_token_off = pk_token_off + p_k_size;
+      const size_t d_token_off = d_blk_off + token_idx * d_token_size;
+      const size_t dk_token_off = d_token_off + group_off * p_k_size;
+      const size_t dv_token_off = dk_token_off + d_k_size;
+      send_blocks.emplace_back(pk_token_off, dk_token_off, p_k_size);
+      send_blocks.emplace_back(pv_token_off, dv_token_off, p_k_size);
+    }
+
+    wrote_tokens += tokens;
+    left_tokens -= tokens;
+  }
+
+  return;
+}
+
+static void parse_block_send_p_gt_d(
+  const WorkerInfo *p_info,  // src
+  const WorkerInfo *d_info,  // dst
+  const RequestInfo *task,
+  std::vector<IpcBlock> &send_blocks) {
+  return do_parse_block_send(
+    p_info, task->src_blocks(),
+    d_info, task->dst_blocks(),
+    task->seen_tokens(),
+    task->new_tokens(),
+    send_blocks);
+}
+
+static void parse_block_send_p_lt_d(
+  const WorkerInfo *p_info,
+  const WorkerInfo *d_info,
+  const RequestInfo *task,
+  std::vector<IpcBlock> &send_blocks) {
+  size_t sb_idx = send_blocks.size();
+  do_parse_block_send(
+    d_info, task->dst_blocks(),
+    p_info, task->src_blocks(),
+    task->seen_tokens(),
+    task->new_tokens(),
+    send_blocks);
+  for (; sb_idx < send_blocks.size(); ++sb_idx) {
+    std::swap(send_blocks[sb_idx].src_offset, send_blocks[sb_idx].dst_offset);
+  }
+  return ;
 }
 
 // src_offset, dst_offset, len
@@ -111,6 +202,15 @@ void KvSendStub::start_async() {
   size_t max_block_n = 0;
   size_t total_block_n = 0;
   size_t finished_req_n = 0;
+
+  decltype(parse_block_send_p_lt_d)* parse_block_send = nullptr;
+  if (src_info_.tp_size == dst_info_.tp_size) {
+    parse_block_send = parse_block_send_p_eq_d;
+  } else if (src_info_.tp_size > dst_info_.tp_size) {
+    parse_block_send = parse_block_send_p_gt_d;
+  } else {
+    parse_block_send = parse_block_send_p_lt_d;
+  }
 
   for (;;) {
     BatchSendTask batch;
