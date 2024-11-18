@@ -79,3 +79,13 @@ dmypy.json
 
 # MacOS system
 .DS_Store
+
+
+# generated hip files
+*_hip.h
+*_hip.cpp
+*_hip.cc
+*_hip.cuh
+*.hip
+# this is special because it's hipfied from our cuda_compat.h
+hip_compat.h
