@@ -6,7 +6,7 @@
 #include <arpa/inet.h>
 #include <stdexcept>
 #include "utils/socket_helper.h"
-#include "logging.h"
+#include "thrid_party/logging.h"
 
 namespace blade_llm {
 

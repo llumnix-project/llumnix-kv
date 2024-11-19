@@ -5,10 +5,10 @@
 #include "protocol/cuda_ipc.h"
 #include "utils/cuda_helper.h"
 #include "utils/socket_helper.h"
-#include "logging.h"
+#include "thrid_party/logging.h"
 
 #define MAX_REQ_ID_LENGTH (255)
-#define SOCK_PATH "/tmp/kvt-ipc-%d-%d.sock"
+#define SOCK_PATH "/tmp/kvt-ipc-%ld-%d.sock"
 
 namespace blade_llm {
 
@@ -49,8 +49,8 @@ void SocketWriter::connect(const WorkerInfo &dst_info) {
   if (socket_fd_ == -1) {
     dst_inst_id_ = dst_info.inst_id;
     dst_worker_id_ = dst_info.worker_id;
-    auto path = dst_info.addr_url;
-    if (!try_connect_uds(path, &socket_fd_)) {
+    const auto& path = dst_info.addr;
+    if (!try_connect_uds(path.c_str(), &socket_fd_)) {
       throw std::runtime_error("fail to connect uds server on target worker;");
     }
     write_sock(socket_fd_, (char *) &src_inst_id_, sizeof(uint32_t));
@@ -86,8 +86,10 @@ SocketWriter::~SocketWriter() {
 
 void CudaIpcChannel::connect(const blade_llm::WorkerInfo &dst_info) {
   cudaIpcHandles ipc_handles;
-  static_assert(sizeof(ipc_handles) <= MAX_OTHER_INFO_LEN);
-  memcpy(ipc_handles.buf, dst_info.other_info, sizeof(ipc_handles));
+  if (sizeof(ipc_handles) > dst_info.other_info.size()) {
+    throw std::runtime_error("invalid cuda ipc handles format;");
+  }
+  memcpy(ipc_handles.buf, dst_info.other_info.data(), sizeof(ipc_handles));
   data_writer_.init(&ipc_handles);
   notify_writer_.connect(dst_info);
 }
@@ -172,14 +174,15 @@ void CudaTransferServer::start_server(ITransferService *service, Context *ctx) {
     throw std::runtime_error("cuda ipc context not found;");
   }
   const auto &ipc_handles = cuda_ctx->get_ipc_handles();
-  static_assert(sizeof(ipc_handles) <= MAX_OTHER_INFO_LEN);
-  memcpy(worker_info->other_info, ipc_handles.buf, sizeof(ipc_handles));
-  char *sock_path = worker_info->addr_url;
+  worker_info->other_info.resize(sizeof(ipc_handles));
+  memcpy(worker_info->other_info.data(), ipc_handles.buf, sizeof(ipc_handles));
+  char sock_path[64]{"\0"};
   sprintf(sock_path, SOCK_PATH, inst_id_, worker_id_);
   start_uds_server(sock_path, &socket_fd_);
+  worker_info->addr = sock_path;
   pool_.spawn(&CudaTransferServer::handle_connect_reqs, this);
   LOG(INFO) << "KVT: CudaTransferServer of (" << inst_id_ << ":" << worker_id_ << ") started at "
-            << worker_info->addr_url;
+            << worker_info->addr;
 }
 
 void CudaTransferServer::handle_connect_reqs() {

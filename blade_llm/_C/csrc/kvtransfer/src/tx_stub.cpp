@@ -1,6 +1,6 @@
 #include "tx_stub.h"
 #include "utils/timer.h"
-#include "logging.h"
+#include "thrid_party/logging.h"
 #include "channel.h"
 
 namespace blade_llm {
@@ -359,13 +359,13 @@ KvSendStub::~KvSendStub() {
   send_backend_.reset();
 }
 
-SendStub KvSendStubFactory::create_stub(InstanceId dst_inst_id,
+SendStub KvSendStubFactory::create_stub(const InstanceName& dst_inst_name,
                                         WorkerId dst_worker_id,
                                         uint32_t start_layer,
                                         uint32_t num_layers,
                                         std::optional<TransferProtocol> proto_opt) {
 
-  auto info_opt = naming_->get_worker_info(dst_inst_id, dst_worker_id);
+  auto info_opt = naming_worker_->get_worker_info(dst_inst_name, dst_worker_id);
   if (info_opt.has_value()) {
     auto info = info_opt.value();
     Channel ch;
@@ -376,7 +376,7 @@ SendStub KvSendStubFactory::create_stub(InstanceId dst_inst_id,
         ch = create_channel(ctx_, proto);
         ch->connect(info);
       } else {
-        LOG(ERROR) << "KVT: target worker(" << dst_inst_id << ":" << dst_worker_id << ") does not support protocol("
+        LOG(ERROR) << "KVT: target worker(" << dst_inst_name << ":" << dst_worker_id << ") does not support protocol("
                    << proto.to_string() << ");";
         throw std::runtime_error("target worker not support protocol: " + proto.to_string());
       }
@@ -387,20 +387,20 @@ SendStub KvSendStubFactory::create_stub(InstanceId dst_inst_id,
         try {
           ch = create_channel(ctx_, p);
           ch->connect(info);
-          LOG(INFO) << "KVT : connect target worker(" << dst_inst_id << ":" << dst_worker_id << ") use "
+          LOG(INFO) << "KVT : connect target worker(" << dst_inst_name << ":" << dst_worker_id << ") use "
                     << p.to_string() << " protocol;";
           break;
         } catch (std::exception &e) {
-          LOG(WARNING) << "KVT : can't connect target worker(" << dst_inst_id << ":" << dst_worker_id
+          LOG(WARNING) << "KVT : can't connect target worker(" << dst_inst_name << ":" << dst_worker_id
                        << ") with " << p.to_string() << " protocol, try other protocol ...";
         }
       }
     }
     return std::make_unique<KvSendStub>(info, ctx_->worker_info(), start_layer, num_layers, std::move(ch));
   } else {
-    LOG(ERROR) << "KVT: can't find worker(" << dst_inst_id << ":" << dst_worker_id << ") from naming service;";
+    LOG(ERROR) << "KVT: can't find worker(" << dst_inst_name << ":" << dst_worker_id << ") from naming service;";
     throw std::runtime_error("can not find worker(" +
-        std::to_string(dst_inst_id) + ":" + std::to_string(dst_worker_id) +
+        dst_inst_name + ":" + std::to_string(dst_worker_id) +
         ") from naming service;");
   }
 }

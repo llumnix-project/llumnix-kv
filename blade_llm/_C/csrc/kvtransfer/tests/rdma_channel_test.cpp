@@ -4,7 +4,7 @@
 #include "utils/block_queue.h"
 #include "protocol/rdma_protocol.h"
 #include "naming/shm_naming.h"
-#include "logging.h"
+#include "thrid_party/logging.h"
 
 #define NAMING_FILE "rdma_test"
 #ifdef ENABLE_RDMA
@@ -93,9 +93,9 @@ TEST(RDMAChannelTest, TestTransefer) {
     layer_addrs[0] = reinterpret_cast<uint64_t>(layer_0);
     layer_addrs[1] = reinterpret_cast<uint64_t>(layer_1);
     ShmNamingClient naming;
-    naming.connect(SHARE_MEMORY_NAMING_SCHEMA, NAMING_FILE);
+    naming.connect(NAMING_FILE);
 
-    Context ctx(0, 0);
+    Context ctx("0", 0, 0);
     ctx.set_layer_data_address(0, layer_addrs);
     ctx.set_block_params(block_size, token_size, 4);
     RDMAServer server;
@@ -152,9 +152,9 @@ TEST(RDMAChannelTest, TestTransefer) {
     layer_addrs[0] = reinterpret_cast<uint64_t>(layer_0);
     layer_addrs[1] = reinterpret_cast<uint64_t>(layer_1);
     ShmNamingClient naming;
-    naming.connect(SHARE_MEMORY_NAMING_SCHEMA, NAMING_FILE);
+    naming.connect(NAMING_FILE);
 
-    Context ctx(1, 0);
+    Context ctx("1", 1, 0);
     ctx.set_layer_data_address(0, layer_addrs);
     ctx.set_block_params(block_size, token_size, 4);
     auto proto_ctx = RDMAProtoContext::client_context("KVTClient", 4);
@@ -162,11 +162,11 @@ TEST(RDMAChannelTest, TestTransefer) {
     ctx.register_protocol(std::move(proto_ctx));
     auto rdma_ctx = ctx.get_protocol_ctx<RDMAProtoContext>(proto);
     RDMAChannel channel(ctx.inst_id, ctx.worker_id, rdma_ctx->cli_barex_ctx());
-    auto dst_info = naming.get_worker_info(0, 0);
+    auto dst_info = naming.get_worker_info("0", 0);
     size_t retry_cnt = 3;
     while (!dst_info.has_value() && retry_cnt > 0) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
-      dst_info = naming.get_worker_info(0, 0);
+      dst_info = naming.get_worker_info("0", 0);
       retry_cnt--;
     }
     EXPECT_TRUE(dst_info.has_value());

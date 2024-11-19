@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 #include "client.h"
-#include "logging.h"
+#include "thrid_party/logging.h"
 
 using ::testing::Return;
 using ::testing::Field;
@@ -36,6 +36,7 @@ class MockSendStub : public ISendStub {
  public:
   MockSendStub() = default;
   MOCK_METHOD(void, start, (), (override));
+  MOCK_METHOD(const WorkerInfo&, dst_info, (), (const, override));
   MOCK_METHOD(void, send_batch, (const BatchSendTask&), (override));
   MOCK_METHOD(StubState, check_state, (), (override));
   MOCK_METHOD(void, stop, (), (override));
@@ -46,10 +47,18 @@ class ProxyStub : public ISendStub {
   InstanceId dst_inst;
   WorkerId dst_worker;
   MockSendStub *stub;
-  ProxyStub(InstanceId i, WorkerId w, MockSendStub *s) : dst_inst(i), dst_worker(w), stub(s) {}
+  ProxyStub(const InstanceId &i, WorkerId w, MockSendStub *s) :
+      dst_inst(i),
+      dst_worker(w),
+      stub(s),
+      info_(i, w) {}
 
   void start() override {
     stub->start();
+  }
+
+  [[nodiscard]] const WorkerInfo &dst_info() const override {
+    return info_;
   }
 
   void send_batch(const BatchSendTask &batch) override {
@@ -63,6 +72,8 @@ class ProxyStub : public ISendStub {
   void stop() override {
     stub->stop();
   }
+ private:
+  WorkerInfo info_;
 };
 
 class FakeStubFactory : public ISendStubFactory {
@@ -70,11 +81,11 @@ class FakeStubFactory : public ISendStubFactory {
   std::vector<std::unique_ptr<ProxyStub>> stubs;
 
   FakeStubFactory() = default;
-  SendStub create_stub(InstanceId dst_inst, WorkerId dst_worker, uint32_t, uint32_t,
+  SendStub create_stub(const InstanceName &dst_inst, WorkerId dst_worker, uint32_t, uint32_t,
                        std::optional<TransferProtocol> p) override {
     for (auto i = 0; i < stubs.size(); ++i) {
       if (stubs[i] != nullptr) {
-        if (stubs[i]->dst_inst == dst_inst && stubs[i]->dst_worker == dst_worker) {
+        if (stubs[i]->dst_inst == std::stoi(dst_inst) && stubs[i]->dst_worker == dst_worker) {
           return std::move(stubs[i]);
         }
       }
@@ -84,7 +95,7 @@ class FakeStubFactory : public ISendStubFactory {
 };
 
 TEST(KVTransferClientTest, SendTo1) {
-  auto ctx = std::make_unique<Context>(1, 1);
+  auto ctx = std::make_unique<Context>("1", 1, 1);
   RequestInfo req1(2, 1, "REQ00000001", {0, 1}, {0, 1});
   req1.add_new_tokens(1, false);
   std::vector<const RequestInfo *> expect_reqs{&req1};
@@ -101,16 +112,16 @@ TEST(KVTransferClientTest, SendTo1) {
   factory->stubs.push_back(std::make_unique<ProxyStub>(2, 1, &stub));
 
   KvTransferClient client(std::move(ctx), std::move(factory));
-  client.add_target(2, 1, 0, 2);
+  client.add_target("2", 1, 0, 2);
   {
-    auto ret = client.submit_req_send(3, 1, req1.req_id,
+    auto ret = client.submit_req_send("3", 1, req1.req_id,
                                       req1.new_tokens(), req1.reach_last_token(),
                                       req1.src_blocks(), req1.dst_blocks());
     EXPECT_TRUE(ret.is_err());
     EXPECT_EQ(ret.err().code, ErrorCode::TARGET_NOT_FOUND);
   }
   {
-    auto ret = client.submit_req_send(2, 1, req1.req_id,
+    auto ret = client.submit_req_send("2", 1, req1.req_id,
                                       req1.new_tokens(), req1.reach_last_token(),
                                       req1.src_blocks(), req1.dst_blocks());
     EXPECT_TRUE(ret.is_ok());
@@ -132,7 +143,7 @@ TEST(KVTransferClientTest, SendTo1) {
 }
 
 TEST(KVTransferClientTest, SendTo2) {
-  auto ctx = std::make_unique<Context>(1, 1);
+  auto ctx = std::make_unique<Context>("1", 1);
   RequestInfo req0(3, 1, "REQ00000000", {0, 1}, {0, 1});
   req0.add_new_tokens(1, false);
   RequestInfo req1(2, 1, "REQ00000001", {2, 3}, {2, 3});
@@ -154,16 +165,16 @@ TEST(KVTransferClientTest, SendTo2) {
   factory->stubs.push_back(std::make_unique<ProxyStub>(3, 1, &stub1));
 
   KvTransferClient client(std::move(ctx), std::move(factory));
-  client.add_target(2, 1, 0, 2);
-  client.add_target(3, 1, 0, 2);
+  client.add_target("2", 1, 0, 2);
+  client.add_target("3", 1, 0, 2);
   {
-    auto ret = client.submit_req_send(3, 1, req0.req_id,
+    auto ret = client.submit_req_send("3", 1, req0.req_id,
                                       req0.new_tokens(), req0.reach_last_token(),
                                       req0.src_blocks(), req0.dst_blocks());
     EXPECT_TRUE(ret.ok());
   }
   {
-    auto ret = client.submit_req_send(2, 1, req1.req_id,
+    auto ret = client.submit_req_send("2", 1, req1.req_id,
                                       req1.new_tokens(), req1.reach_last_token(),
                                       req1.src_blocks(), req1.dst_blocks());
     EXPECT_TRUE(ret.is_ok());
@@ -189,7 +200,7 @@ TEST(KVTransferClientTest, SendTo2) {
 }
 
 TEST(KVTransferClientTest, SendToPP2) {
-  auto ctx = std::make_unique<Context>(1, 1);
+  auto ctx = std::make_unique<Context>("1", 1, 1);
   RequestInfo req0(3, 1, "REQ00000001", {0, 1}, {0, 1});
   req0.add_new_tokens(1, false);
   RequestInfo req1(2, 1, "REQ00000001", {0, 1}, {2, 3});
@@ -212,16 +223,16 @@ TEST(KVTransferClientTest, SendToPP2) {
   factory->stubs.push_back(std::make_unique<ProxyStub>(3, 1, &stub1));
 
   KvTransferClient client(std::move(ctx), std::move(factory));
-  client.add_target(2, 1, 0, 2);
-  client.add_target(3, 1, 0, 2);
+  client.add_target("2", 1, 0, 2);
+  client.add_target("3", 1, 0, 2);
   {
-    auto ret = client.submit_req_send(3, 1, req0.req_id,
+    auto ret = client.submit_req_send("3", 1, req0.req_id,
                                       req0.new_tokens(), req0.reach_last_token(),
                                       req0.src_blocks(), req0.dst_blocks());
     EXPECT_TRUE(ret.ok());
   }
   {
-    auto ret = client.submit_req_send(2, 1, req1.req_id,
+    auto ret = client.submit_req_send("2", 1, req1.req_id,
                                       req1.new_tokens(), req1.reach_last_token(),
                                       req1.src_blocks(), req1.dst_blocks());
     EXPECT_TRUE(ret.is_ok());

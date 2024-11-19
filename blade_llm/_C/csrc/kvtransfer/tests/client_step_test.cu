@@ -2,7 +2,7 @@
 #include <gtest/gtest.h>
 #include "client.h"
 #include "channel.h"
-#include "logging.h"
+#include "thrid_party/logging.h"
 #include "utils/cuda_helper.h"
 #include "naming.h"
 #include "naming/shm_naming.h"
@@ -55,11 +55,11 @@ class FakeSendStubFactory : public ISendStubFactory {
 
   FakeSendStubFactory(Context *ctx, const std::vector<uint64_t> &dst, std::queue<std::string> &n):
     ctx(ctx), dst_layer(dst), notifies(&n) {}
-  SendStub create_stub(InstanceId i, WorkerId w, uint32_t start_layer, uint32_t num_layers,
+  SendStub create_stub(const InstanceName& i, WorkerId w, uint32_t start_layer, uint32_t num_layers,
                        std::optional<TransferProtocol> p) override {
     LOG(INFO) << "Create SendStub";
     auto channel = std::make_unique<FakeChannel>(ctx, dst_layer, notifies);
-    WorkerInfo dst_info(i, w);
+    WorkerInfo dst_info(std::stoi(i), w);
     dst_info.tp_size = 1;
     dst_info.worker_tp_rank = 0;
     dst_info.block_size =  16 * KB;
@@ -105,7 +105,7 @@ TEST(KVTransferClientTest, TestKernelSyncAndDataTransfer) {
   host_layer_addrs.push_back(reinterpret_cast<uint64_t>(host_layer_1));
   std::vector<uint32_t> dst_blocks{4, 5, 6, 7};
 
-  auto ctx = std::make_unique<Context>(1, 0);
+  auto ctx = std::make_unique<Context>("1", 1,  0);
   ctx->set_tp(1, 0);
   ctx->set_layer_data_address(0, device_layer_addrs);
   auto block_size = 16 * KB;
@@ -116,9 +116,9 @@ TEST(KVTransferClientTest, TestKernelSyncAndDataTransfer) {
   auto f = std::make_unique<FakeSendStubFactory>(ctx.get(), host_layer_addrs, notifies);
   KvTransferClient client(std::move(ctx), std::move(f));
 
-  auto add_target_ret = client.add_target(0, 0, 0, 2);
+  auto add_target_ret = client.add_target("0", 0, 0, 2);
   EXPECT_TRUE(add_target_ret.is_ok());
-  auto ret = client.submit_req_send(0, 0, TEST_REQ_ID, 16 * 4, true, {0, 1, 2, 3}, dst_blocks);
+  auto ret = client.submit_req_send("0", 0, TEST_REQ_ID, 16 * 4, true, {0, 1, 2, 3}, dst_blocks);
   EXPECT_TRUE(ret.is_ok());
   client.start_send();
   std::this_thread::sleep_for(std::chrono::milliseconds (100)); // let start_send to run;
@@ -170,7 +170,7 @@ TEST(KVTransferClientTest, TestKernelSyncAndDataTransfer) {
   EXPECT_TRUE(done_ret.is_ok());
   EXPECT_TRUE(done_ret.ok());
 
-  client.remove_target(0, 0);
+  client.remove_target("0", 0);
   LOG(INFO) << "finish";
   cuda_free(layer_0);
   cuda_free(layer_1);

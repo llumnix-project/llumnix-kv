@@ -1,7 +1,7 @@
 #include <stdexcept>
 #include "client.h"
 #include "naming.h"
-#include "logging.h"
+#include "thrid_party/logging.h"
 #include "utils/timer.h"
 #include "protocol/cuda_ipc.h"
 #include "protocol/rdma_protocol.h"
@@ -64,7 +64,7 @@ std::unique_ptr<KvTransferClient> KvTransferClient::create(std::unique_ptr<Conte
   return std::make_unique<KvTransferClient>(std::move(ctx), std::move(factory));
 }
 
-Result<bool> KvTransferClient::add_target(const InstanceId &inst_id,
+Result<bool> KvTransferClient::add_target(const InstanceName &inst_name,
                                           const WorkerId &worker_id,
                                           uint32_t start_layer,
                                           uint32_t num_layers,
@@ -72,15 +72,15 @@ Result<bool> KvTransferClient::add_target(const InstanceId &inst_id,
   if (worker_id >= MAX_WORKERS_PER_INST) {
     return Result<bool>::error(ErrorCode::INVALID_TARGET, "invalid worker id;");
   }
-  auto &inst = targets_[inst_id];
+  auto &inst = targets_[inst_name];
   while (inst.size() <= worker_id) {
     inst.emplace_back(nullptr);
   }
   if (inst[worker_id] == nullptr) {
     try {
-      inst[worker_id] = stub_factory_->create_stub(inst_id, worker_id, start_layer, num_layers, proto_opt);
+      inst[worker_id] = stub_factory_->create_stub(inst_name, worker_id, start_layer, num_layers, proto_opt);
     } catch (const std::exception &e) {
-      LOG(ERROR) << "KVT client: connect target worker(" << inst_id << ":" << worker_id << ") failed: " << e.what();
+      LOG(ERROR) << "KVT client: connect target worker(" << inst_name << ":" << worker_id << ") failed: " << e.what();
       return Result<bool>::error(ErrorCode::TARGET_CONNOT_CONNECT, e.what());
     }
     inst[worker_id]->start();
@@ -90,16 +90,16 @@ Result<bool> KvTransferClient::add_target(const InstanceId &inst_id,
     return Result<bool>::error(ErrorCode::TARGET_DISCONNECTED, "target worker disconnected");
   }
 
-  LOG(WARNING) << "KVT client: target worker(" << inst_id << ":" << worker_id
-               << ") already connected, try stop first;";
+  LOG(WARNING) << "KVT client: target worker(" << inst_name << ":" << worker_id
+               << ") already connected;";
   return {true};
 }
 
-Result<bool> KvTransferClient::remove_target(const InstanceId &inst_id, const WorkerId &worker_id) {
+Result<bool> KvTransferClient::remove_target(const InstanceName &inst_name, const WorkerId &worker_id) {
   if (worker_id >= MAX_WORKERS_PER_INST) {
     return {true};
   }
-  auto &inst = targets_[inst_id];
+  auto &inst = targets_[inst_name];
   while (inst.size() <= worker_id) {
     return {true};
   }
@@ -114,7 +114,7 @@ Result<bool> KvTransferClient::remove_target(const InstanceId &inst_id, const Wo
   return {true};
 }
 
-Result<bool> KvTransferClient::submit_req_send(const InstanceId &dst_inst_id,
+Result<bool> KvTransferClient::submit_req_send(const InstanceName &dst_inst_name,
                                                const WorkerId &dst_worker_id,
                                                const RequestId &req_id,
                                                uint32_t new_tokens,
@@ -127,29 +127,29 @@ Result<bool> KvTransferClient::submit_req_send(const InstanceId &dst_inst_id,
     return Result<bool>::error(ErrorCode::INVALID_REQUEST_PARAM, "invalid worker id;");
   }
 
-  auto &inst = targets_[dst_inst_id];
+  auto &inst = targets_[dst_inst_name];
   if (inst.size() <= dst_worker_id || inst[dst_worker_id] == nullptr) {
     if (auto_connect_) {
-      LOG(WARNING) << "KVT client: target worker(" << dst_inst_id << ":" << dst_worker_id
+      LOG(WARNING) << "KVT client: target worker(" << dst_inst_name << ":" << dst_worker_id
                    << ") not connected, try to connect use default transfer config;";
       auto num_layers = ctx_->num_layers();
-      auto ret = add_target(dst_inst_id, dst_worker_id, 0, num_layers);
+      auto ret = add_target(dst_inst_name, dst_worker_id, 0, num_layers);
       if (ret.is_err()) {
         return ret;
       }
     } else {
       LOG(ERROR) << "KVT client: submit request(" << req_id << ") to unknown target ("
-                 << dst_inst_id << ":" << dst_worker_id << "), add it first;";
+                 << dst_inst_name << ":" << dst_worker_id << "), add it first;";
       return Result<bool>::error(ErrorCode::TARGET_NOT_FOUND, "target worker not connect;");
     }
   }
   if (inst[dst_worker_id]->check_state() == StubState::POISONED) {
-    LOG(ERROR) << "KVT client: detect stub to worker(" << dst_inst_id << ":" << dst_worker_id
+    LOG(ERROR) << "KVT client: detect stub to worker(" << dst_inst_name << ":" << dst_worker_id
                << ") disconnected because of error, try to reset; ";
     LOG(ERROR) << "KVT client: fail to submit request(" << req_id << ") because target worker disconnected.";
     return Result<bool>::error(ErrorCode::TARGET_DISCONNECTED, "target worker disconnected;");
   }
-
+  auto dst_inst_id = inst[dst_worker_id]->dst_info().inst_id;
   reqs_[req_id].emplace_back(dst_inst_id, dst_worker_id, req_id, src_block_ids, dst_block_ids)
       .add_new_tokens(new_tokens, has_last_token);
   LOG(INFO) << "KVT client: accept send request(" << req_id

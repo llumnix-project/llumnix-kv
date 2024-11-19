@@ -2,7 +2,7 @@
 #include <stdexcept>
 #include "context.h"
 #include "utils/cuda_helper.h"
-#include "logging.h"
+#include "thrid_party/logging.h"
 
 namespace blade_llm {
 
@@ -20,10 +20,19 @@ void CudaEventBarrier::wait(uint32_t layer_idx) {
   }
 }
 
-Context::Context(const InstanceId &inst, const WorkerId &worker) :
-    inst_id(inst),
+Context::Context(const InstanceName &inst, const WorkerId &worker) :
+    inst_name(inst),
+    inst_id(std::hash<InstanceName>{}(inst)),
     worker_id(worker),
-    worker_info_(inst, worker),
+    cuda_barrier_(std::make_unique<NoCudaBarrier>()) {
+  worker_info_ = WorkerInfo(inst_id, worker_id);
+};
+
+Context::Context(const InstanceName &name, const InstanceId &id, const WorkerId &worker_id) :
+    inst_name(name),
+    inst_id(id),
+    worker_id(worker_id),
+    worker_info_(id, worker_id),
     cuda_barrier_(std::make_unique<NoCudaBarrier>()) {};
 
 void Context::set_tp(uint32_t tp_size, uint32_t worker_tp_rank) {
@@ -37,12 +46,12 @@ void Context::set_block_params(uint32_t block_size, uint32_t token_size, uint32_
   }
   worker_info_.block_size = block_size;
   worker_info_.token_size = token_size;
-  layer_num_blocks_ = layer_num_blocks;
+  worker_info_.layer_num_blocks = layer_num_blocks;
 }
 
 void Context::set_layer_data_address(uint8_t device_id, const std::vector<uint64_t> &layers) {
   device_id_ = (int) device_id;
-  num_layers_ = layers.size();
+  worker_info_.num_layers = layers.size();
   layer_data_address_ = layers;
 }
 
@@ -74,11 +83,11 @@ int Context::device_id() const {
 }
 
 uint32_t Context::num_layers() const {
-  return num_layers_;
+  return worker_info_.num_layers;
 }
 
 uint32_t Context::layer_num_blocks() const {
-  return layer_num_blocks_;
+  return worker_info_.layer_num_blocks;
 }
 
 size_t Context::block_size() const {

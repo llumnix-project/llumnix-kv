@@ -1,6 +1,6 @@
 #include <mutex>
 #include "service.h"
-#include "logging.h"
+#include "thrid_party/logging.h"
 
 namespace blade_llm {
 KvTransferService::KvTransferService(std::unique_ptr<Context> &&ctx) :

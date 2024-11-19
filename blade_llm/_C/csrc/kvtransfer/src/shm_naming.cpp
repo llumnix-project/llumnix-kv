@@ -7,12 +7,13 @@
 
 #define MAX_WORKS (8)
 #define MAX_INSTANCES (8)
+#define MAX_WORKER_INFO_SIZE (16384)
 
 namespace blade_llm {
 
 typedef struct workerInfo_st {
-  bool valid;
-  char info[sizeof(WorkerInfo)];
+  uint32_t size;
+  char info[MAX_WORKER_INFO_SIZE];
 } workerInfo;
 
 typedef struct instInfo_st {
@@ -38,7 +39,7 @@ void ShmNamingServer::start() {
   for (auto i = 0; i < MAX_INSTANCES; i++) {
     for (auto j = 0; j < MAX_WORKS; j++) {
       volatile workerInfo *info = &shm->instances[i].workers[j];
-      info->valid = false;
+      info->size = 0;
     }
   }
 }
@@ -51,34 +52,38 @@ ShmNamingServer::~ShmNamingServer() {
   close();
 }
 
-void ShmNamingClient::connect(const Schema &schema, const std::string &path) {
-  if (schema != SHARE_MEMORY_NAMING_SCHEMA) {
-    throw std::runtime_error("invalid schema: " + schema);
-  }
+void ShmNamingClient::connect(const std::string &path) {
   auto ret = sharedMemoryOpen(path.data(), sizeof(instInfoList), &info_);
   if (ret != 0 && ret == ENOENT) {
     throw std::runtime_error("share memory not mounted;");
   }
 };
 
-bool ShmNamingClient::register_worker(const WorkerInfo &worker_info) {
+void ShmNamingClient::register_worker(const WorkerInfo &worker_info) {
+  if (worker_info.inst_id >= MAX_INSTANCES) {
+    throw std::runtime_error("unsupported instance id = " + std::to_string(worker_info.inst_id));
+  }
   volatile auto *shm = (volatile instInfoList *) info_.addr;
   auto worker = &shm->instances[worker_info.inst_id]
       .workers[worker_info.worker_id];
-  memcpy((void *) worker->info, &worker_info, sizeof(WorkerInfo));
-  worker->valid = true;
-  return true;
+  auto bytes = worker_info.to_bytes();
+  if (bytes.size() >= MAX_WORKER_INFO_SIZE) {
+    throw std::runtime_error("worker info too large;");
+  }
+  worker->size = bytes.size();
+  memcpy((void *) worker->info, bytes.data(), bytes.size());
 }
 
-std::optional<WorkerInfo> ShmNamingClient::get_worker_info(uint32_t inst_id, uint32_t worker_id) {
+std::optional<WorkerInfo> ShmNamingClient::get_worker_info(const InstanceName& name, uint32_t worker_id) {
+  auto id = std::stoi(name);
+  if (id < 0 || id >= MAX_INSTANCES) {
+    throw std::runtime_error("invalid instance name: " + name);
+  }
   volatile auto *shm = (volatile instInfoList *) info_.addr;
-  volatile workerInfo *info = &shm->instances[inst_id].workers[worker_id];
-  if (!info->valid) {
+  volatile workerInfo *info = &shm->instances[id].workers[worker_id];
+  if (info->size == 0) {
     return std::nullopt;
   }
-
-  WorkerInfo wi;
-  memcpy(&wi, (void *) info->info, sizeof(WorkerInfo));
-  return wi;
+  return WorkerInfo::from_bytes((unsigned char*)info->info, info->size);
 }
 }

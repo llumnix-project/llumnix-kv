@@ -26,7 +26,7 @@
 #include <arpa/inet.h>
 #include <thread>
 #include <future>
-#include "logging.h"
+#include "thrid_party/logging.h"
 
 namespace blade_llm {
 
@@ -118,6 +118,7 @@ struct BarexCtx : public noncopyable {
 };
 
 struct CliBarexCtx : public BarexCtx {
+  const uint64_t layer_blk_size;
   CliBarexCtx(std::string mp_name,
               std::string tp_name,
               int tpcnt,
@@ -131,22 +132,15 @@ struct CliBarexCtx : public BarexCtx {
   std::unique_ptr<accl::barex::XConnector, XConnectorDeleter> connector_;
 };
 
-struct RDMAMemHandle {
-  void *ptr = nullptr;
-  uint32_t rkey = 0;
-  uint32_t lkey = 0; // 不必要, 正好这里 padding 4 字节, 不用白不用.
-};
 // RDMAMemHandle 可以 memcpy.
 static constexpr int LAYER_NUM_MAX = 100;
 struct RDMAInfo {
   char ip[INET_ADDRSTRLEN]{'\0'};  // decode listen ip, 以 '\0' 结尾.
   int port = 0;  // decode listen port
-  int layer_num = 0;  // layer 个数. 正好这里 padding 4 字节, 不用白不用.
-  uint64_t layer_blk_size = 0;
-  RDMAMemHandle hnds[LAYER_NUM_MAX];
 };
+
 static_assert(std::is_standard_layout_v<RDMAInfo>);
-static_assert(sizeof(RDMAInfo) <= MAX_OTHER_INFO_LEN);
+static_assert(sizeof(RDMAInfo) <= MAX_ADDRESS_LEN);
 
 class RDMAChannel : public IChannel, public noncopyable {
  public:
@@ -181,10 +175,15 @@ class RDMAChannel : public IChannel, public noncopyable {
 
   accl::barex::XChannel *ch() noexcept;
  private:
+  std::string ip_;
+  int port_{0};
   CliBarexCtx *const ctx_;  // owner: KvTransferClient
-  RDMAInfo dst_;
-  uint32_t src_inst_id_ = 0;
-  uint32_t src_worker_id_ = 0;
+  std::vector<void*> dst_ptrs_;
+  std::vector<uint32_t> dst_rkeys_;
+  size_t dst_layer_blk_size_{0};
+  uint32_t dst_layer_num_{0};
+  InstanceId src_inst_id_ = 0;
+  WorkerId src_worker_id_ = 0;
   int prev_ch_idx_ = 0;
 
   std::vector<std::future<void>> write_futs_;

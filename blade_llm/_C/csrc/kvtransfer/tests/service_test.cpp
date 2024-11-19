@@ -4,7 +4,7 @@
 using namespace blade_llm;
 
 TEST(KVTransferServiceTest, TestSubmitReq) {
-  auto ctx = std::make_unique<Context>(1, 1);
+  auto ctx = std::make_unique<Context>("1", 1, 1);
   KvTransferService service(std::move(ctx));
   auto ret0 = service.submit_recv(0, 0, "test_req", {1, 2, 3});
   EXPECT_TRUE(ret0.is_ok());
@@ -17,7 +17,7 @@ TEST(KVTransferServiceTest, TestSubmitReq) {
 }
 
 TEST(KVTransferServiceTest, TestReqReceive) {
-  auto ctx = std::make_unique<Context>(1, 1);
+  auto ctx = std::make_unique<Context>("1", 1, 1);
   KvTransferService service(std::move(ctx));
   auto ret0 = service.submit_recv(0, 0, "REQ_0001", {1, 2, 3});
   EXPECT_TRUE(ret0.is_ok());
@@ -49,7 +49,7 @@ TEST(KVTransferServiceTest, TestReqReceive) {
 }
 
 TEST(KVTransferServiceTest, TestReqMultiSourceReceive) {
-  auto ctx = std::make_unique<Context>(1, 1);
+  auto ctx = std::make_unique<Context>("1", 1, 1);
   KvTransferService service(std::move(ctx));
   service.submit_recv(0, 0, "REQ_0001", {1, 2, 3});
   service.submit_recv(1, 0, "REQ_0001", {4, 5, 6});

@@ -4,7 +4,7 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 #include "client.h"
-#include "logging.h"
+#include "thrid_party/logging.h"
 
 using ::testing::Return;
 using ::testing::_;
@@ -563,7 +563,7 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
   auto fbc = std::make_shared<FakeChannel>();
   fbc->connect(dst_info);
   auto q = &fbc->q;
-  Context ctx(0, 1);
+  Context ctx("0", 0, 1);
   ctx.set_block_params(bs, ts, 8);
   ctx.set_layer_data_address(0, {0, 8 * bs});
   uint32_t num_layers = 2;
@@ -704,7 +704,7 @@ TEST(SendStubTest, UseMockChannel) {
   dst_info.block_size = bs;
   dst_info.token_size = ts;
 
-  Context ctx(0, 1);
+  Context ctx("0", 0, 1);
   ctx.set_block_params(bs, ts, 8);
   ctx.set_layer_data_address(0, {0, 8 * bs});
   uint32_t num_layers = 2;

@@ -9,6 +9,7 @@
 #include <vector>
 
 #define MAX_OTHER_INFO_LEN (8192)
+#define MAX_ADDRESS_LEN (64)
 #define INVALID_INST_WORKER_ID (UINT32_MAX)
 #define KB (1ULL << 10ULL) // 1KB
 
@@ -24,7 +25,8 @@ class noncopyable {
   ~noncopyable() = default;
 };
 
-typedef uint32_t InstanceId;
+typedef uint64_t InstanceId;
+typedef std::string InstanceName;
 typedef uint32_t WorkerId;
 typedef std::string RequestId;
 
@@ -35,9 +37,11 @@ struct WorkerInfo {
   uint32_t worker_tp_rank;
   uint32_t block_size;
   uint32_t token_size;
+  uint32_t layer_num_blocks{1};
+  uint32_t num_layers{1};
   uint8_t transfer_protocols{0};
-  char addr_url[64]{};
-  char other_info[MAX_OTHER_INFO_LEN]{};
+  std::string addr;
+  std::vector<uint8_t> other_info;
 
   WorkerInfo() :
       inst_id(INVALID_INST_WORKER_ID),
@@ -61,6 +65,8 @@ struct WorkerInfo {
              uint32_t worker_tp_rank,
              uint32_t block_size,
              uint32_t token_size,
+             uint32_t layer_num_blocks,
+             uint32_t num_layers,
              uint32_t protocols) :
       inst_id(inst_id),
       worker_id(worker_id),
@@ -68,7 +74,14 @@ struct WorkerInfo {
       worker_tp_rank(worker_tp_rank),
       block_size(block_size),
       token_size(token_size),
+      layer_num_blocks(layer_num_blocks),
+      num_layers(num_layers),
       transfer_protocols(protocols) {};
+
+  static WorkerInfo from_bytes(const unsigned char *src, size_t length);
+  static WorkerInfo from_string(const std::string& src);
+  [[nodiscard]] std::vector<uint8_t> to_bytes() const;
+  [[nodiscard]] std::string to_string() const;
 };
 
 class RequestInfo {

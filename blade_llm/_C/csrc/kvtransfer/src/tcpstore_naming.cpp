@@ -3,7 +3,7 @@
 #include <cassert>
 #include "naming/tcpstore_naming.h"
 
-#ifdef TORCH_FOUND
+#ifdef ENABLE_TORCH
 
 namespace blade_llm {
 
@@ -35,46 +35,36 @@ void TCPStoreNaming::connect(const Schema& schema, const std::string &url)  {
   self.tcp_store_.emplace(addr, opts);
 }
 
-std::string TCPStoreNaming::get_key(uint32_t inst_id, uint32_t worker_id) {
-  // optimize with fmt::fmt/absel::StrCat
-  // T/W 是 TCPStoreNaming/WorkerInfo/ 的缩写, 节省点空间==
-  return "T/W/" + std::to_string(inst_id) + "/" + std::to_string(worker_id);
-}
-
-std::vector<uint8_t> TCPStoreNaming::to_value(const WorkerInfo& info) {
-  std::vector<uint8_t> ret;
-  static_assert(std::is_standard_layout_v<WorkerInfo>);
-  // WorkerInfo 是 POD 类型, 可以安全 memcpy.
-  ret.resize(sizeof(WorkerInfo));
-  memcpy(ret.data(), &info, sizeof(WorkerInfo));
-  return ret;
-}
-
-WorkerInfo TCPStoreNaming::from_value(const std::vector<uint8_t>& input) {
-  WorkerInfo wi;
-  assert(input.size() == sizeof(wi));
-  memcpy(&wi, input.data(), input.size());
-  return wi;
-}
-
-bool TCPStoreNaming::register_worker(const WorkerInfo& worker_info) {
+void TCPStoreNaming::store(const std::string &key, const std::string &v) {
   auto& self = *this;
-  auto key = get_key(worker_info.inst_id, worker_info.worker_id);
+  std::vector<uint8_t> value(v.begin(),v.end());
   assert(self.tcp_store_);
-  self.tcp_store_->set(key, to_value(worker_info));
-  return true;
+  auto real_key = inst_name + "/" + key;
+  self.tcp_store_->set(real_key, value);
 }
-
-std::optional<WorkerInfo> TCPStoreNaming::get_worker_info(uint32_t inst_id, uint32_t worker_id) {
+std::optional<std::string> TCPStoreNaming::get(const InstanceName& inst, const std::string &k) {
   auto& self = *this;
   assert(self.tcp_store_);
-  auto val = self.tcp_store_->get(get_key(inst_id, worker_id));
-  if (val.size() != sizeof(WorkerInfo)) {
+  auto real_key = inst + "/" + k;
+  auto val = self.tcp_store_->get(real_key);
+  if (val.empty()) {
     return std::nullopt;
+  } else {
+    return std::string(val.begin(), val.end());
   }
-  return from_value(val);
+}
+
+void TCPStoreNaming::remove(const std::string &key) {
+  auto real_key = inst_name + "/" + key;
+  auto& self = *this;
+  assert(self.tcp_store_);
+  self.tcp_store_->deleteKey(real_key);
+}
+
+const std::vector<std::string>&  TCPStoreNaming::list() {
+  throw std::runtime_error("unsupported list operation of tcpstore");
 }
 
 }  // namespace blade_llm {
 
-#endif // TORCH_FOUND
+#endif // USE_TORCH_TCP_STORE

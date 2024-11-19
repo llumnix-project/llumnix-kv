@@ -2,7 +2,7 @@
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 #include "step.h"
-#include "logging.h"
+#include "thrid_party/logging.h"
 
 using namespace blade_llm;
 

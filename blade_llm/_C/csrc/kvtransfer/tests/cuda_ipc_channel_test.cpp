@@ -8,7 +8,7 @@
 #include "utils/shm_helper.h"
 #include "utils/socket_helper.h"
 #include "utils/iterator.h"
-#include "logging.h"
+#include "thrid_party/logging.h"
 
 #define cpu_atomic_add32(a, x) __sync_add_and_fetch(a, x)
 #define sync_file "cuda_write_test"
@@ -87,7 +87,7 @@ TEST(CudaIpcTest, TestCudaWrite) {
     std::vector<uint64_t> layer_addrs(2);
     layer_addrs[0] = reinterpret_cast<uint64_t>(layer_0);
     layer_addrs[1] = reinterpret_cast<uint64_t>(layer_1);
-    Context ctx(0, 1);
+    Context ctx("0", 0, 1);
     ctx.set_block_params(4 * KB, KB, 1);
     ctx.set_layer_data_address(0, layer_addrs);
     auto cuda_ctx = std::make_unique<CudaIpcContext>(ctx.device_id());
@@ -123,7 +123,7 @@ TEST(CudaIpcTest, TestSocketWrite) {
     SocketWriter sock_writer(1, 4);
 
     WorkerInfo dst(0, 0);
-    strncpy(dst.addr_url, sock_file, sizeof(dst.addr_url));
+    dst.addr = sock_file;
     sock_writer.connect(dst);
 
     sock_writer.write("test_req", {0, 2, 4, 6});
@@ -166,7 +166,7 @@ TEST(CudaIpcTest, TestSocketWrite) {
 
 class MockTransferService : public ITransferService {
  public:
-  MOCK_METHOD(void, on_recv, (uint32_t, uint32_t, (const std::string&), (std::vector<uint32_t> &&)), (override));
+  MOCK_METHOD(void, on_recv, (InstanceId, uint32_t, (const std::string&), (std::vector<uint32_t> &&)), (override));
 };
 
 TEST(CudaIpcTest, TestTransfer) {
@@ -184,7 +184,7 @@ TEST(CudaIpcTest, TestTransfer) {
     std::vector<uint64_t> layer_addrs(2);
     layer_addrs[0] = reinterpret_cast<uint64_t>(layer_0);
     layer_addrs[1] = reinterpret_cast<uint64_t>(layer_1);
-    Context ctx(0, 0);
+    Context ctx("0", 0, 0);
     ctx.set_layer_data_address(0, layer_addrs);
     ctx.set_block_params(KB, 128, 4);
     CudaTransferServer server;
@@ -201,7 +201,7 @@ TEST(CudaIpcTest, TestTransfer) {
     });
     server.start_server(&service, &ctx);
     ShmNamingClient naming;
-    naming.connect(SHARE_MEMORY_NAMING_SCHEMA, shm_naming_file);
+    naming.connect(shm_naming_file);
     naming.register_worker(ctx.worker_info());
 
     for (int i = 0; i < 128; ++i) {
@@ -243,7 +243,7 @@ TEST(CudaIpcTest, TestTransfer) {
     std::vector<uint64_t> layer_addrs(2);
     layer_addrs[0] = reinterpret_cast<uint64_t>(layer_0);
     layer_addrs[1] = reinterpret_cast<uint64_t>(layer_1);
-    Context ctx(1, 0);
+    Context ctx("1", 1, 0);
     ctx.set_block_params(KB, 128, 4);
     ctx.set_layer_data_address(1, layer_addrs);
     auto cuda_ctx = std::make_unique<CudaIpcContext>(ctx.device_id());
@@ -252,14 +252,14 @@ TEST(CudaIpcTest, TestTransfer) {
     TransferProtocol proto = TransferProtocol::cuda_ipc();
     auto channel = create_channel(&ctx, proto);
     ShmNamingClient naming;
-    naming.connect(SHARE_MEMORY_NAMING_SCHEMA, shm_naming_file);
-    auto info_opt = naming.get_worker_info(0, 0);
+    naming.connect(shm_naming_file);
+    auto info_opt = naming.get_worker_info("0", 0);
     for(auto i=0;i < 128; i ++) {
       if (!info_opt.has_value()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        info_opt = naming.get_worker_info(0, 0);
+        info_opt = naming.get_worker_info("0", 0);
       } else {
-        LOG(INFO) << "get worker info, addr_url =  " << info_opt->addr_url;
+        LOG(INFO) << "get worker info, addr =  " << info_opt->addr;
         break;
       }
     }

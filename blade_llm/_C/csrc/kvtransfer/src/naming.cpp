@@ -1,35 +1,52 @@
 #include <stdexcept>
 #include <mutex>
+#include <sstream>
 #include "naming.h"
+#include "naming/tcpstore_naming.h"
 
 namespace blade_llm {
-bool NamingManager::register_factory(std::unique_ptr<INamingClientFactory> &&factory) {
-  auto schema = factory->get_schema();
-  std::unique_lock<std::shared_mutex> w_lock(shared_mutex_);
-  auto ret = factories_.try_emplace(schema, std::move(factory));
-  return ret.second;
-}
+GeneralNamingClient NamingManager::connect_naming(const InstanceName& myname, const std::string &url) {
+  {
+    std::shared_lock<std::shared_mutex> r_lock(shared_mutex_);
+    auto ret = naming_clients_.find(url);
+    if (ret != naming_clients_.end()) {
+      return ret->second;
+    }
+  }
 
-void NamingManager::remove_factory(const Schema &schema) {
-  std::unique_lock<std::shared_mutex> w_lock(shared_mutex_);
-  factories_.erase(schema);
-}
-
-std::unique_ptr<INamingClient> NamingManager::connect_naming(const std::string &url) {
   auto pos = url.find(SCHEMA_DELIMITER);
   if (pos == std::string::npos) {
     throw std::runtime_error("unrecognized naming url;");
   }
   auto schema = url.substr(0, pos);
   auto content = url.substr(pos + 1, url.size());
-  std::shared_lock<std::shared_mutex> r_lock(shared_mutex_);
+  std::unique_lock<std::shared_mutex> w_lock(shared_mutex_);
   auto f = factories_.find(schema);
   if (f != factories_.end()) {
-    auto client = f->second->create();
+    auto client = f->second->create(myname);
     client->connect(schema, content);
-    return client;
+    auto res = naming_clients_.insert(std::make_pair(url, GeneralNamingClient(std::move(client))));
+    return res.first->second;
   } else {
-    throw std::runtime_error("unknown naming schema: " + schema);
+    std::stringstream ss;
+    ss << "unknown naming schema: " << schema << ",supports: [";
+    for(const auto &p: factories_) {
+      ss << p.first << ",";
+    }
+    ss << "];";
+    throw std::runtime_error(ss.str());
   }
+}
+NamingManager::NamingManager() {
+  if (factories_.empty()) {
+#ifdef ENABLE_TORCH
+    factories_.emplace(TCP_NAMING_SCHEMA, std::make_unique<TCPStoreNamingFactory>());
+#endif
+  }
+}
+
+std::unique_ptr<INamingWorkerClient> GeneralNamingClient::create_naming_worker_client() {
+  auto ptr = client_.get();
+  return std::make_unique<WorkerNamingClient>(ptr);
 }
 }

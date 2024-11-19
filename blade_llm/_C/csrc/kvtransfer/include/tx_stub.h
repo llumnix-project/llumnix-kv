@@ -40,6 +40,7 @@ enum StubState {
 class ISendStub {
  public:
   virtual void start() = 0;
+  [[nodiscard]] virtual const WorkerInfo& dst_info() const = 0;
   virtual void send_batch(const BatchSendTask &) = 0;
   virtual StubState check_state() = 0;
   virtual void stop() = 0;
@@ -50,16 +51,18 @@ using SendStub = std::unique_ptr<ISendStub>;
 
 class ISendStubFactory {
  public:
-  virtual SendStub create_stub(InstanceId,
+  virtual SendStub create_stub(const InstanceName&,
                                WorkerId,
                                uint32_t start_layer,
                                uint32_t num_layers,
-                               std::optional<TransferProtocol>) = 0;
+                               std::optional<TransferProtocol> ) = 0;
   virtual ~ISendStubFactory() = default;
 };
 
 class KvSendStub : public ISendStub, public noncopyable {
  public:
+  const WorkerInfo dst_info_;
+  const WorkerInfo src_info_;
   KvSendStub(const WorkerInfo &dst_info,
              const WorkerInfo &src_info,
              uint32_t start_layer,
@@ -72,14 +75,15 @@ class KvSendStub : public ISendStub, public noncopyable {
       ch_(std::move(channel)) {};
   KvSendStub(KvSendStub &&other) noexcept;
   void start() override;
+  [[nodiscard]] const WorkerInfo &dst_info() const override {
+    return dst_info_;
+  }
   void send_batch(const BatchSendTask &) override;
   StubState check_state() override;
   void stop() override;
   ~KvSendStub() override;
  private:
   void start_async();
-  const WorkerInfo dst_info_;
-  const WorkerInfo src_info_;
   uint32_t start_layer_{0};
   uint32_t num_layers_{0};
   std::unique_ptr<IChannel> ch_;
@@ -90,17 +94,21 @@ class KvSendStub : public ISendStub, public noncopyable {
 
 class KvSendStubFactory : public ISendStubFactory, public noncopyable {
  public:
-  KvSendStubFactory(Context *ctx, std::unique_ptr<INamingClient> &&naming) :
+  KvSendStubFactory(Context *ctx, GeneralNamingClient &&naming) :
       ctx_(ctx),
-      naming_(std::move(naming)) {}
-  SendStub create_stub(InstanceId dst_inst_id,
+      naming_(std::move(naming)) {
+    naming_worker_ = naming_.create_naming_worker_client();
+  }
+
+  SendStub create_stub(const InstanceName& dst_inst_name,
                        WorkerId dst_worker_id,
                        uint32_t start_layer,
                        uint32_t num_layers,
-                       std::optional<TransferProtocol> = std::nullopt) override;
+                       std::optional<TransferProtocol>) override;
  private:
   Context *ctx_;
-  std::unique_ptr<INamingClient> naming_;
+  std::unique_ptr<INamingWorkerClient> naming_worker_;
+  GeneralNamingClient naming_;
 };
 }
 #endif //KVTRANSFER_INCLUDE_TX_STUB_H_

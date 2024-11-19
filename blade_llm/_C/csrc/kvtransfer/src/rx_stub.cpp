@@ -1,7 +1,7 @@
 #include <mutex>
 #include <algorithm>
 #include "rx_stub.h"
-#include "logging.h"
+#include "thrid_party/logging.h"
 
 namespace blade_llm {
 

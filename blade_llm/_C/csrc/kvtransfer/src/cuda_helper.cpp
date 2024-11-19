@@ -1,6 +1,6 @@
 #include <cuda_runtime.h>
 #include <sys/un.h>
-#include "logging.h"
+#include "thrid_party/logging.h"
 #include "utils/cuda_helper.h"
 
 namespace blade_llm {

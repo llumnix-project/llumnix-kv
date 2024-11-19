@@ -1,13 +1,14 @@
 
 #ifdef ENABLE_RDMA
 #include "protocol/rdma_protocol.h"
-#include "logging.h"
+#include "thrid_party/logging.h"
 #include "naming.h"
 #include "assert.h"
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/epoll.h>
 #include <future>
+#include <sstream>
 
 // just in this cpp
 using namespace accl::barex;
@@ -115,15 +116,19 @@ BarexCtx::BarexCtx(std::string mp_name,
   // 考虑到 LAYER_NUM_MAX 远小于 65536, 所以只需要 LAYER_NUM_MAX 限制即可.
   RTCHECK(layer_ptr.size() <= LAYER_NUM_MAX);
   // 每个 mr 默认大小限制为 1GB.
-  int max_mr_size = 1 * 1024 * 1024 * 1024;
+  size_t max_mr_size = 1L * 1024 * 1024 * 1024;
   const char *max_mr_gb_str = getenv("ACCL_MAX_USER_MR_GB");
   if (max_mr_gb_str != nullptr) {
     auto tmp_max_mr_gb = atoi(max_mr_gb_str);
     if (tmp_max_mr_gb > 0) {
-      max_mr_size = tmp_max_mr_gb * 1024 * 1024 * 1024;
+      max_mr_size = max_mr_size * tmp_max_mr_gb ;
     }
+  } else {
+    setenv("ACCL_MAX_USER_MR_GB", "2", 1);
+    max_mr_size = max_mr_size * 2;
   }
   auto layer_blk_size = ctx->block_size() * ctx->layer_num_blocks();
+  LOG(INFO) << "layer size(layer_blk_size) = " << layer_blk_size << ", max_mr_size = " << max_mr_size;
   // 如果这里跪了, 需要配置环境变量 ACCL_MAX_USER_MR_GB
   RTCHECK(layer_blk_size <= max_mr_size);
 
@@ -164,8 +169,8 @@ CliBarexCtx::CliBarexCtx(std::string mp_name,
                          int tpcnt,
                          Context *ctx,
                          std::unique_ptr<accl::barex::XChannelCallback> ctxcb) :
-    BarexCtx(std::move(mp_name), std::move(tp_name), tpcnt, ctx, std::move(ctxcb)) {
-
+    BarexCtx(std::move(mp_name), std::move(tp_name), tpcnt, ctx, std::move(ctxcb)),
+    layer_blk_size(ctx->layer_num_blocks() * ctx->block_size()) {
   XConnector *connector = nullptr;
   // 处理建联/断链的线程个数, 2 来自 barex write-client example~
   constexpr int CONN_THD_CNT = 2;
@@ -189,12 +194,12 @@ void RDMAServer::CtxCallback::OnRecvCall(XChannel *_ch, char *in_buf, size_t len
     return;
   }
   const char *const end_buf = in_buf + len;
-
-  uint32_t magic, inst_id, worker_id, num_block;
+  InstanceId inst_id;
+  uint32_t magic, worker_id, num_block;
   memcpy(&magic, in_buf, sizeof(uint32_t));
   in_buf += sizeof(uint32_t);
-  memcpy(&inst_id, in_buf, sizeof(uint32_t));
-  in_buf += sizeof(uint32_t);
+  memcpy(&inst_id, in_buf, sizeof(InstanceId));
+  in_buf += sizeof(InstanceId);
   memcpy(&worker_id, in_buf, sizeof(uint32_t));
   in_buf += sizeof(uint32_t);
   memcpy(&num_block, in_buf, sizeof(uint32_t));
@@ -305,28 +310,37 @@ void RDMAServer::start_server(ITransferService *service, Context *ctx) {
   auto layer_num_blocks = ctx->layer_num_blocks();
   const uint64_t layer_blk_size = layer_num_blocks * winfo->block_size;
   auto layer_ptr = ctx->layer_data_address();
-  auto device_id = ctx->device_id();
   auto proto = TransferProtocol::rdma_direct();
   auto proto_ctx = ctx->get_protocol_ctx<RDMAProtoContext>(proto);
   if (proto_ctx == nullptr) {
     throw std::runtime_error("KVT server: rdma context not register.");
   }
-  RDMAInfo info;
-  info.layer_num = layer_ptr.size();
-  info.layer_blk_size = layer_blk_size;
   auto barex_ctx = proto_ctx->barex_ctx();
-  assert(info.layer_num == barex_ctx->layer_mr().size());
+  std::vector<void*> ptrs(layer_ptr.size());
+  std::vector<uint32_t> rkeys(layer_ptr.size());
+
   for (int idx = 0; idx < layer_ptr.size(); ++idx) {
     auto &out = barex_ctx->layer_mr()[idx].mr();
     auto layer_blk_p = reinterpret_cast<void *>(layer_ptr[idx]);
-    info.hnds[idx].ptr = layer_blk_p;
-    info.hnds[idx].lkey = out.mr->lkey;
-    info.hnds[idx].rkey = out.mr->rkey;
+    ptrs[idx] = layer_blk_p;
+    rkeys[idx] = out.mr->rkey;
   }
+  auto ptr_size = sizeof(void *) * layer_ptr.size();
+  auto other_info_size = sizeof(uint32_t) * layer_ptr.size() + ptr_size;
+  winfo->other_info.resize(other_info_size);
+  auto other_info_ptr = winfo->other_info.data();
+  memcpy(other_info_ptr, ptrs.data(), ptr_size);
+  other_info_ptr += ptr_size;
+  memcpy(other_info_ptr, rkeys.data(), sizeof(uint32_t) * layer_ptr.size());
 
+  RDMAInfo info;
   get_ip(&info);
   info.port = get_port();
   RTCHECK(info.port > 0);
+
+  std::stringstream ss;
+  ss << info.ip << ":" << info.port;
+  winfo->addr = ss.str();
 
   // 处理建联/断链的线程个数, 2 来自 barex write-client example~
   constexpr int LISTEN_THD_CNT = 2;
@@ -340,19 +354,32 @@ void RDMAServer::start_server(ITransferService *service, Context *ctx) {
   self.listener_.reset(listener);
   result = self.listener_->Listen();
   RTCHECK(result == accl::barex::BAREX_SUCCESS);
-  static_assert(sizeof(info) <= MAX_OTHER_INFO_LEN);
-
-  memcpy(winfo->other_info, &info, sizeof(info));
   LOG(INFO) << "RDMAServer.start_server: ip=" << info.ip << " port=" << info.port << " layer_num_blocks="
             << layer_num_blocks;
 }
 
 void RDMAChannel::connect(const WorkerInfo &dst_info) {
   auto &self = *this;
-  assert(sizeof(self.dst_) <= MAX_OTHER_INFO_LEN);
-  memcpy(&self.dst_, &dst_info.other_info, sizeof(self.dst_));
-  assert(self.dst_.layer_num == self.ctx_->layer_mr().size());
-  assert(self.dst_.layer_blk_size == self.ctx_->layer_mr()[0].mr().buf_len);
+  std::string addr(dst_info.addr);
+  auto pos = addr.find(':');
+  if (pos == std::string::npos) {
+    throw std::runtime_error("invalid rdma address: " + addr);
+  }
+
+  self.ip_ = addr.substr(0, pos);
+  auto port_str = addr.substr(pos + 1, addr.size());
+  self.port_ = std::stoi(port_str);
+  dst_layer_blk_size_ = dst_info.layer_num_blocks * dst_info.block_size;
+  dst_layer_num_ = dst_info.num_layers;
+  auto handle_size = (sizeof(void *) + sizeof(uint32_t)) * dst_layer_num_;
+  assert(handle_size == dst_info.other_info.size());
+  dst_ptrs_.resize(dst_layer_num_);
+  dst_rkeys_.resize(dst_layer_num_);
+  auto bytes = dst_info.other_info.data();
+  auto ptr_size = sizeof(void *) * dst_layer_num_;
+  memcpy(dst_ptrs_.data(), dst_info.other_info.data(), ptr_size);
+  bytes += ptr_size;
+  memcpy(dst_rkeys_.data(), bytes, sizeof(uint32_t) * dst_layer_num_);
 }
 
 template<typename T, typename E>
@@ -410,9 +437,9 @@ void RDMAChannel::do_init() {
   futs.reserve(sp);
   auto conn = self.ctx_->connector();
   assert(conn != nullptr);
-  LOG(INFO) << "KVT: rdma connect to : " << self.dst_.ip << ":" << self.dst_.port;
+  LOG(INFO) << "KVT: rdma connect to : " << self.ip_ << ":" << self.port_;
   for (int i = 0; i < sp; ++i) {
-    auto fut = Connect(*conn, self.dst_.ip, self.dst_.port);
+    auto fut = Connect(*conn, self.ip_, self.port_);
     futs.emplace_back(std::move(fut));
   }
 
@@ -488,22 +515,21 @@ void RDMAChannel::send_data(size_t layer_idx, const std::vector<IpcBlock> &data)
     if (len <= 0) {
       continue;
     }
-    assert(src_offset < self.dst_.layer_blk_size);
-    assert(len < self.dst_.layer_blk_size);
-    assert(src_offset + len <= self.dst_.layer_blk_size);
-    assert(dst_offset < self.dst_.layer_blk_size);
-    assert(dst_offset + len <= self.dst_.layer_blk_size);
-    assert(layer_idx < self.dst_.layer_num);
+    assert(src_offset < self.ctx_->layer_blk_size);
+    assert(len < self.ctx_->layer_blk_size);
+    assert(src_offset + len <= self.ctx_->layer_blk_size);
+    assert(dst_offset < self.dst_layer_blk_size_);
+    assert(dst_offset + len <= self.dst_layer_blk_size_);
+    assert(layer_idx < self.dst_layer_num_);
 
     auto src_mr = self.ctx_->layer_mr()[layer_idx].mr();
     src_mr.buf += src_offset;
     src_mr.buf_len = len;
 
-    auto rkey = self.dst_.hnds[layer_idx].rkey;
-    auto *rladdr = reinterpret_cast<char *>(self.dst_.hnds[layer_idx].ptr);
+    auto rkey = self.dst_rkeys_[layer_idx];
+    auto *rladdr = reinterpret_cast<char *>(self.dst_ptrs_[layer_idx]);
     assert(rladdr);
     uint64_t raddr = reinterpret_cast<uint64_t>(rladdr + dst_offset);
-
     datasp->emplace_back(rw_memp_t{std::move(src_mr), raddr, rkey});
   }
   if (datasp->empty()) {
@@ -522,19 +548,19 @@ void RDMAChannel::do_write(uint32_t layer_idx,
   auto &self = *this;
   self.do_init();
 
-  assert(src_offset < self.dst_.layer_blk_size);
-  assert(len < self.dst_.layer_blk_size);
-  assert(src_offset + len <= self.dst_.layer_blk_size);
-  assert(dst_offset < self.dst_.layer_blk_size);
-  assert(dst_offset + len <= self.dst_.layer_blk_size);
-  assert(layer_idx < self.dst_.layer_num);
+  assert(src_offset < self.ctx_->layer_blk_size);
+  assert(len < self.ctx_->layer_blk_size);
+  assert(src_offset + len <= self.ctx_->layer_blk_size);
+  assert(dst_offset < self.dst_layer_blk_size_);
+  assert(dst_offset + len <= self.dst_layer_blk_size_);
+  assert(layer_idx < self.dst_layer_num_);
 
   auto src_mr = self.ctx_->layer_mr()[layer_idx].mr();
   src_mr.buf += src_offset;
   src_mr.buf_len = len;
 
-  auto rkey = self.dst_.hnds[layer_idx].rkey;
-  auto *rladdr = reinterpret_cast<char *>(self.dst_.hnds[layer_idx].ptr);
+  auto rkey = self.dst_rkeys_[layer_idx];
+  auto *rladdr = reinterpret_cast<char *>(self.dst_ptrs_[layer_idx]);
   assert(rladdr);
   uint64_t raddr = reinterpret_cast<uint64_t>(rladdr + dst_offset);
 
@@ -557,7 +583,7 @@ void RDMAChannel::flush() {
   return;
 }
 
-static void Encode(char *ptr, uint32_t inst_id, uint32_t worker_id,
+static void Encode(char *ptr, InstanceId inst_id, uint32_t worker_id,
                    const std::string &reqid, const std::vector<uint32_t> &block_ids) {
   const uint32_t num_block = block_ids.size();
   const uint32_t magic = SEND_MAGIC;
@@ -620,10 +646,10 @@ void RDMAChannel::send_notification(IIterator<const RequestInfo *> *reqs) {
     auto r = opt.value();
     const auto &reqid = r->req_id;
     const auto &block_ids = r->dst_blocks();
-
+    LOG(INFO) << "KVT: send notification of request " << reqid;
     // 编码规则见 RDMAServer::CtxCallback::OnRecvCall
     memp_t bufmr;
-    size_t const msglen = 4 * sizeof(uint32_t) + block_ids.size() * sizeof(uint32_t) + reqid.size() + 1;
+    size_t const msglen = sizeof(InstanceId) + 3 * sizeof(uint32_t) + block_ids.size() * sizeof(uint32_t) + reqid.size() + 1;
     auto result = self.ctx_->mp()->AllocBuffer(bufmr, msglen, CPU);
     RTCHECK(result == accl::barex::BAREX_SUCCESS);
     Encode(bufmr.buf, self.src_inst_id_, self.src_worker_id_, reqid, block_ids);

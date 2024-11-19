@@ -25,13 +25,13 @@ class KvTransferClient : public noncopyable {
                                                   std::unique_ptr<ISendStubFactory> && f);
 
   KvTransferClient(std::unique_ptr<Context> &&, std::unique_ptr<ISendStubFactory> &&);
-  Result<bool> add_target(const InstanceId&,
+  Result<bool> add_target(const InstanceName&,
                           const WorkerId&,
                           uint32_t start_layer,
                           uint32_t num_layers,
                           std::optional<TransferProtocol> = std::nullopt);
-  Result<bool> remove_target(const InstanceId&, const WorkerId&);
-  Result<bool> submit_req_send(const InstanceId& dst_inst,
+  Result<bool> remove_target(const InstanceName&, const WorkerId&);
+  Result<bool> submit_req_send(const InstanceName& dst_inst,
                                const WorkerId& dst_worker,
                                const RequestId &,
                                uint32_t new_tokens,
@@ -54,7 +54,7 @@ class KvTransferClient : public noncopyable {
   size_t step_id_{0};
   std::unique_ptr<Context> ctx_;
   std::unordered_map<RequestId, std::vector<RequestInfo>> reqs_;
-  std::unordered_map<InstanceId, std::vector<SendStub>> targets_;
+  std::unordered_map<InstanceName, std::vector<SendStub>> targets_;
   std::queue<std::shared_ptr<StepGuard>> step_guards_;
   std::unique_ptr<ISendStubFactory> stub_factory_;
   ThreadPool single_thd_;

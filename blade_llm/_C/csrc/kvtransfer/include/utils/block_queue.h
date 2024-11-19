@@ -7,7 +7,7 @@
 #include <queue>
 #include <condition_variable>
 #include <cassert>
-#include "logging.h"
+#include "thrid_party/logging.h"
 
 namespace blade_llm {
 template<typename T>

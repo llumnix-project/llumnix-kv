@@ -5,7 +5,7 @@
 #include <unistd.h>
 #include <string>
 #include <unordered_map>
-#include "logging.h"
+#include "thrid_party/logging.h"
 
 namespace blade_llm {
 namespace ral {

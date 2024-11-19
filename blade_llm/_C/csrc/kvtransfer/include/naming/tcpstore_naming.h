@@ -1,8 +1,7 @@
 
 #pragma once
 
-#ifdef TORCH_FOUND
-
+#ifdef ENABLE_TORCH
 #include "naming.h"
 #include <vector>
 #include <string>
@@ -15,16 +14,15 @@ const static std::string TCP_NAMING_SCHEMA = "tcpstore";
 
 class TCPStoreNaming : public INamingClient {
 public:
-  TCPStoreNaming() = default;
+  explicit TCPStoreNaming(const InstanceName& n): INamingClient(n) {};
+  Schema get_schema() override {
+    return TCP_NAMING_SCHEMA;
+  }
   void connect(const Schema& schema, const std::string &url) override;
-
-  bool register_worker(const WorkerInfo& worker_info) override;
-
-  std::optional<WorkerInfo> get_worker_info(uint32_t inst_id, uint32_t worker_id) override;
-private:
-  static std::string get_key(uint32_t inst_id, uint32_t worker_id);
-  static std::vector<uint8_t> to_value(const WorkerInfo& info);
-  static WorkerInfo from_value(const std::vector<uint8_t>& input);
+  void store(const std::string &k, const std::string &v) override;
+  void remove(const std::string &key) override;
+  std::optional<std::string> get(const InstanceName&, const std::string &k) override;
+  const std::vector<std::string>& list() override;
 private:
   std::optional<c10d::TCPStore> tcp_store_;
 };
@@ -34,10 +32,11 @@ class TCPStoreNamingFactory : public INamingClientFactory {
   const Schema & get_schema() override {
     return TCP_NAMING_SCHEMA;
   }
-  std::unique_ptr<INamingClient> create() override {
-    return std::make_unique<TCPStoreNaming>();
+ std::unique_ptr<INamingClient> create(const InstanceName& inst_name) override {
+    return std::make_unique<TCPStoreNaming>(inst_name);
   }
 };
 
-}  // namespace blade_llm {
-#endif  // #ifdef TORCH_FOUND
+}  // namespace blade_llm
+#endif  // #ifdef ENABLE_TORCH
+

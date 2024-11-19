@@ -32,10 +32,12 @@ class IProtocolContext;
 
 class Context : noncopyable {
  public:
+  const InstanceName inst_name;
   const InstanceId inst_id;
   const WorkerId worker_id;
 
-  Context(const InstanceId& inst_id, const WorkerId& worker_id);
+  Context(const InstanceName& inst_name, const WorkerId& worker_id);
+  Context(const InstanceName& inst_name, const InstanceId &id, const WorkerId& worker_id);
   void set_tp(uint32_t tp_size, uint32_t worker_tp_rank);
   void set_block_params(uint32_t block_size, uint32_t token_size, uint32_t layer_num_blocks);
   void set_layer_data_address(uint8_t device_id, const std::vector<uint64_t> &layers);
@@ -66,8 +68,6 @@ class Context : noncopyable {
   int device_id_{-1};
   WorkerInfo worker_info_;
   SupportTransferProtocols transfer_protos_;
-  uint32_t num_layers_{};
-  uint32_t layer_num_blocks_{};
   std::vector<uint64_t> layer_data_address_;
   std::unique_ptr<ICUDABarrier> cuda_barrier_;
   std::unordered_map<TransferProtocol::Kind, std::unique_ptr<IProtocolContext>> protocol_ctxs_;
