@@ -14,6 +14,18 @@
 #include <stdexcept>
 
 namespace blade_llm {
+
+static constexpr int THD_NAME_MAX = 15;
+
+static inline void set_thread_name(std::string& name) {
+  if (name.size() > THD_NAME_MAX) {
+    name.resize(THD_NAME_MAX);
+  }
+  int ret = pthread_setname_np(pthread_self(), name.c_str());
+  (void)ret;
+  return;
+}
+
 class ThreadPool {
  public:
   ThreadPool(size_t);

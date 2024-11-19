@@ -36,11 +36,11 @@ class FakeChannel: public IChannel {
       cuda_d2h_mem_copy(dst_ptr, src_ptr, b.length);
     }
   };
-  void send_notification(IIterator<const RequestInfo *> *reqs) override {
+  void send_notification(IIterator<const ReqSendTask *> *reqs) override {
     auto next = reqs->next();
     if (next.has_value()) {
       auto req = next.value();
-      notifies->push(req->req_id);
+      notifies->push(req->req_id());
     }
   };
   void flush() override {};

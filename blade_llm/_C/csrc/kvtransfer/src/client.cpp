@@ -119,8 +119,8 @@ Result<bool> KvTransferClient::submit_req_send(const InstanceName &dst_inst_name
                                                const RequestId &req_id,
                                                uint32_t new_tokens,
                                                bool has_last_token,
-                                               const std::vector<uint32_t> &src_block_ids,
-                                               const std::vector<uint32_t> &dst_block_ids) {
+                                               std::vector<uint32_t> src_block_ids,
+                                               std::vector<uint32_t> dst_block_ids) {
 
   if (dst_worker_id >= MAX_WORKERS_PER_INST) {
     LOG(ERROR) << "KVT client: invalid worker id: " << dst_worker_id << ";";
@@ -150,8 +150,9 @@ Result<bool> KvTransferClient::submit_req_send(const InstanceName &dst_inst_name
     return Result<bool>::error(ErrorCode::TARGET_DISCONNECTED, "target worker disconnected;");
   }
   auto dst_inst_id = inst[dst_worker_id]->dst_info().inst_id;
-  reqs_[req_id].emplace_back(dst_inst_id, dst_worker_id, req_id, src_block_ids, dst_block_ids)
-      .add_new_tokens(new_tokens, has_last_token);
+  auto req_info = std::make_unique<RequestInfo>(dst_inst_id, dst_worker_id, req_id, std::move(src_block_ids), std::move(dst_block_ids));
+  req_info->add_send_task(0, new_tokens, has_last_token);
+  reqs_[req_id].emplace_back(std::move(req_info));
   LOG(INFO) << "KVT client: accept send request(" << req_id
             << ") to worker(" << dst_inst_id << ":" << dst_worker_id << ") with "
             << new_tokens << " tokens;";
@@ -168,10 +169,9 @@ Result<bool> KvTransferClient::submit_delta_send(const RequestId &req_id,
   }
 
   for (auto &req : r->second) {
-    req.set_seen_tokens(seen_tokens)
-        .add_new_tokens(new_tokens, has_last_token);
+    req->add_send_task(seen_tokens, new_tokens, has_last_token);
     LOG(INFO) << "KVT client: accept delta " << new_tokens << " send of request("
-              << req_id << ") to worker (" << req.dst_inst_id << ":" << req.dst_worker_id << ");";
+              << req_id << ") to worker (" << req->dst_inst_id << ":" << req->dst_worker_id << ");";
   }
   return {true};
 }
@@ -179,12 +179,10 @@ Result<bool> KvTransferClient::submit_delta_send(const RequestId &req_id,
 Result<bool> KvTransferClient::start_send() {
   LOG(INFO) << "KVT client: start send step: " << step_id_ << " with " << reqs_.size() << " requests;";
   auto step = std::make_shared<Step>(step_id_++);
-  std::vector<const RequestInfo *> batch_reqs;
+  auto batch_reqs = std::make_shared<std::vector<ReqSendTask>>();
   for (auto &[req_id, reqs] : reqs_) {
     for (auto &req : reqs) {
-      if (req.new_tokens() > 0) {
-        batch_reqs.push_back(&req);
-      }
+      req->pop_tasks(*batch_reqs);
     }
   }
   BatchSendTask batch(step, std::move(batch_reqs));
@@ -238,7 +236,7 @@ Result<bool> KvTransferClient::check_transfer_done(const RequestId &req_id) {
     return {true};
   }
   for (const auto &req : r->second) {
-    if (!req.is_all_transferred()) {
+    if (!req->is_all_transferred()) {
       return {false};
     }
   }
@@ -246,4 +244,3 @@ Result<bool> KvTransferClient::check_transfer_done(const RequestId &req_id) {
   return {true};
 }
 }
-

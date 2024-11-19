@@ -159,7 +159,7 @@ class RDMAChannel : public IChannel, public noncopyable {
   void connect(const WorkerInfo &dst_info) override;
   void send_data(size_t layer_index, const std::vector<IpcBlock> &data) override;
   void flush() override;
-  void send_notification(IIterator<const RequestInfo *> *reqs) override;
+  void send_notification(IIterator<const ReqSendTask *> *reqs) override;
 
  private:
   void do_write(uint32_t layer_idx,

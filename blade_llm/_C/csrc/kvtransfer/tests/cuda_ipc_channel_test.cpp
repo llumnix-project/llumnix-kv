@@ -175,7 +175,9 @@ TEST(CudaIpcTest, TestTransfer) {
   auto pid = fork();
   if (pid > 0) {
     // parent process as server side;
+    LOG(INFO) << "cuda_set_device(0)";
     cuda_set_device(0);
+    LOG(INFO) << "cuda_set_device(0) ok";
     void *layer_0, *layer_1;
     cuda_malloc(&layer_0, 4 * KB);
     cuda_malloc(&layer_1, 4 * KB);
@@ -234,7 +236,9 @@ TEST(CudaIpcTest, TestTransfer) {
     cudaFree(layer_1);
   } else {
     // child process as client side;
+    LOG(INFO) << "cuda_set_device(1)";
     cuda_set_device(1);
+    LOG(INFO) << "cuda_set_device(1) ok";
     void *layer_0, *layer_1;
     cuda_malloc(&layer_0, 4 * KB);
     cuda_malloc(&layer_1, 4 * KB);
@@ -267,10 +271,11 @@ TEST(CudaIpcTest, TestTransfer) {
     channel->connect(info_opt.value());
     LOG(INFO) << "test cuda server connected;";
     RequestInfo req_info(0, 0, "REQ-0001", {0, 1}, {0, 1});
+    ReqSendTask req_task(&req_info, 0, 1, true);
     channel->send_data(0, {{0, 0, 128}});
     channel->send_data(1, {{0, 0, 128}});
     channel->flush();
-    auto iter = Source<const RequestInfo>::from(&req_info, 1);
+    auto iter = Source<const ReqSendTask>::from(&req_task, 1);
     channel->send_notification(iter.get());
     channel->close();
     LOG(INFO) << "channel process exit ...";

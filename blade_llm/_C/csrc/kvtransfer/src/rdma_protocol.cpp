@@ -635,7 +635,7 @@ static void Encode(char *ptr, InstanceId inst_id, uint32_t worker_id,
   return fut;
 }
 
-void RDMAChannel::send_notification(IIterator<const RequestInfo *> *reqs) {
+void RDMAChannel::send_notification(IIterator<const ReqSendTask *> *reqs) {
   auto &self = *this;
   self.do_init();
   // self.send_futs_.reserve(data.size());
@@ -644,7 +644,7 @@ void RDMAChannel::send_notification(IIterator<const RequestInfo *> *reqs) {
   auto opt = reqs->next();
   while (opt.has_value()) {
     auto r = opt.value();
-    const auto &reqid = r->req_id;
+    const auto &reqid = r->req_id();
     const auto &block_ids = r->dst_blocks();
     LOG(INFO) << "KVT: send notification of request " << reqid;
     // 编码规则见 RDMAServer::CtxCallback::OnRecvCall

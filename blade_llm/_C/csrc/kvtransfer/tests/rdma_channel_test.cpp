@@ -174,13 +174,14 @@ TEST(RDMAChannelTest, TestTransefer) {
     LOG(INFO) << "fetch dst worker info: token_size=" << info.token_size << ", block_size=" << info.block_size;
     channel.connect(dst_info.value());
     std::vector<uint32_t> blocks{0, 1};
-    std::vector<const RequestInfo *> reqs;
+    std::vector<const ReqSendTask *> reqs;
     RequestInfo r(0, 0, "test_rdma", blocks, blocks);
-    reqs.push_back(&r);
+    ReqSendTask t(&r, 0, 1, true);
+    reqs.push_back(&t);
     channel.send_data(0, {{0, 0, token_size}, {2 * token_size, 2 * token_size, token_size}});
     channel.send_data(1, {{0, 0, token_size}, {2 * token_size, 2 * token_size, token_size}});
     channel.flush();
-    auto nf = CopySource<const RequestInfo *>::from(reqs);
+    auto nf = CopySource<const ReqSendTask *>::from(reqs);
     channel.send_notification(nf.get());
     channel.close();
     cudaFree(layer_0);

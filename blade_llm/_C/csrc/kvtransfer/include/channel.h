@@ -24,7 +24,7 @@ class IChannel {
  public:
   virtual void connect(const WorkerInfo &dst_info) = 0;
   virtual void send_data(size_t layer_index, const std::vector<IpcBlock> &data) = 0;
-  virtual void send_notification(IIterator<const RequestInfo *> *reqs) = 0;
+  virtual void send_notification(IIterator<const ReqSendTask *> *reqs) = 0;
   virtual void flush() = 0;
   virtual void close() {};
   virtual ~IChannel() = default;

@@ -36,8 +36,8 @@ class KvTransferClient : public noncopyable {
                                const RequestId &,
                                uint32_t new_tokens,
                                bool has_last_token,
-                               const std::vector<uint32_t> &src_block_ids,
-                               const std::vector<uint32_t> &dst_block_ids);
+                               std::vector<uint32_t> src_block_ids,
+                               std::vector<uint32_t> dst_block_ids);
   Result<bool> submit_delta_send(const RequestId &,
                                  uint32_t seen_tokens,
                                  uint32_t new_tokens,
@@ -53,7 +53,7 @@ class KvTransferClient : public noncopyable {
   bool auto_connect_{false};
   size_t step_id_{0};
   std::unique_ptr<Context> ctx_;
-  std::unordered_map<RequestId, std::vector<RequestInfo>> reqs_;
+  std::unordered_map<RequestId, std::vector<std::unique_ptr<RequestInfo>>> reqs_;
   std::unordered_map<InstanceName, std::vector<SendStub>> targets_;
   std::queue<std::shared_ptr<StepGuard>> step_guards_;
   std::unique_ptr<ISendStubFactory> stub_factory_;

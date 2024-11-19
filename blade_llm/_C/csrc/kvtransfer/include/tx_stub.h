@@ -15,18 +15,15 @@
 namespace blade_llm {
 
 struct BatchSendTask {
-
   BatchSendTask() = default;
-  explicit BatchSendTask(std::vector<const RequestInfo *> &&ts) {
-    tasks = std::make_shared<std::vector<const RequestInfo *>>(std::move(ts));
-  };
-  BatchSendTask(std::shared_ptr<Step> &s,
-                std::vector<const RequestInfo *> &&ts) : step(s) {
-    tasks = std::make_shared<std::vector<const RequestInfo *>>(std::move(ts));
-  };
 
+  BatchSendTask(std::shared_ptr<Step> s, std::shared_ptr<std::vector<ReqSendTask>> t):
+    step(std::move(s)),
+    tasks(std::move(t)) {}
+
+public:
   std::shared_ptr<Step> step;
-  std::shared_ptr<std::vector<const RequestInfo *>> tasks;
+  std::shared_ptr<std::vector<ReqSendTask>> tasks;
 };
 
 enum StubState {

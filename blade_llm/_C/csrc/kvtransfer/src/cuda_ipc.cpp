@@ -96,12 +96,12 @@ void CudaIpcChannel::connect(const blade_llm::WorkerInfo &dst_info) {
 void CudaIpcChannel::send_data(size_t layer_index, const std::vector<IpcBlock> &data) {
   data_writer_.write(layer_index, data);
 }
-void CudaIpcChannel::send_notification(IIterator<const RequestInfo *> *reqs) {
+void CudaIpcChannel::send_notification(IIterator<const ReqSendTask *> *reqs) {
   for (;;) {
     auto v = reqs->next();
     if (v.has_value()) {
       auto req = v.value();
-      notify_writer_.write(req->req_id, req->dst_blocks());
+      notify_writer_.write(req->req_id(), req->dst_blocks());
     } else {
       break;
     }

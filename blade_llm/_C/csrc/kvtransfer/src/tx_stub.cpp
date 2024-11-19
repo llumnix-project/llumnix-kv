@@ -2,13 +2,14 @@
 #include "utils/timer.h"
 #include "thrid_party/logging.h"
 #include "channel.h"
+#include <unistd.h>
 
 namespace blade_llm {
 
 static void parse_block_send_p_eq_d(
   const WorkerInfo *src_worker_info,
   const WorkerInfo *dst_worker_info,
-  const RequestInfo *task,
+  const ReqSendTask *task,
   std::vector<IpcBlock> &send_blocks) {
   // as tp size is same, token size should be same;
   assert(src_worker_info->tp_size == dst_worker_info->tp_size);
@@ -23,8 +24,8 @@ static void parse_block_send_p_eq_d(
   uint32_t dst_ntpb = block_size / token_size;
   assert(src_ntpb == dst_ntpb);
 
-  auto wrote_tokens = task->seen_tokens();
-  auto left_tokens = task->new_tokens();
+  auto wrote_tokens = task->seen_tokens;
+  auto left_tokens = task->new_tokens;
   const auto &src_blocks = task->src_blocks();
   const auto &dst_blocks = task->dst_blocks();
   assert(src_blocks.size() == dst_blocks.size());
@@ -105,27 +106,27 @@ static void do_parse_block_send(
 static void parse_block_send_p_gt_d(
   const WorkerInfo *p_info,  // src
   const WorkerInfo *d_info,  // dst
-  const RequestInfo *task,
+  const ReqSendTask *task,
   std::vector<IpcBlock> &send_blocks) {
   return do_parse_block_send(
     p_info, task->src_blocks(),
     d_info, task->dst_blocks(),
-    task->seen_tokens(),
-    task->new_tokens(),
+    task->seen_tokens,
+    task->new_tokens,
     send_blocks);
 }
 
 static void parse_block_send_p_lt_d(
   const WorkerInfo *p_info,
   const WorkerInfo *d_info,
-  const RequestInfo *task,
+  const ReqSendTask *task,
   std::vector<IpcBlock> &send_blocks) {
   size_t sb_idx = send_blocks.size();
   do_parse_block_send(
     d_info, task->dst_blocks(),
     p_info, task->src_blocks(),
-    task->seen_tokens(),
-    task->new_tokens(),
+    task->seen_tokens,
+    task->new_tokens,
     send_blocks);
   for (; sb_idx < send_blocks.size(); ++sb_idx) {
     std::swap(send_blocks[sb_idx].src_offset, send_blocks[sb_idx].dst_offset);
@@ -194,8 +195,8 @@ void KvSendStub::start_async() {
   auto dst_id = dst_info_.inst_id;
   auto dst_worker_id = dst_info_.worker_id;
   std::vector<IpcBlock> send_blocks;
-  std::vector<const RequestInfo *> send_reqs;
-  LOG(INFO) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id
+  std::vector<const ReqSendTask *> send_reqs;
+  LOG(INFO) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id << ":" << gettid()
             << "): start to send kv of layer[" << start_layer_ << ", " << num_layers_ << ");";
 
   size_t min_block_n = std::numeric_limits<size_t>::max();
@@ -220,18 +221,22 @@ void KvSendStub::start_async() {
       break;
     }
 
+#ifndef NDEBUG
+    usleep(300 * 1000);  // sleep 300ms
+#endif
+
     uint64_t wait_time_us = 0;
     TimeWatch start;
     send_blocks.clear();
     send_reqs.clear();
-    for (auto task : *batch.tasks) {
-      if (task->new_tokens() <= 0 ||
-          task->dst_inst_id != dst_id ||
-          task->dst_worker_id != dst_worker_id) {
+    for (const auto& task : *batch.tasks) {
+      if (task.new_tokens <= 0 ||
+          task.dst_inst_id() != dst_id ||
+          task.dst_worker_id() != dst_worker_id) {
         continue;
       }
-      send_reqs.push_back(task);
-      parse_block_send(&src_info_, &dst_info_, task, send_blocks);
+      send_reqs.push_back(&task);
+      parse_block_send(&src_info_, &dst_info_, &task, send_blocks);
     }
     if (send_reqs.empty()) {
       continue;
@@ -262,25 +267,27 @@ void KvSendStub::start_async() {
                 << ",max=" << max << ",total=" << total
                 << "), elapse: total use "
                 << elapse << "us, wait use " << wait_time_us << "us;";
-      auto iter = Iterator<const RequestInfo *>::copy_from(send_reqs)
-          .filter([](auto t) { return t->reach_last_token(); });
+      auto iter = Iterator<const ReqSendTask *>::copy_from(send_reqs)
+          .filter([](auto t) { return t->reach_last_token; });
       if (iter.has_next()) {
         ch_->send_notification(&iter);
       }
 
       for (auto task : send_reqs) {
-        task->clear_new_tokens();
-        if (!task->reach_last_token()) {
+        if (!task->reach_last_token) {
           continue;
         }
-        task->set_transfer_done();
+        auto req_id = task->req_id();
         const auto block_n = task->dst_blocks().size();
+        task->set_transfer_done();
+        // DO NOT ACCESS task! IT MAY BE FREED!
+        // Add clang tidy: USE-AFTER-MOVED to detect the bug.
         min_block_n = std::min(min_block_n, block_n);
         max_block_n = std::max(max_block_n, block_n);
         total_block_n += block_n;
         finished_req_n += 1;
         LOG(INFO) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id
-                  << "): send finish notification of request(" << task->req_id << ");";
+                  << "): send finish notification of request(" << req_id << ");";
       }
     } catch (std::exception &e) {
       LOG(ERROR) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id

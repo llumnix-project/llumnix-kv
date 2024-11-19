@@ -8,6 +8,9 @@
 #include <string>
 #include <vector>
 
+#include <assert.h>
+#include <iostream>
+
 #define MAX_OTHER_INFO_LEN (8192)
 #define MAX_ADDRESS_LEN (64)
 #define INVALID_INST_WORKER_ID (UINT32_MAX)
@@ -84,54 +87,130 @@ struct WorkerInfo {
   [[nodiscard]] std::string to_string() const;
 };
 
+class RequestInfo;
+class ReqSendTask {
+  const RequestInfo* const req_ = nullptr;
+public:
+  const uint32_t seen_tokens{0};
+  const uint32_t new_tokens{0};
+  const bool reach_last_token{false};
+public:
+  ReqSendTask(RequestInfo* req, uint32_t seen_, uint32_t new_, bool last_):
+    req_(req),
+    seen_tokens(seen_),
+    new_tokens(new_),
+    reach_last_token(last_) {}
+
+  void set_transfer_done() const;
+
+  const auto& req_id() const noexcept;
+  const auto& dst_blocks() const noexcept;
+  const auto& src_blocks() const noexcept;
+  auto dst_inst_id() const noexcept;
+  auto dst_worker_id() const noexcept;
+
+  // FOR GTEST
+  bool operator==(const ReqSendTask& other) const {
+    return req_ == other.req_ &&
+           seen_tokens == other.seen_tokens &&
+           new_tokens == other.new_tokens &&
+           reach_last_token == other.reach_last_token;
+  }
+
+  friend inline std::ostream& operator<<(std::ostream& os, const ReqSendTask& task);
+};
+
+// FOR GTEST
+inline std::ostream& operator<<(std::ostream& os, const ReqSendTask& task) {
+  os << "ReqSendTask(seen_tokens: " << task.seen_tokens
+      << ", new_tokens: " << task.new_tokens
+      << ", reach_last_token: " << std::boolalpha << task.reach_last_token
+      << ", req_: " << task.req_ << ")";
+  return os;
+}
+
 class RequestInfo {
  public:
   const InstanceId dst_inst_id;
   const WorkerId dst_worker_id;
   const RequestId req_id;
+  const std::vector<uint32_t> src_blocks;
+  const std::vector<uint32_t> dst_blocks;
+ private:
+  std::atomic_bool is_all_transferred_{false};
+  std::vector<ReqSendTask> task_;
 
-  RequestInfo(InstanceId dst_inst_id,
-              WorkerId dst_worker_id,
-              const RequestId &req_id,
-              const std::vector<uint32_t> &src_blocks,
-              const std::vector<uint32_t> &dst_blocks) :
-      dst_inst_id(dst_inst_id),
-      dst_worker_id(dst_worker_id),
-      is_all_transferred_(false),
-      req_id(req_id),
-      src_blocks_(src_blocks),
-      dst_blocks_(dst_blocks) {};
-  RequestInfo(RequestInfo &&other) noexcept:
-      dst_inst_id(other.dst_inst_id),
-      dst_worker_id(other.dst_worker_id),
-      req_id(other.req_id),
-      src_blocks_(other.src_blocks_),
-      dst_blocks_(other.dst_blocks_),
-      seen_tokens_(other.seen_tokens_),
-      new_tokens_(other.new_tokens_),
-      reach_last_token_(other.reach_last_token_) {
-    is_all_transferred_ = other.is_all_transferred_.load(std::memory_order_relaxed);
+ public:
+  RequestInfo(InstanceId dst_inst_id_,
+              WorkerId dst_worker_id_,
+              RequestId req_id_,
+              std::vector<uint32_t> src_blocks_,
+              std::vector<uint32_t> dst_blocks_):
+      dst_inst_id(dst_inst_id_),
+      dst_worker_id(dst_worker_id_),
+      req_id(std::move(req_id_)),
+      src_blocks(std::move(src_blocks_)),
+      dst_blocks(std::move(dst_blocks_)) {};
+
+  RequestInfo(const RequestInfo&) = delete;
+  RequestInfo(RequestInfo&&) = delete;
+
+  void add_send_task(uint32_t seen, uint32_t new_tokens, bool has_last) {
+    this->task_.emplace_back(this, seen, new_tokens, has_last);
   }
-  RequestInfo &set_seen_tokens(uint32_t s_token);
-  RequestInfo &add_new_tokens(uint32_t n_token, bool has_last);
 
-  void clear_new_tokens() const;
-  void set_transfer_done() const;
-  [[nodiscard]] const std::vector<uint32_t> &src_blocks() const;
-  [[nodiscard]] const std::vector<uint32_t> &dst_blocks() const;
-  [[nodiscard]] uint32_t seen_tokens() const;
-  [[nodiscard]] uint32_t new_tokens() const;
-  [[nodiscard]] bool reach_last_token() const;
-  [[nodiscard]] bool is_all_transferred() const;
+  bool is_all_transferred() const {
+    return is_all_transferred_.load(std::memory_order_acquire);
+  }
+
+  void pop_tasks(std::vector<ReqSendTask>& out) {
+    out.reserve(out.size() + this->task_.size());
+    for (auto&& task : this->task_) {
+      out.emplace_back(std::move(task));
+    }
+    this->task_.clear();
+  }
+
+  // ONLY FOR TEST
+  const auto& tasks() const noexcept {
+    return this->task_;
+  }
 
  private:
-  uint32_t seen_tokens_{0};
-  uint32_t new_tokens_{0};
-  bool reach_last_token_{false};
-  std::vector<uint32_t> src_blocks_;
-  std::vector<uint32_t> dst_blocks_;
-  std::atomic_bool is_all_transferred_{false};
+  friend class ReqSendTask;
+
+  void set_transfer_done() const {
+    const_cast<RequestInfo *>(this)->is_all_transferred_.store(true, std::memory_order_release);
+  }
 };
+
+inline void ReqSendTask::set_transfer_done() const {
+  assert(this->reach_last_token);
+  this->req_->set_transfer_done();
+  // DO NOT ACCESS req_! THIS MAY BE FREED!
+}
+
+inline const auto& ReqSendTask::req_id() const noexcept {
+  return this->req_->req_id;
+}
+
+inline const auto& ReqSendTask::dst_blocks() const noexcept {
+  return this->req_->dst_blocks;
+}
+
+inline const auto& ReqSendTask::src_blocks() const noexcept {
+  return this->req_->src_blocks;
+}
+
+inline auto ReqSendTask::dst_inst_id() const noexcept {
+  return this->req_->dst_inst_id;
+}
+
+inline auto ReqSendTask::dst_worker_id() const noexcept {
+  return this->req_->dst_worker_id;
+}
+
+
 } // namespace blade_llm
 
 #endif //KVTRANSFER_INCLUDE_COMMON_H_

@@ -78,16 +78,16 @@ void submit_req_send(const std::string &dst_inst_name,
                      const std::string &req_id,
                      uint32_t new_tokens,
                      bool has_last_token,
-                     const std::vector<uint32_t> &src_block_ids,
-                     const std::vector<uint32_t> &dst_block_ids) {
+                     std::vector<uint32_t> src_block_ids,
+                     std::vector<uint32_t> dst_block_ids) {
   if (KV_CLIENT != nullptr) {
     auto ret = KV_CLIENT->submit_req_send(dst_inst_name,
                                           dst_worker_id,
                                           req_id,
                                           new_tokens,
                                           has_last_token,
-                                          src_block_ids,
-                                          dst_block_ids);
+                                          std::move(src_block_ids),
+                                          std::move(dst_block_ids));
     if (ret.is_err()) {
       ERROR_OPT.emplace(std::move(ret.err()));
     }
