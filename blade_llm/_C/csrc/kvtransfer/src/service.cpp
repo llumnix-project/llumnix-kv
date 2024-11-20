@@ -32,7 +32,7 @@ KvRecvStub &KvTransferService::get_or_create_conn(InstanceId src_inst_id,
   return src[src_worker_id].value();
 }
 
-Result<bool> KvTransferService::submit_recv(InstanceId src_inst_id,
+Result<bool> KvTransferService::submit_recv(const InstanceName& src_inst_name,
                                             WorkerId src_worker_id,
                                             const RequestId &req_id,
                                             const std::vector<uint32_t> &dst_block_ids) {
@@ -40,6 +40,7 @@ Result<bool> KvTransferService::submit_recv(InstanceId src_inst_id,
     return Result<bool>::error(ErrorCode::INVALID_REQUEST_PARAM, "receive blocks can't be empty;");
   }
   auto [r, _] = reqs_.try_emplace(req_id);
+  auto src_inst_id = Context::get_inst_id(src_inst_name);
   r->second.emplace_back(src_inst_id, src_worker_id, req_id)
       .set_dst_blocks(dst_block_ids);
   LOG(INFO) << "KVT service: accept request(" << req_id << ") recv from worker("

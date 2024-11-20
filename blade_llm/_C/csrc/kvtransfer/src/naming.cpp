@@ -4,6 +4,9 @@
 #include "naming.h"
 #include "naming/tcpstore_naming.h"
 
+#include "naming/tcpstore_naming.h"
+#include "naming/eas_naming.h"
+#include "naming/filesys_naming.h"
 namespace blade_llm {
 GeneralNamingClient NamingManager::connect_naming(const InstanceName& myname, const std::string &url) {
   {
@@ -42,6 +45,8 @@ NamingManager::NamingManager() {
 #ifdef ENABLE_TORCH
     factories_.emplace(TCP_NAMING_SCHEMA, std::make_unique<TCPStoreNamingFactory>());
 #endif
+    factories_.emplace(EAS_NAMING_SCHEMA, std::make_unique<EASNamingClientFactory>());
+    factories_.emplace(FILESYS_NAMING_SCHEMA, std::make_unique<FileSysNamingClientFactory>());
   }
 }
 

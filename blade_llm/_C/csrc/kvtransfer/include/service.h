@@ -18,7 +18,7 @@ namespace blade_llm {
 class KvTransferService : public ITransferService {
  public:
   explicit KvTransferService(std::unique_ptr<Context> &&ctx);
-  Result<bool> submit_recv(InstanceId, WorkerId, const RequestId&, const std::vector<uint32_t>& block_ids);
+  Result<bool> submit_recv(const InstanceName& , WorkerId, const RequestId&, const std::vector<uint32_t>& block_ids);
   Result<bool> check_recv_done(const RequestId&);
   void on_recv(InstanceId, WorkerId, const RequestId&, std::vector<uint32_t> &&) override;
   Context *get_context() { return ctx_.get(); };

@@ -41,13 +41,13 @@ static void curl_init_global() {
 #endif
 }
 
-HttpClient::HttpClient() {
+CurlHttpClient::CurlHttpClient() {
 #ifdef ENABLE_CURL
   std::call_once(curl_init_flag, curl_init_global);
 #endif
 }
 
-void HttpClient::post(const std::string &url, const std::string &data) {
+void CurlHttpClient::post(const std::string &url, const std::string &data) {
 #ifdef ENABLE_CURL
   CURL *curl = curl_easy_init();
   curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
@@ -63,7 +63,7 @@ void HttpClient::post(const std::string &url, const std::string &data) {
 #endif
 }
 
-std::optional<std::string> HttpClient::get(const std::string &url) {
+std::optional<std::string> CurlHttpClient::get(const std::string &url) {
 #ifdef ENABLE_CURL
   MessageStruct msg;
   msg.payload = (char *) malloc(1); // TODO: use memory pool;

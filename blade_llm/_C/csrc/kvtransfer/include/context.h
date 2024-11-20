@@ -64,6 +64,8 @@ class Context : noncopyable {
     }
   }
 
+  static InstanceId get_inst_id(const InstanceName &name); // tmp impl; TODO: use InstanceName only ;
+
  private:
   int device_id_{-1};
   WorkerInfo worker_info_;

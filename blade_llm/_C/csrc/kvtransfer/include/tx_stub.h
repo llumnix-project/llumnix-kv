@@ -11,6 +11,7 @@
 #include "step.h"
 #include "naming.h"
 #include "utils/block_queue.h"
+#include "naming/eas_naming.h"
 
 namespace blade_llm {
 

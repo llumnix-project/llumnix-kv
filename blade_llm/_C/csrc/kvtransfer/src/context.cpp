@@ -22,7 +22,7 @@ void CudaEventBarrier::wait(uint32_t layer_idx) {
 
 Context::Context(const InstanceName &inst, const WorkerId &worker) :
     inst_name(inst),
-    inst_id(std::hash<InstanceName>{}(inst)),
+    inst_id(Context::get_inst_id(inst)),
     worker_id(worker),
     cuda_barrier_(std::make_unique<NoCudaBarrier>()) {
   worker_info_ = WorkerInfo(inst_id, worker_id);
@@ -116,5 +116,8 @@ void Context::register_protocol(std::unique_ptr<IProtocolContext> &&ctx) {
   auto ret = protocol_ctxs_.emplace(p.type, std::move(ctx));
   assert(ret.second);
   transfer_protos_.set_support(p);
+}
+InstanceId Context::get_inst_id(const InstanceName &name) {
+  return std::hash<InstanceName>{}(name);
 }
 }

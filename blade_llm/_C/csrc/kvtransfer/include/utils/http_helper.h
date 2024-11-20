@@ -13,9 +13,9 @@ class IHttpClient {
   virtual ~IHttpClient() = default;
 };
 
-class HttpClient: public IHttpClient {
+class CurlHttpClient: public IHttpClient {
  public:
-  HttpClient();
+  CurlHttpClient();
   void post(const std::string& url, const std::string& data) override;
   std::optional<std::string> get(const std::string& url) override;
 };

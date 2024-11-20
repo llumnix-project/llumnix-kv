@@ -219,7 +219,7 @@ void init_kv_transfer_server(const std::string &inst_name,
     auto naming_worker_client = naming_client.create_naming_worker_client();
 
     int retry_times = 3;
-    while(retry_times > 0) {
+    while (retry_times > 0) {
       try {
         naming_worker_client->register_worker(worker_info);
         break;
@@ -227,7 +227,7 @@ void init_kv_transfer_server(const std::string &inst_name,
         LOG(WARNING) << "KVT: register worker failed: " << e.what() << ", will try later.";
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-      retry_times --;
+      retry_times--;
     }
     if (retry_times <= 0) {
       LOG(ERROR) << "KVT: can't register worker after retry;";
@@ -242,10 +242,9 @@ void submit_req_recv(const std::string &src_inst_name,
                      const std::vector<uint32_t> &dst_block_ids) {
 
   if (KV_SERVICE != nullptr) {
-    auto src_inst_id = std::hash<std::string>{}(src_inst_name);
     LOG(INFO) << "KVT: submit recv request: " << req_id << " from "
-              << src_inst_id << ":" << src_worker_id << " at" << src_inst_name;
-    auto ret = KV_SERVICE->submit_recv(src_inst_id,
+              << src_inst_name << ":" << src_worker_id << ";";
+    auto ret = KV_SERVICE->submit_recv(src_inst_name,
                                        src_worker_id,
                                        req_id,
                                        dst_block_ids);
