@@ -12,6 +12,10 @@ namespace ral {
 
 namespace internal {
 
+// TODO: handle fork
+static int32_t g_sys_pid = getpid();
+static thread_local int32_t g_sys_tid = gettid();
+
 int ParseInteger(const char *str, size_t size) {
   // Ideally we would use env_var / safe_strto64, but it is
   // hard to use here without pulling in a lot of dependencies,
@@ -131,10 +135,9 @@ void LogMessage::GenerateLogMessage() {
   char time_buffer[time_buffer_size];
   strftime(time_buffer, time_buffer_size, "%Y-%m-%d %H:%M:%S",
            localtime(&result));
-  auto pid = getpid();
   const char *last_slash = strrchr(fname_, '/');
   const char *short_fname = last_slash == nullptr ? fname_ : last_slash + 1;
-  fprintf(stderr, "%s:%d %c %s:%d] %s\n", time_buffer, pid, "IWEF"[severity_],
+  fprintf(stderr, "%s:%d:%d %c %s:%d] %s\n", time_buffer, g_sys_pid, g_sys_tid, "IWEF"[severity_],
           short_fname, line_, str().c_str());
 }
 

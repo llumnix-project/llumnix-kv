@@ -153,9 +153,9 @@ Result<bool> KvTransferClient::submit_req_send(const InstanceName &dst_inst_name
   auto req_info = std::make_unique<RequestInfo>(dst_inst_id, dst_worker_id, req_id, std::move(src_block_ids), std::move(dst_block_ids));
   req_info->add_send_task(0, new_tokens, has_last_token);
   reqs_[req_id].emplace_back(std::move(req_info));
-  LOG(INFO) << "KVT client: accept send request(" << req_id
+  LOG(INFO) << "KVT client step=" << step_id_ << ": accept send request(" << req_id
             << ") to worker(" << dst_inst_id << ":" << dst_worker_id << ") with "
-            << new_tokens << " tokens;";
+            << new_tokens << " tokens. has_last_token=" << has_last_token;
   return {true};
 }
 Result<bool> KvTransferClient::submit_delta_send(const RequestId &req_id,
@@ -170,7 +170,9 @@ Result<bool> KvTransferClient::submit_delta_send(const RequestId &req_id,
 
   for (auto &req : r->second) {
     req->add_send_task(seen_tokens, new_tokens, has_last_token);
-    LOG(INFO) << "KVT client: accept delta " << new_tokens << " send of request("
+    LOG(INFO) << "KVT client step=" << step_id_ << ": accept delta " << seen_tokens
+              << "," << new_tokens << "," << has_last_token
+              << " send of request("
               << req_id << ") to worker (" << req->dst_inst_id << ":" << req->dst_worker_id << ");";
   }
   return {true};
@@ -198,7 +200,7 @@ Result<bool> KvTransferClient::start_send() {
   auto ctx = context();
   auto step_guard = std::make_shared<StepGuard>(ctx, step);
   single_thd_.spawn([step_guard]() {
-    LOG(INFO) << "KVT client: start to sync data ready by layer...";
+    LOG(INFO) << "KVT client: (step " << step_guard->step_id() << "): start to sync data ready by layer...";
     TimeWatch start;
     step_guard->wait_layers();
     LOG(INFO) << "KVT client: (step " << step_guard->step_id()
@@ -227,7 +229,7 @@ Result<bool> KvTransferClient::flush_send() {
       }
     }
   }
-  return {true};
+return {true};
 }
 
 Result<bool> KvTransferClient::check_transfer_done(const RequestId &req_id) {
