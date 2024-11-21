@@ -659,11 +659,14 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
   {
     // the third send
     std::vector<RequestInfo *> reqs;
+    auto tasks = std::make_shared<std::vector<ReqSendTask>>();
     RequestInfo req3(1, 0, "req_id00000000000000000000000002", {3, 4, 5}, {7, 8, 9});
+    req3.add_send_task(0, 17, false);
+    req3.pop_tasks(*tasks);
+    tasks->clear();
     req3.add_send_task(17, 16, true);
     reqs.push_back(&req3);
     auto step_2 = std::make_shared<Step>(2);
-    auto tasks = std::make_shared<std::vector<ReqSendTask>>();
     for (auto& r : reqs) {
       r->pop_tasks(*tasks);
     }

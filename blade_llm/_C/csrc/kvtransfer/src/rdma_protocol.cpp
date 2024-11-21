@@ -15,12 +15,6 @@ using namespace accl::barex;
 
 namespace blade_llm {
 
-#define RTCHECK(expr) do { \
-    if (!(expr)) { \
-        fprintf(stderr, "Runtime error: Assertion failed in %s on line %d: %s\n", __FILE__, __LINE__, #expr); \
-        abort(); \
-    } \
-} while (0)
 
 void XContextDeleter::operator()(accl::barex::XContext *ctx) {
   ctx->Shutdown();

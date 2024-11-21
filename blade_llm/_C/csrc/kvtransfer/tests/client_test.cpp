@@ -11,42 +11,24 @@ using ::testing::ElementsAre;
 
 using namespace blade_llm;
 
-MATCHER_P(batchCheck, expect_p, "unexpected batch") {
-#if 0
-  EXPECT_EQ(arg.tasks->size(), expect_p->size());
+MATCHER_P(batchCheck, expect_req_info, "unexpected batch") {
+  auto expect = std::vector<ReqSendTask>();
+  for (auto* r : expect_req_info) {
+    r->pop_tasks(expect);
+  }
   auto tasks = std::vector<const ReqSendTask*>();
   for (const auto& t : *arg.tasks) {
-    tasks.emplace_back(&t);
+    if (t.dst_inst_id() == expect_req_info[0]->dst_inst_id &&
+        t.dst_worker_id() == expect_req_info[0]->dst_worker_id) {
+      tasks.emplace_back(&t);
+    }
   }
-  std::sort(tasks.begin(),
-            tasks.end(),
-            [](const auto& a, const auto& b) {
-              if (a->req_id() < b->req_id()) {
-                return true;
-              } else if (a->req_id() == b->req_id()) {
-                return a->seen_tokens < b->seen_tokens;
-              } else {
-                return false;
-              }
-            });
-  auto expect = std::vector<const ReqSendTask*>();
-  for (const auto& t : *expect_p) {
-    expect.emplace_back(&t);
-  }
-  std::sort(expect.begin(),
-            expect.end(),
-            [](const auto& a, const auto& b) {
-              if (a->req_id() < b->req_id()) {
-                return true;
-              } else if (a->req_id() == b->req_id()) {
-                return a->seen_tokens < b->seen_tokens;
-              } else {
-                return false;
-              }
-            });
+  EXPECT_EQ(tasks.size(), expect.size());
+  std::stable_sort(tasks.begin(), tasks.end(),
+            [](const ReqSendTask *a, const ReqSendTask *b) { return a->req_id() < b->req_id(); });
   for (auto i = 0; i < expect.size(); ++i) {
-    const auto* a = tasks[i];
-    const auto* b = expect[i];
+    const ReqSendTask *a = tasks[i];
+    const ReqSendTask *b = &expect[i];
     EXPECT_EQ(a->req_id(), b->req_id());
     EXPECT_EQ(a->dst_inst_id(), b->dst_inst_id());
     EXPECT_EQ(a->dst_worker_id(), b->dst_worker_id());
@@ -56,7 +38,6 @@ MATCHER_P(batchCheck, expect_p, "unexpected batch") {
     EXPECT_EQ(a->new_tokens, b->new_tokens);
     EXPECT_EQ(a->reach_last_token, b->reach_last_token);
   }
-#endif
   return true;
 }
 
@@ -126,8 +107,7 @@ TEST(KVTransferClientTest, SendTo1) {
   auto ctx = std::make_unique<Context>("1", 1, 1);
   RequestInfo req1(2, 1, "REQ00000001", {0, 1}, {0, 1});
   req1.add_send_task(0, 1, false);
-  std::vector<ReqSendTask> expect_reqs;
-  expect_reqs.emplace_back(&req1, 0, 1, false);
+  std::vector<RequestInfo*> expect_reqs{&req1};
   MockSendStub stub;
 
   EXPECT_CALL(stub, start())
@@ -136,22 +116,20 @@ TEST(KVTransferClientTest, SendTo1) {
       .Times(4)
       .WillRepeatedly(Return(StubState::WORKING));
 
-  EXPECT_CALL(stub, send_batch(batchCheck(&expect_reqs))).Times(2);
+  EXPECT_CALL(stub, send_batch(batchCheck(expect_reqs))).Times(2);
   auto factory = std::make_unique<FakeStubFactory>();
   factory->stubs.push_back(std::make_unique<ProxyStub>(2, 1, &stub));
 
   KvTransferClient client(std::move(ctx), std::move(factory));
   client.add_target("2", 1, 0, 2);
   {
-    auto ret = client.submit_req_send("3", 1, req1.req_id,
-                                      0, false,
+    auto ret = client.submit_req_send("3", 1, req1.req_id, 1, false,
                                       req1.src_blocks, req1.dst_blocks);
     EXPECT_TRUE(ret.is_err());
     EXPECT_EQ(ret.err().code, ErrorCode::TARGET_NOT_FOUND);
   }
   {
-    auto ret = client.submit_req_send("2", 1, req1.req_id,
-                                      0, false,
+    auto ret = client.submit_req_send("2", 1, req1.req_id, 1, false,
                                       req1.src_blocks, req1.dst_blocks);
     EXPECT_TRUE(ret.is_ok());
     client.start_send();
@@ -162,7 +140,6 @@ TEST(KVTransferClientTest, SendTo1) {
     auto unknown_submit = client.submit_delta_send("UNKNOWN_REQ_ID", 1, 1, false);
     EXPECT_FALSE(unknown_submit.is_ok());
     req1.add_send_task(1, 1, true);
-    expect_reqs.emplace_back(&req1, 1, 1, true);
     auto ret = client.submit_delta_send(req1.req_id, 1, 1, true);
     EXPECT_TRUE(ret.is_ok());
     client.start_send();
@@ -177,20 +154,19 @@ TEST(KVTransferClientTest, SendTo2) {
   req0.add_send_task(0, 1, false);
   RequestInfo req1(2, 1, "REQ00000001", {2, 3}, {2, 3});
   req1.add_send_task(0, 1, false);
-  std::vector<ReqSendTask> expect_reqs;
-  expect_reqs.emplace_back(&req0, 0, 1, false);
-  expect_reqs.emplace_back(&req1, 0, 1, false);
+  std::vector<RequestInfo*> expect_reqs0{&req1};
+  std::vector<RequestInfo*> expect_reqs1{&req0};
 
   MockSendStub stub0;
   EXPECT_CALL(stub0, check_state())
       .Times(4)
       .WillRepeatedly(Return(StubState::WORKING));
-  EXPECT_CALL(stub0, send_batch(batchCheck(&expect_reqs))).Times(2);
+  EXPECT_CALL(stub0, send_batch(batchCheck(expect_reqs0))).Times(2);
   MockSendStub stub1;
   EXPECT_CALL(stub1, check_state())
       .Times(4)
       .WillRepeatedly(Return(StubState::WORKING));
-  EXPECT_CALL(stub1, send_batch(batchCheck(&expect_reqs))).Times(2);
+  EXPECT_CALL(stub1, send_batch(batchCheck(expect_reqs1))).Times(2);
   auto factory = std::make_unique<FakeStubFactory>();
   factory->stubs.push_back(std::make_unique<ProxyStub>(2, 1, &stub0));
   factory->stubs.push_back(std::make_unique<ProxyStub>(3, 1, &stub1));
@@ -199,14 +175,12 @@ TEST(KVTransferClientTest, SendTo2) {
   client.add_target("2", 1, 0, 2);
   client.add_target("3", 1, 0, 2);
   {
-    auto ret = client.submit_req_send("3", 1, req0.req_id,
-                                      0, false,
+    auto ret = client.submit_req_send("3", 1, req0.req_id, 1, false,
                                       req0.src_blocks, req0.dst_blocks);
     EXPECT_TRUE(ret.ok());
   }
   {
-    auto ret = client.submit_req_send("2", 1, req1.req_id,
-                                      0, false,
+    auto ret = client.submit_req_send("2", 1, req1.req_id, 1, false,
                                       req1.src_blocks, req1.dst_blocks);
     EXPECT_TRUE(ret.is_ok());
   }
@@ -215,8 +189,6 @@ TEST(KVTransferClientTest, SendTo2) {
 
   req1.add_send_task(1, 1, true);
   req0.add_send_task(1, 1, true);
-  expect_reqs.emplace_back(&req0, 1, 1, true);
-  expect_reqs.emplace_back(&req1, 1, 1, true);
   {
     auto ret = client.submit_delta_send(req0.req_id, 1, 1, true);
     EXPECT_TRUE(ret.is_ok());
@@ -236,20 +208,19 @@ TEST(KVTransferClientTest, SendToPP2) {
   req0.add_send_task(0, 1, false);
   RequestInfo req1(2, 1, "REQ00000001", {0, 1}, {2, 3});
   req1.add_send_task(0, 1, false);
-  std::vector<ReqSendTask> expect_reqs;
-  expect_reqs.emplace_back(&req0, 0, 1, false);
-  expect_reqs.emplace_back(&req1, 0, 1, false);
+  std::vector<RequestInfo*> expect_reqs0{&req1};
+  std::vector<RequestInfo*> expect_reqs1{&req0};
 
   MockSendStub stub0;
   EXPECT_CALL(stub0, check_state())
       .Times(4)
       .WillRepeatedly(Return(StubState::WORKING));
-  EXPECT_CALL(stub0, send_batch(batchCheck(&expect_reqs))).Times(2);
+  EXPECT_CALL(stub0, send_batch(batchCheck(expect_reqs0))).Times(2);
   MockSendStub stub1;
   EXPECT_CALL(stub1, check_state())
       .Times(4)
       .WillRepeatedly(Return(StubState::WORKING));
-  EXPECT_CALL(stub1, send_batch(batchCheck(&expect_reqs))).Times(2);
+  EXPECT_CALL(stub1, send_batch(batchCheck(expect_reqs1))).Times(2);
 
   auto factory = std::make_unique<FakeStubFactory>();
   factory->stubs.push_back(std::make_unique<ProxyStub>(2, 1, &stub0));
@@ -259,14 +230,12 @@ TEST(KVTransferClientTest, SendToPP2) {
   client.add_target("2", 1, 0, 2);
   client.add_target("3", 1, 0, 2);
   {
-    auto ret = client.submit_req_send("3", 1, req0.req_id,
-                                      0, false,
+    auto ret = client.submit_req_send("3", 1, req0.req_id, 1, false,
                                       req0.src_blocks, req0.dst_blocks);
     EXPECT_TRUE(ret.ok());
   }
   {
-    auto ret = client.submit_req_send("2", 1, req1.req_id,
-                                      0, false,
+    auto ret = client.submit_req_send("2", 1, req1.req_id, 1, false,
                                       req1.src_blocks, req1.dst_blocks);
     EXPECT_TRUE(ret.is_ok());
   }
@@ -275,8 +244,6 @@ TEST(KVTransferClientTest, SendToPP2) {
 
   req1.add_send_task(1, 1, true);
   req0.add_send_task(1, 1, true);
-  expect_reqs.emplace_back(&req0, 1, 1, true);
-  expect_reqs.emplace_back(&req1, 1, 1, true);
   {
     auto ret = client.submit_delta_send(req0.req_id, 1, 1, true);
     EXPECT_TRUE(ret.is_ok());

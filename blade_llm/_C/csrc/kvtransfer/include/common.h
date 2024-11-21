@@ -16,6 +16,15 @@
 #define INVALID_INST_WORKER_ID (UINT32_MAX)
 #define KB (1ULL << 10ULL) // 1KB
 
+
+#define RTCHECK(expr) do { \
+    if (!(expr)) { \
+        fprintf(stderr, "Runtime error: Assertion failed in %s on line %d: %s\n", __FILE__, __LINE__, #expr); \
+        abort(); \
+    } \
+} while (0)
+
+
 namespace blade_llm {
 
 class noncopyable {
@@ -129,6 +138,7 @@ inline std::ostream& operator<<(std::ostream& os, const ReqSendTask& task) {
   return os;
 }
 
+// RequestInfo 只能在 python main thread 使用.
 class RequestInfo {
  public:
   const InstanceId dst_inst_id;
@@ -139,6 +149,7 @@ class RequestInfo {
  private:
   std::atomic_bool is_all_transferred_{false};
   std::vector<ReqSendTask> task_;
+  uint32_t last_seen_ = 0;
 
  public:
   RequestInfo(InstanceId dst_inst_id_,
@@ -156,6 +167,8 @@ class RequestInfo {
   RequestInfo(RequestInfo&&) = delete;
 
   void add_send_task(uint32_t seen, uint32_t new_tokens, bool has_last) {
+    RTCHECK(seen == this->last_seen_);
+    this->last_seen_ += new_tokens;
     this->task_.emplace_back(this, seen, new_tokens, has_last);
   }
 
