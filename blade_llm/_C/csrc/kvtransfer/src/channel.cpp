@@ -20,7 +20,7 @@ std::unique_ptr<IChannel> create_channel(Context *ctx, const TransferProtocol &p
       if (proto_ctx == nullptr) {
         throw std::runtime_error("cuda channel context not registered;");
       }
-      return std::make_unique<CudaIpcChannel>(ctx->inst_id, ctx->worker_id, proto_ctx);
+      return std::make_unique<CudaIpcChannel>(ctx->inst_name, ctx->worker_id, proto_ctx);
     }
     case TransferProtocol::Kind::RDMA_DIRECT: {
 #ifdef ENABLE_RDMA
@@ -28,7 +28,7 @@ std::unique_ptr<IChannel> create_channel(Context *ctx, const TransferProtocol &p
       if (proto_ctx == nullptr) {
         throw std::runtime_error("RDMA channel context not registered;");
       }
-      return std::make_unique<RDMAChannel>(ctx->inst_id, ctx->worker_id, proto_ctx->cli_barex_ctx());
+      return std::make_unique<RDMAChannel>(ctx->inst_name, ctx->worker_id, proto_ctx->cli_barex_ctx());
 
 #else
       throw std::runtime_error("RDMA Direct transport not support yet;");

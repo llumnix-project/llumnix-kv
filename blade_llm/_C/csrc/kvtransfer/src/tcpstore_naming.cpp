@@ -39,10 +39,10 @@ void TCPStoreNaming::store(const std::string &key, const std::string &v) {
   auto& self = *this;
   std::vector<uint8_t> value(v.begin(),v.end());
   assert(self.tcp_store_);
-  auto real_key = inst_name + "/" + key;
+  auto real_key = inst_id + "/" + key;
   self.tcp_store_->set(real_key, value);
 }
-std::optional<std::string> TCPStoreNaming::get(const InstanceName& inst, const std::string &k) {
+std::optional<std::string> TCPStoreNaming::get(const InstanceId& inst, const std::string &k) {
   auto& self = *this;
   assert(self.tcp_store_);
   auto real_key = inst + "/" + k;
@@ -55,7 +55,7 @@ std::optional<std::string> TCPStoreNaming::get(const InstanceName& inst, const s
 }
 
 void TCPStoreNaming::remove(const std::string &key) {
-  auto real_key = inst_name + "/" + key;
+  auto real_key = inst_id + "/" + key;
   auto& self = *this;
   assert(self.tcp_store_);
   self.tcp_store_->deleteKey(real_key);

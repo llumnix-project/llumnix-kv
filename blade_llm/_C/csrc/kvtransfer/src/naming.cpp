@@ -8,7 +8,7 @@
 #include "naming/eas_naming.h"
 #include "naming/filesys_naming.h"
 namespace blade_llm {
-GeneralNamingClient NamingManager::connect_naming(const InstanceName& myname, const std::string &url) {
+GeneralNamingClient NamingManager::connect_naming(const InstanceId& myname, const std::string &url) {
   {
     std::shared_lock<std::shared_mutex> r_lock(shared_mutex_);
     auto ret = naming_clients_.find(url);

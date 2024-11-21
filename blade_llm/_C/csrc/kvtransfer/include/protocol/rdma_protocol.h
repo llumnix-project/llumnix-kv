@@ -3,11 +3,12 @@
 #ifndef KVTRANSFER_RDMA_PROTOCOL
 #define KVTRANSFER_RDMA_PROTOCOL
 
-#ifdef ENABLE_RDMA
 #include "common.h"
 #include "context.h"
 #include "channel.h"
 #include "server.h"
+
+#ifdef ENABLE_RDMA
 #include <accl/barex/barex.h>
 #include <accl/barex/barex_types.h>
 #include <accl/barex/xconfig_util.h>
@@ -27,9 +28,29 @@
 #include <thread>
 #include <future>
 #include "thrid_party/logging.h"
+#endif
 
 namespace blade_llm {
 
+size_t get_encode_size(const InstanceId &inst_id,
+                       uint32_t worker_id,
+                       const std::string &reqid,
+                       const std::vector<uint32_t> &block_id);
+
+void encode_notification(char *ptr,
+                         const InstanceId &inst_id,
+                         uint32_t worker_id,
+                         const std::string &reqid,
+                         const std::vector<uint32_t> &block_ids);
+
+bool decode_notification(const char *ptr,
+                         size_t len,
+                         InstanceId &inst_id,
+                         uint32_t &worker_id,
+                         std::string &req_id,
+                         std::vector<uint32_t> &block_ids);
+
+#ifdef ENABLE_RDMA
 struct XMempoolDeleter {
   void operator()(accl::barex::XSimpleMempool *mp);
 };
@@ -144,7 +165,7 @@ static_assert(sizeof(RDMAInfo) <= MAX_ADDRESS_LEN);
 
 class RDMAChannel : public IChannel, public noncopyable {
  public:
-  RDMAChannel(InstanceId inst_id, WorkerId worker_id, CliBarexCtx *ctx) noexcept:
+  RDMAChannel(const InstanceId &inst_id, WorkerId worker_id, CliBarexCtx *ctx) noexcept:
       src_inst_id_(inst_id),
       src_worker_id_(worker_id),
       ctx_(ctx) {}
@@ -167,9 +188,6 @@ class RDMAChannel : public IChannel, public noncopyable {
                 size_t dst_offset,
                 size_t len);
 
-  void do_notify_send_done(const std::string &reqid,
-                           const std::vector<uint32_t> &block_ids);
-
   // do real connect.
   void do_init();
 
@@ -178,11 +196,11 @@ class RDMAChannel : public IChannel, public noncopyable {
   std::string ip_;
   int port_{0};
   CliBarexCtx *const ctx_;  // owner: KvTransferClient
-  std::vector<void*> dst_ptrs_;
+  std::vector<void *> dst_ptrs_;
   std::vector<uint32_t> dst_rkeys_;
   size_t dst_layer_blk_size_{0};
   uint32_t dst_layer_num_{0};
-  InstanceId src_inst_id_ = 0;
+  InstanceId src_inst_id_;
   WorkerId src_worker_id_ = 0;
   int prev_ch_idx_ = 0;
 
@@ -196,7 +214,7 @@ class RDMAChannel : public IChannel, public noncopyable {
 class RDMAServer : public ITransferServer {
  public:
   void start_server(ITransferService *service, Context *ctx) override;
-  private:
+ private:
   class CtxCallback : public accl::barex::XChannelCallback {
     ITransferService *ser_;
    public:
@@ -269,7 +287,6 @@ class RDMAProtoContext : public IProtocolContext {
   std::unique_ptr<accl::barex::XChannelCallback> callback_{nullptr};
   TransferProtocol protocol_{TransferProtocol::Kind::RDMA_DIRECT};
 };
-
-}  // namespace blade_llm
 #endif  // ENABLE_RDMA
+}  // namespace blade_llm
 #endif // KVTRANSFER_RDMA_PROTOCOL

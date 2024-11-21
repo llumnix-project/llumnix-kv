@@ -69,16 +69,7 @@ int write_sock(int sock_fd, const char *buf, size_t buf_size) {
 }
 
 int read_sock(int sock_fd, char *buf, size_t buf_size) {
-  size_t num_read = 0;
-  while (num_read < buf_size) {
-    auto ret = recv(sock_fd, buf + num_read, buf_size - num_read, 0);
-    if (ret == -1) {
-      LOG(ERROR) << "KVT socket: fail to recv socket, errorno = " << errno;
-      return -1;
-    }
-    num_read += ret;
-  }
-  return (int) num_read;
+  return recv(sock_fd, buf, buf_size, MSG_WAITALL);
 }
 
 int try_read(int sock_fd, char *buf, size_t buf_size, int timeout_ms) {
@@ -89,18 +80,24 @@ int try_read(int sock_fd, char *buf, size_t buf_size, int timeout_ms) {
 
   FD_ZERO(&read_fds);
   FD_SET(sock_fd, &read_fds);
+
   auto activity = select(sock_fd + 1, &read_fds, nullptr, nullptr, &timeout);
-  if (activity > 0) {
-    if (FD_ISSET(sock_fd, &read_fds)) {
-      return recv(sock_fd, buf, buf_size, 0);
-    }
-    return 0;
-  } else if (activity == 0) {
-    return 0;
-  } else {
+  if (activity < 0) {
     LOG(ERROR) << "KVT socket: fail to select read socket, errorno = " << errno;
     return -1;
   }
+
+  if (activity > 0) {
+    if (FD_ISSET(sock_fd, &read_fds)) {
+      auto r = recv(sock_fd, buf, buf_size, 0);
+      if (r < 0) {
+        LOG(ERROR) << "KVT socket: fail to recv socket, errorno = " << errno;
+        return -1;
+      }
+      return r;
+    }
+  }
+  return 0;
 }
 
 int wait_conn(int sock_fd, int timeout_sec) {

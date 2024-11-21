@@ -64,7 +64,7 @@ std::unique_ptr<KvTransferClient> KvTransferClient::create(std::unique_ptr<Conte
   return std::make_unique<KvTransferClient>(std::move(ctx), std::move(factory));
 }
 
-void KvTransferClient::add_target(const InstanceName &inst_name,
+void KvTransferClient::add_target(const InstanceId &inst_name,
                                   const WorkerId &worker_id,
                                   uint32_t start_layer,
                                   uint32_t num_layers,
@@ -91,7 +91,7 @@ void KvTransferClient::add_target(const InstanceName &inst_name,
   }
 }
 
-void KvTransferClient::remove_target(const InstanceName &inst_name, const WorkerId &worker_id) {
+void KvTransferClient::remove_target(const InstanceId &inst_name, const WorkerId &worker_id) {
   if (worker_id >= MAX_WORKERS_PER_INST) {
     return;
   }
@@ -109,7 +109,7 @@ void KvTransferClient::remove_target(const InstanceName &inst_name, const Worker
   }
 }
 
-void KvTransferClient::submit_req_send(const InstanceName &dst_inst_name,
+void KvTransferClient::submit_req_send(const InstanceId &dst_inst_name,
                                        const WorkerId &dst_worker_id,
                                        const RequestId &req_id,
                                        uint32_t new_tokens,

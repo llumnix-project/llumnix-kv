@@ -87,7 +87,7 @@ TEST(CudaIpcTest, TestCudaWrite) {
     std::vector<uint64_t> layer_addrs(2);
     layer_addrs[0] = reinterpret_cast<uint64_t>(layer_0);
     layer_addrs[1] = reinterpret_cast<uint64_t>(layer_1);
-    Context ctx("0", 0, 1);
+    Context ctx("0", 1);
     ctx.set_block_params(4 * KB, KB, 1);
     ctx.set_layer_data_address(0, layer_addrs);
     auto cuda_ctx = std::make_unique<CudaIpcContext>(ctx.device_id());
@@ -119,10 +119,8 @@ TEST(CudaIpcTest, TestSocketWrite) {
   start_uds_server(sock_file, &server_sock);
   EXPECT_TRUE(server_sock != -1);
   std::thread t([&]() {
-    WorkerInfo src(1, 4);
-    SocketWriter sock_writer(1, 4);
-
-    WorkerInfo dst(0, 0);
+    SocketWriter sock_writer("1", 4);
+    WorkerInfo dst("0", 0);
     dst.addr = sock_file;
     sock_writer.connect(dst);
 
@@ -138,27 +136,22 @@ TEST(CudaIpcTest, TestSocketWrite) {
     retry_cnt++;
   }
   EXPECT_TRUE(conn_sock != -1);
-  uint32_t inst_id, worker_id;
-  read_sock(conn_sock, (char *)&inst_id, sizeof(inst_id));
-  read_sock(conn_sock, (char *)&worker_id, sizeof(worker_id));
-  EXPECT_EQ(inst_id, 1);
+  InstanceId inst_id;
+  uint32_t worker_id;
+  auto ret = read_handshake(conn_sock, inst_id, worker_id);
+  EXPECT_TRUE(ret);
+  EXPECT_EQ(inst_id, "1");
   EXPECT_EQ(worker_id, 4);
 
-  uint8_t req_id_len;
-  read_sock(conn_sock, (char *)&req_id_len, sizeof(req_id_len));
-  EXPECT_EQ(req_id_len, 8);
-  char req_id[req_id_len + 1];
-  memset(req_id, 0, req_id_len + 1);
-  read_sock(conn_sock, req_id, req_id_len);
-  EXPECT_STREQ(req_id, "test_req");
-  uint32_t num_blocks;
-  read_sock(conn_sock, (char *)&num_blocks, sizeof(num_blocks));
-  EXPECT_EQ(num_blocks, 4);
+  std::string req_id;
+  std::vector<uint32_t> block_ids;
+  ret = read_req(conn_sock, req_id, block_ids);
+  EXPECT_TRUE(ret);
+  EXPECT_EQ(req_id, "test_req");
+  EXPECT_EQ(block_ids.size(), 4);
 
-  for (uint32_t i = 0; i < num_blocks; i++) {
-    uint32_t block_id;
-    read_sock(conn_sock, (char *)&block_id, sizeof(block_id));
-    EXPECT_EQ(block_id, i * 2);
+  for (uint32_t i = 0; i < block_ids.size(); i++) {
+    EXPECT_EQ(block_ids[i], i * 2);
   }
   t.join();
   close_sock(server_sock);
@@ -166,7 +159,7 @@ TEST(CudaIpcTest, TestSocketWrite) {
 
 class MockTransferService : public ITransferService {
  public:
-  MOCK_METHOD(void, on_recv, (InstanceId, uint32_t, (const std::string&), (std::vector<uint32_t> &&)), (override));
+  MOCK_METHOD(void, on_recv, (const InstanceId &, uint32_t, (const std::string&), (std::vector<uint32_t> &&)), (override));
 };
 
 TEST(CudaIpcTest, TestTransfer) {
@@ -186,14 +179,14 @@ TEST(CudaIpcTest, TestTransfer) {
     std::vector<uint64_t> layer_addrs(2);
     layer_addrs[0] = reinterpret_cast<uint64_t>(layer_0);
     layer_addrs[1] = reinterpret_cast<uint64_t>(layer_1);
-    Context ctx("0", 0, 0);
+    Context ctx("0", 0);
     ctx.set_layer_data_address(0, layer_addrs);
     ctx.set_block_params(KB, 128, 4);
     CudaTransferServer server;
     MockTransferService service;
     atomic_bool recv_done{false};
-    EXPECT_CALL(service, on_recv).WillOnce([&recv_done] (uint32_t id1, uint32_t id2, const string& rid, vector<uint32_t>&& b) {
-      EXPECT_EQ(id1, 1);
+    EXPECT_CALL(service, on_recv).WillOnce([&recv_done] (const InstanceId& id1, uint32_t id2, const string& rid, vector<uint32_t>&& b) {
+      EXPECT_EQ(id1, "1");
       EXPECT_EQ(id2, 0);
       EXPECT_EQ(rid, "REQ-0001");
       EXPECT_EQ(b.size(), 2);
@@ -225,6 +218,7 @@ TEST(CudaIpcTest, TestTransfer) {
         EXPECT_EQ(i, 12);
       }
     }
+    LOG(INFO) << "Wait child process shutdown ...";
     int status = 0;
     waitpid(pid, &status, 0);
     if (!WIFEXITED(status)) {
@@ -247,7 +241,7 @@ TEST(CudaIpcTest, TestTransfer) {
     std::vector<uint64_t> layer_addrs(2);
     layer_addrs[0] = reinterpret_cast<uint64_t>(layer_0);
     layer_addrs[1] = reinterpret_cast<uint64_t>(layer_1);
-    Context ctx("1", 1, 0);
+    Context ctx("1", 0);
     ctx.set_block_params(KB, 128, 4);
     ctx.set_layer_data_address(1, layer_addrs);
     auto cuda_ctx = std::make_unique<CudaIpcContext>(ctx.device_id());
@@ -270,7 +264,7 @@ TEST(CudaIpcTest, TestTransfer) {
     EXPECT_TRUE(info_opt.has_value());
     channel->connect(info_opt.value());
     LOG(INFO) << "test cuda server connected;";
-    RequestInfo req_info(0, 0, "REQ-0001", {0, 1}, {0, 1});
+    RequestInfo req_info("0", 0, "REQ-0001", {0, 1}, {0, 1});
     ReqSendTask req_task(&req_info, 0, 1, true);
     channel->send_data(0, {{0, 0, 128}});
     channel->send_data(1, {{0, 0, 128}});

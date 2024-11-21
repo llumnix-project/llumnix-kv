@@ -12,7 +12,7 @@ namespace blade_llm {
 void FileSysNaming::connect(const Schema &schema, const std::string &path) {
   if (std::filesystem::exists(path) && std::filesystem::is_directory(path)) {
     naming_path_ = path;
-    instance_path_ = naming_path_ / inst_name;
+    instance_path_ = naming_path_ / inst_id;
     if (!std::filesystem::exists(instance_path_)) {
       std::filesystem::create_directory(instance_path_);
       auto time_file = instance_path_ / "_timestamp_";
@@ -41,7 +41,7 @@ void FileSysNaming::store(const std::string &k, const std::string &v) {
   write_file(k, v);
 }
 
-std::optional<std::string> FileSysNaming::get(const InstanceName& inst_n, const std::string &k) {
+std::optional<std::string> FileSysNaming::get(const InstanceId& inst_n, const std::string &k) {
   auto inst_path = naming_path_ / inst_n;
   if (std::filesystem::exists(inst_path) && std::filesystem::is_directory(inst_path)) {
     auto full_path = inst_path / k;
@@ -75,7 +75,7 @@ const std::vector<std::string> & FileSysNaming::list() {
       auto now = get_unix_timestamp();
       for (const auto &entry : std::filesystem::directory_iterator(full_path)) {
         if (entry.is_directory()) {
-          InstanceName inst_name = entry.path().filename();
+          InstanceId inst_name = entry.path().filename();
           auto opt = get(inst_name, "_timestamp_");
           if (opt.has_value()) {
             try {

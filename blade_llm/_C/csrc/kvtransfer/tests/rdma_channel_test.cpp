@@ -15,7 +15,7 @@ struct ReqNotification {
 
   ReqNotification() = default;
 
-  ReqNotification(uint32_t src_inst_id,
+  ReqNotification(const InstanceId& src_inst_id,
                   uint32_t src_worker_id,
                   const std::string &req_id,
                   std::vector<uint32_t> &&dst_block_ids) :
@@ -25,20 +25,20 @@ struct ReqNotification {
       dst_block_ids(std::move(dst_block_ids)) {};
 
   ReqNotification(ReqNotification &&other) noexcept:
-      src_inst_id(other.src_inst_id),
+      src_inst_id(std::move(other.src_inst_id)),
       src_worker_id(other.src_worker_id),
       req_id(std::move(other.req_id)),
       dst_block_ids(std::move(other.dst_block_ids)) {};
 
   ReqNotification &operator=(ReqNotification &&other) noexcept {
-    src_inst_id = other.src_inst_id;
+    src_inst_id = std::move(other.src_inst_id);
     src_worker_id = other.src_worker_id;
     req_id = std::move(other.req_id);
     dst_block_ids = std::move(other.dst_block_ids);
     return *this;
   }
 
-  uint32_t src_inst_id{};
+  InstanceId src_inst_id;
   uint32_t src_worker_id{};
   std::string req_id;
   std::vector<uint32_t> dst_block_ids;
@@ -48,7 +48,7 @@ class FakeTransferService : public ITransferService {
  public:
   FakeTransferService() = default;
 
-  void on_recv(InstanceId src_inst_id,
+  void on_recv(const InstanceId& src_inst_id,
                WorkerId src_worker_id,
                const RequestId &req_id,
                std::vector<uint32_t> &&dst_block_ids) override {
@@ -66,6 +66,25 @@ class FakeTransferService : public ITransferService {
  private:
   BlockingQueue<ReqNotification> queue_;
 };
+
+
+TEST(RDMAChannelTest, TestSerdeReqNofitfication) {
+  ReqNotification rn("##############1", 1, "test_rdma", {0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048});
+  auto size = get_encode_size(rn.src_inst_id, rn.src_worker_id, rn.req_id, rn.dst_block_ids);
+  auto buf = static_cast<char*>(malloc(size));
+  encode_notification(buf, rn.src_inst_id, rn.src_worker_id, rn.req_id, rn.dst_block_ids);
+  ReqNotification d_rn;
+  auto ret = decode_notification(buf, size, d_rn.src_inst_id, d_rn.src_worker_id, d_rn.req_id, d_rn.dst_block_ids);
+  EXPECT_TRUE(ret);
+  EXPECT_EQ(rn.src_inst_id, d_rn.src_inst_id);
+  EXPECT_EQ(rn.src_worker_id, d_rn.src_worker_id);
+  EXPECT_EQ(rn.req_id, d_rn.req_id);
+  EXPECT_EQ(rn.dst_block_ids.size(), d_rn.dst_block_ids.size());
+  for (size_t i = 0; i < rn.dst_block_ids.size(); i++) {
+    EXPECT_EQ(rn.dst_block_ids[i], d_rn.dst_block_ids[i]);
+  }
+  free(buf);
+}
 
 
 TEST(RDMAChannelTest, TestTransefer) {
@@ -95,7 +114,7 @@ TEST(RDMAChannelTest, TestTransefer) {
     ShmNamingClient naming;
     naming.connect(NAMING_FILE);
 
-    Context ctx("0", 0, 0);
+    Context ctx("0", 0);
     ctx.set_layer_data_address(0, layer_addrs);
     ctx.set_block_params(block_size, token_size, 4);
     RDMAServer server;
@@ -104,7 +123,7 @@ TEST(RDMAChannelTest, TestTransefer) {
     naming.register_worker(ctx.worker_info());
     LOG(INFO) << "rdma server: started...";
     auto rn = service.pop();
-    EXPECT_EQ(rn.src_inst_id, 1);
+    EXPECT_EQ(rn.src_inst_id, "1");
     EXPECT_EQ(rn.src_worker_id, 0);
     EXPECT_EQ(rn.req_id, "test_rdma");
     EXPECT_EQ(rn.dst_block_ids.size(), 2);
@@ -154,14 +173,14 @@ TEST(RDMAChannelTest, TestTransefer) {
     ShmNamingClient naming;
     naming.connect(NAMING_FILE);
 
-    Context ctx("1", 1, 0);
+    Context ctx("1", 0);
     ctx.set_layer_data_address(0, layer_addrs);
     ctx.set_block_params(block_size, token_size, 4);
     auto proto_ctx = RDMAProtoContext::client_context("KVTClient", 4);
     auto proto = proto_ctx->protocol();
     ctx.register_protocol(std::move(proto_ctx));
     auto rdma_ctx = ctx.get_protocol_ctx<RDMAProtoContext>(proto);
-    RDMAChannel channel(ctx.inst_id, ctx.worker_id, rdma_ctx->cli_barex_ctx());
+    RDMAChannel channel(ctx.inst_name, ctx.worker_id, rdma_ctx->cli_barex_ctx());
     auto dst_info = naming.get_worker_info("0", 0);
     size_t retry_cnt = 3;
     while (!dst_info.has_value() && retry_cnt > 0) {
@@ -175,7 +194,7 @@ TEST(RDMAChannelTest, TestTransefer) {
     channel.connect(dst_info.value());
     std::vector<uint32_t> blocks{0, 1};
     std::vector<const ReqSendTask *> reqs;
-    RequestInfo r(0, 0, "test_rdma", blocks, blocks);
+    RequestInfo r("0", 0, "test_rdma", blocks, blocks);
     ReqSendTask t(&r, 0, 1, true);
     reqs.push_back(&t);
     channel.send_data(0, {{0, 0, token_size}, {2 * token_size, 2 * token_size, token_size}});

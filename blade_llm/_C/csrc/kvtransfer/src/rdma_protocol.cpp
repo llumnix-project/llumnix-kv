@@ -1,7 +1,8 @@
 
-#ifdef ENABLE_RDMA
 #include "protocol/rdma_protocol.h"
 #include "thrid_party/logging.h"
+
+#ifdef ENABLE_RDMA
 #include "naming.h"
 #include "assert.h"
 #include <stdlib.h>
@@ -12,10 +13,111 @@
 
 // just in this cpp
 using namespace accl::barex;
+#endif
 
 namespace blade_llm {
 
+static constexpr uint32_t SEND_MAGIC = 0x53456e64;  /* SEnd */
 
+//
+// magic, inst_id_len, worker_id, num_block 都是 4 字节.
+// num_block 指定了 block_ids 中 block 个数, 每个 block 4 字节.
+// reqid 以 0 结尾的 C 字符串.
+// +-------+-------------+-----------+-----------+---------+-----------+-------+
+// | magic | inst_id_len | worker_id | num_block | inst_id | block_ids | reqid |
+//
+size_t get_encode_size(const InstanceId &inst_id,
+                       uint32_t worker_id,
+                       const std::string &reqid,
+                       const std::vector<uint32_t> &block_ids) {
+  return inst_id.size() + 4 * sizeof(uint32_t) + block_ids.size() * sizeof(uint32_t) + reqid.size() + 1;
+}
+
+void encode_notification(char *ptr,
+                         const InstanceId &inst_id,
+                         uint32_t worker_id,
+                         const std::string &reqid,
+                         const std::vector<uint32_t> &block_ids) {
+  const uint32_t num_block = block_ids.size();
+  const uint32_t magic = SEND_MAGIC;
+
+  memcpy(ptr, &magic, sizeof(magic));
+  ptr += sizeof(magic);
+  uint32_t inst_id_len = inst_id.size();
+  memcpy(ptr, &inst_id_len, sizeof(inst_id_len));
+  ptr += sizeof(inst_id_len);
+  memcpy(ptr, &worker_id, sizeof(worker_id));
+  ptr += sizeof(worker_id);
+  memcpy(ptr, &num_block, sizeof(num_block));
+  ptr += sizeof(num_block);
+  memcpy(ptr, inst_id.data(), inst_id_len);
+  ptr += inst_id_len;
+
+  memcpy(ptr, block_ids.data(), num_block * sizeof(uint32_t));
+  ptr += num_block * sizeof(uint32_t);
+
+  // *(s.begin() + s.size()) has value CharT() (a null terminator)
+  memcpy(ptr, reqid.data(), reqid.size() + 1);
+  return;
+}
+
+bool decode_notification(const char *in_buf,
+                         size_t len,
+                         InstanceId &inst_id,
+                         uint32_t &worker_id,
+                         std::string &req_id,
+                         std::vector<uint32_t> &block_ids) {
+  if (len < sizeof(uint32_t) * 4) {
+    // bad data, ignore.
+    return false;
+  }
+  const char *const end_buf = in_buf + len;
+  uint32_t inst_id_len;
+  uint32_t magic, num_block;
+  memcpy(&magic, in_buf, sizeof(uint32_t));
+  in_buf += sizeof(uint32_t);
+  memcpy(&inst_id_len, in_buf, sizeof(uint32_t));
+  in_buf += sizeof(uint32_t);
+  memcpy(&worker_id, in_buf, sizeof(uint32_t));
+  in_buf += sizeof(uint32_t);
+  memcpy(&num_block, in_buf, sizeof(uint32_t));
+  in_buf += sizeof(uint32_t);
+  if (magic != SEND_MAGIC) {
+    // bad data, ignore
+    LOG(ERROR) << "KVT RDMA: unrecognized messages;";
+    return false;
+  }
+
+  inst_id.resize(inst_id_len);
+  memcpy(inst_id.data(), in_buf, inst_id_len);
+  in_buf += inst_id_len;
+
+  size_t expected_len = sizeof(uint32_t) * (4 + num_block) + 1 + inst_id_len;
+  if (len < expected_len) {
+    // +1 for reqid null terminator
+    // bad data, ignore.
+    LOG(ERROR) << "KVT RDMA: unexpected message, expect size: " << expected_len << " actual: " << len;
+    return false;
+  }
+
+  block_ids.resize(num_block);
+  memcpy(block_ids.data(), in_buf, num_block * sizeof(uint32_t));
+  in_buf += num_block * sizeof(uint32_t);
+
+  const char *reqid = in_buf;
+  size_t reqid_len = end_buf - in_buf;
+  assert(reqid_len >= 1);
+  reqid_len -= 1;
+  if (reqid[reqid_len] != '\0') {
+    // bad data, ignore
+    LOG(ERROR) << "KVT RDMA: unexpected eof of request id;";
+    return false;
+  }
+  req_id = std::string(reqid, reqid_len);
+  return true;
+}
+
+#ifdef ENABLE_RDMA
 void XContextDeleter::operator()(accl::barex::XContext *ctx) {
   ctx->Shutdown();
   ctx->WaitStop();
@@ -115,7 +217,7 @@ BarexCtx::BarexCtx(std::string mp_name,
   if (max_mr_gb_str != nullptr) {
     auto tmp_max_mr_gb = atoi(max_mr_gb_str);
     if (tmp_max_mr_gb > 0) {
-      max_mr_size = max_mr_size * tmp_max_mr_gb ;
+      max_mr_size = max_mr_size * tmp_max_mr_gb;
     }
   } else {
     setenv("ACCL_MAX_USER_MR_GB", "2", 1);
@@ -174,56 +276,16 @@ CliBarexCtx::CliBarexCtx(std::string mp_name,
   return;
 }
 
-static constexpr uint32_t SEND_MAGIC = 0x53456e64;  /* SEnd */
-//
-// magic, inst_id, worker_id, num_block 都是 4 字节.
-// num_block 指定了 block_ids 中 block 个数, 每个 block 4 字节.
-// reqid 以 0 结尾的 C 字符串. reqid 好像固定 32 字节但不确认..
-// +-------+---------+-----------+-----------+-----------+-------+
-// | magic | inst_id | worker_id | num_block | block_ids | reqid |
-//
 void RDMAServer::CtxCallback::OnRecvCall(XChannel *_ch, char *in_buf, size_t len, x_msg_header _header) {
-  if (len < sizeof(uint32_t) * 4) {
-    // bad data, ignore.
-    return;
-  }
-  const char *const end_buf = in_buf + len;
   InstanceId inst_id;
-  uint32_t magic, worker_id, num_block;
-  memcpy(&magic, in_buf, sizeof(uint32_t));
-  in_buf += sizeof(uint32_t);
-  memcpy(&inst_id, in_buf, sizeof(InstanceId));
-  in_buf += sizeof(InstanceId);
-  memcpy(&worker_id, in_buf, sizeof(uint32_t));
-  in_buf += sizeof(uint32_t);
-  memcpy(&num_block, in_buf, sizeof(uint32_t));
-  in_buf += sizeof(uint32_t);
-  if (magic != SEND_MAGIC) {
-    // bad data, ignore
-    return;
-  }
-  if (len < sizeof(uint32_t) * (4 + num_block) + 1) {
-    // +1 for reqid null terminator
-    // bad data, ignore.
-    return;
-  }
+  uint32_t worker_id;
+  std::string req_id;
+  std::vector<uint32_t> block_ids;
 
-  std::vector<uint32_t> block_ids(num_block);
-  memcpy(block_ids.data(), in_buf, num_block * sizeof(uint32_t));
-  in_buf += num_block * sizeof(uint32_t);
-
-  const char *reqid = in_buf;
-  size_t reqid_len = end_buf - in_buf;
-  assert(reqid_len >= 1);
-  reqid_len -= 1;
-  if (reqid[reqid_len] != '\0') {
-    // bad data, ignore
-    return;
+  if (decode_notification(in_buf, len, inst_id, worker_id, req_id, block_ids)) {
+    // OnRecvCall 在 barex 线程池中调用. 注意 data race.
+    this->ser_->on_recv(inst_id, worker_id, req_id, std::move(block_ids));
   }
-  std::string reqidstr(reqid, reqid_len);
-
-  // OnRecvCall 在 barex 线程池中调用. 注意 data race.
-  this->ser_->on_recv(inst_id, worker_id, reqidstr, std::move(block_ids));
   return;
 }
 
@@ -302,7 +364,6 @@ void RDMAServer::start_server(ITransferService *service, Context *ctx) {
 
   WorkerInfo *winfo = ctx->worker_info_mutable();
   auto layer_num_blocks = ctx->layer_num_blocks();
-  const uint64_t layer_blk_size = layer_num_blocks * winfo->block_size;
   auto layer_ptr = ctx->layer_data_address();
   auto proto = TransferProtocol::rdma_direct();
   auto proto_ctx = ctx->get_protocol_ctx<RDMAProtoContext>(proto);
@@ -310,7 +371,7 @@ void RDMAServer::start_server(ITransferService *service, Context *ctx) {
     throw std::runtime_error("KVT server: rdma context not register.");
   }
   auto barex_ctx = proto_ctx->barex_ctx();
-  std::vector<void*> ptrs(layer_ptr.size());
+  std::vector<void *> ptrs(layer_ptr.size());
   std::vector<uint32_t> rkeys(layer_ptr.size());
 
   for (int idx = 0; idx < layer_ptr.size(); ++idx) {
@@ -577,28 +638,6 @@ void RDMAChannel::flush() {
   return;
 }
 
-static void Encode(char *ptr, InstanceId inst_id, uint32_t worker_id,
-                   const std::string &reqid, const std::vector<uint32_t> &block_ids) {
-  const uint32_t num_block = block_ids.size();
-  const uint32_t magic = SEND_MAGIC;
-
-  memcpy(ptr, &magic, sizeof(magic));
-  ptr += sizeof(magic);
-  memcpy(ptr, &inst_id, sizeof(inst_id));
-  ptr += sizeof(inst_id);
-  memcpy(ptr, &worker_id, sizeof(worker_id));
-  ptr += sizeof(worker_id);
-  memcpy(ptr, &num_block, sizeof(num_block));
-  ptr += sizeof(num_block);
-
-  memcpy(ptr, block_ids.data(), num_block * sizeof(uint32_t));
-  ptr += num_block * sizeof(uint32_t);
-
-  // *(s.begin() + s.size()) has value CharT() (a null terminator)
-  memcpy(ptr, reqid.data(), reqid.size() + 1);
-  return;
-}
-
 // Send will release sdata
 [[nodiscard]] static std::future<void> Send(XChannel *ch, memp_t sdata) {
   // barex Send 要求 callback copyable...
@@ -643,10 +682,10 @@ void RDMAChannel::send_notification(IIterator<const ReqSendTask *> *reqs) {
     LOG(INFO) << "KVT: send notification of request " << reqid;
     // 编码规则见 RDMAServer::CtxCallback::OnRecvCall
     memp_t bufmr;
-    size_t const msglen = sizeof(InstanceId) + 3 * sizeof(uint32_t) + block_ids.size() * sizeof(uint32_t) + reqid.size() + 1;
+    auto const msglen = get_encode_size(src_inst_id_, src_worker_id_, reqid, block_ids);
     auto result = self.ctx_->mp()->AllocBuffer(bufmr, msglen, CPU);
     RTCHECK(result == accl::barex::BAREX_SUCCESS);
-    Encode(bufmr.buf, self.src_inst_id_, self.src_worker_id_, reqid, block_ids);
+    encode_notification(bufmr.buf, self.src_inst_id_, self.src_worker_id_, reqid, block_ids);
 
     auto *use_ch = self.ch();
     assert(use_ch->GetMempool() == self.ctx_->mp());
@@ -657,26 +696,6 @@ void RDMAChannel::send_notification(IIterator<const ReqSendTask *> *reqs) {
 
   when_all_succeed(self.send_futs_);
   self.send_futs_.clear();
-  return;
-}
-
-void RDMAChannel::do_notify_send_done(const std::string &reqid,
-                                      const std::vector<uint32_t> &block_ids) {
-  auto &self = *this;
-  self.do_init();
-
-  // 编码规则见 RDMAServer::CtxCallback::OnRecvCall
-  memp_t bufmr;
-  size_t const msglen = 4 * sizeof(uint32_t) + block_ids.size() * sizeof(uint32_t) + reqid.size() + 1;
-  auto result = self.ctx_->mp()->AllocBuffer(bufmr, msglen, CPU);
-  RTCHECK(result == accl::barex::BAREX_SUCCESS);
-  auto mrguard = BarexMRGuard::RelDeregGuard(std::move(bufmr), self.ctx_->mp());
-
-  Encode(mrguard.mr().buf, self.src_inst_id_, self.src_worker_id_, reqid, block_ids);
-
-  // LOG(INFO) << "zydebug notify_send_done reqid=" << reqid <<  " block_ids.size=" << block_ids.size();
-  Send(self.ch(), mrguard.mr()).get();
-  // LOG(INFO) << "zydebug notify_send_done done reqid=" << reqid <<  " block_ids.size=" << block_ids.size();
   return;
 }
 
@@ -713,6 +732,6 @@ std::unique_ptr<RDMAProtoContext> RDMAProtoContext::server_context(std::string &
 std::unique_ptr<RDMAProtoContext> RDMAProtoContext::client_context(std::string &&name, int num_threads) {
   return std::make_unique<RDMAProtoContext>(std::move(name), num_threads, false, std::make_unique<CliCtxCallback>());
 }
-
-}  // namespace blade_llm {
 #endif // ENABLE_RDMA
+
+}  // namespace blade_llm

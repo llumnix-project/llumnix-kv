@@ -49,7 +49,7 @@ using SendStub = std::unique_ptr<ISendStub>;
 
 class ISendStubFactory {
  public:
-  virtual SendStub create_stub(const InstanceName&,
+  virtual SendStub create_stub(const InstanceId&,
                                WorkerId,
                                uint32_t start_layer,
                                uint32_t num_layers,
@@ -98,7 +98,7 @@ class KvSendStubFactory : public ISendStubFactory, public noncopyable {
     naming_worker_ = naming_.create_naming_worker_client();
   }
 
-  SendStub create_stub(const InstanceName& dst_inst_name,
+  SendStub create_stub(const InstanceId& dst_inst_name,
                        WorkerId dst_worker_id,
                        uint32_t start_layer,
                        uint32_t num_layers,

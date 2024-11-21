@@ -4,6 +4,7 @@
 #include <optional>
 #include "common.h"
 #include "naming/shm_naming.h"
+#include "thrid_party/logging.h"
 
 #define MAX_WORKS (8)
 #define MAX_INSTANCES (8)
@@ -60,11 +61,19 @@ void ShmNamingClient::connect(const std::string &path) {
 };
 
 void ShmNamingClient::register_worker(const WorkerInfo &worker_info) {
-  if (worker_info.inst_id >= MAX_INSTANCES) {
-    throw std::runtime_error("unsupported instance id = " + std::to_string(worker_info.inst_id));
+  long inst_id;
+  try {
+    inst_id = std::stol(worker_info.inst_id);
+  } catch (const std::exception &e) {
+    LOG(ERROR) << "ShmNaming only support number instance name;";
+    throw e;
+  }
+
+  if (inst_id >= MAX_INSTANCES) {
+    throw std::runtime_error("unsupported instance id = " + worker_info.inst_id);
   }
   volatile auto *shm = (volatile instInfoList *) info_.addr;
-  auto worker = &shm->instances[worker_info.inst_id]
+  auto worker = &shm->instances[inst_id]
       .workers[worker_info.worker_id];
   auto bytes = worker_info.to_bytes();
   if (bytes.size() >= MAX_WORKER_INFO_SIZE) {
@@ -74,7 +83,7 @@ void ShmNamingClient::register_worker(const WorkerInfo &worker_info) {
   memcpy((void *) worker->info, bytes.data(), bytes.size());
 }
 
-std::optional<WorkerInfo> ShmNamingClient::get_worker_info(const InstanceName& name, uint32_t worker_id) {
+std::optional<WorkerInfo> ShmNamingClient::get_worker_info(const InstanceId& name, uint32_t worker_id) {
   auto id = std::stoi(name);
   if (id < 0 || id >= MAX_INSTANCES) {
     throw std::runtime_error("invalid instance name: " + name);

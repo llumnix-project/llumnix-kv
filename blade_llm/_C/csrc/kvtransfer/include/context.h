@@ -32,12 +32,10 @@ class IProtocolContext;
 
 class Context : noncopyable {
  public:
-  const InstanceName inst_name;
-  const InstanceId inst_id;
+  const InstanceId inst_name;
   const WorkerId worker_id;
 
-  Context(const InstanceName& inst_name, const WorkerId& worker_id);
-  Context(const InstanceName& inst_name, const InstanceId &id, const WorkerId& worker_id);
+  Context(const InstanceId& inst_name, const WorkerId& worker_id);
   void set_tp(uint32_t tp_size, uint32_t worker_tp_rank);
   void set_block_params(uint32_t block_size, uint32_t token_size, uint32_t layer_num_blocks);
   void set_layer_data_address(uint8_t device_id, const std::vector<uint64_t> &layers);
@@ -63,8 +61,6 @@ class Context : noncopyable {
       return dynamic_cast<T *>(ret->second.get());
     }
   }
-
-  static InstanceId get_inst_id(const InstanceName &name); // tmp impl; TODO: use InstanceName only ;
 
  private:
   int device_id_{-1};

@@ -18,7 +18,7 @@ class FileSysNaming : public INamingClient, noncopyable {
 
   static void create_dir(const std::string &path);
 
-  explicit FileSysNaming(const InstanceName &n) :
+  explicit FileSysNaming(const InstanceId &n) :
       INamingClient(n) {};
   Schema get_schema() override {
     return FILESYS_NAMING_SCHEMA;
@@ -26,7 +26,7 @@ class FileSysNaming : public INamingClient, noncopyable {
 
   void connect(const Schema &schema, const std::string &path) override;
   void store(const std::string &k, const std::string &v) override;
-  std::optional<std::string> get(const InstanceName&, const std::string &k) override;
+  std::optional<std::string> get(const InstanceId&, const std::string &k) override;
   void remove(const std::string &key) override;
   const std::vector<std::string> &list() override;
   bool is_binary_store() override {
@@ -53,7 +53,7 @@ class FileSysNamingClientFactory : public INamingClientFactory, noncopyable {
     return FILESYS_NAMING_SCHEMA;
   }
 
-  std::unique_ptr<INamingClient> create(const InstanceName& inst_name) override {
+  std::unique_ptr<INamingClient> create(const InstanceId& inst_name) override {
     return std::make_unique<FileSysNaming>(inst_name);
   };
 };

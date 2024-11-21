@@ -6,7 +6,7 @@ namespace blade_llm {
 KvTransferService::KvTransferService(std::unique_ptr<Context> &&ctx) :
     ctx_(std::move(ctx)) {}
 
-KvRecvStub &KvTransferService::get_or_create_conn(InstanceId src_inst_id,
+KvRecvStub &KvTransferService::get_or_create_conn(const InstanceId &src_inst_id,
                                                   WorkerId src_worker_id) {
   {
     std::shared_lock<std::shared_mutex> rlock(conn_m_);
@@ -32,7 +32,7 @@ KvRecvStub &KvTransferService::get_or_create_conn(InstanceId src_inst_id,
   return src[src_worker_id].value();
 }
 
-void KvTransferService::submit_recv(const InstanceName& src_inst_name,
+void KvTransferService::submit_recv(const InstanceId &src_inst_id,
                                     WorkerId src_worker_id,
                                     const RequestId &req_id,
                                     const std::vector<uint32_t> &dst_block_ids) {
@@ -40,7 +40,6 @@ void KvTransferService::submit_recv(const InstanceName& src_inst_name,
     throw KVTransferException(ErrorKind::INVALID_REQUEST_PARAM, "receive blocks can't be empty;");
   }
   auto [r, _] = reqs_.try_emplace(req_id);
-  auto src_inst_id = Context::get_inst_id(src_inst_name);
   r->second.emplace_back(src_inst_id, src_worker_id, req_id)
       .set_dst_blocks(dst_block_ids);
   LOG(INFO) << "KVT service: accept request(" << req_id << ") recv from worker("
@@ -77,7 +76,7 @@ bool KvTransferService::check_recv_done(const RequestId &req_id) {
   return true;
 }
 
-void KvTransferService::on_recv(InstanceId src_inst_id,
+void KvTransferService::on_recv(const InstanceId &src_inst_id,
                                 WorkerId src_worker_id,
                                 const RequestId &req_id,
                                 std::vector<uint32_t> &&dst_block_ids) {

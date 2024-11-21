@@ -8,9 +8,103 @@
 #include "thrid_party/logging.h"
 
 #define MAX_REQ_ID_LENGTH (255)
-#define SOCK_PATH "/tmp/kvt-ipc-%ld-%d.sock"
 
 namespace blade_llm {
+
+
+bool write_handshake(int fd, const InstanceId& name, WorkerId id) {
+  if (fd == -1) {
+    LOG(ERROR) << "write_hand_shake: socket not connected;";
+    return false;
+  }
+
+  uint32_t inst_name_len = name.length();
+  if (inst_name_len == 0 || inst_name_len > MAX_INSTANCE_NAME_LEN) {
+    throw std::runtime_error("invalid instance name length: " + std::to_string(inst_name_len));
+  }
+  uint64_t head = (uint64_t) name.length() << 32 | id;
+  write_sock(fd, (char*)&head, sizeof(head));
+  write_sock(fd, name.data(), inst_name_len);
+  return true;
+}
+
+bool read_handshake(int fd, InstanceId& name, WorkerId& id) {
+  if (fd == -1) {
+    LOG(ERROR) << "req_hand_shake: socket not connected;";
+    return false;
+  }
+
+  uint64_t head;
+  auto ret = read_sock(fd, (char*)&head, sizeof(head));
+  if (ret < 0 || ret != sizeof(head)) {
+    LOG(ERROR) << "unexpected eof of socket;";
+    return false;
+  }
+
+  id = head & 0xffffffff;
+  uint32_t name_len = head >> 32;
+  if (name_len == 0 || name_len > MAX_INSTANCE_NAME_LEN) {
+    throw std::runtime_error("invalid request id length: " + std::to_string(name_len));
+  }
+  name.resize(name_len);
+  ret = read_sock(fd, name.data(), name_len);
+  if (ret < 0 || ret != name_len) {
+    LOG(ERROR) << "unexpected eof of socket;";
+    return false;
+  }
+  return true;
+}
+
+bool write_req(int fd, const RequestId & req_id, const std::vector<uint32_t> & block_ids) {
+  if (fd == -1) {
+    LOG(ERROR) << "write_req: socket not connected;";
+    return false;
+  }
+  uint32_t req_len = req_id.length();
+  if (req_len == 0 || req_len > MAX_REQ_ID_LENGTH) {
+    throw std::runtime_error("invalid request id length: " + std::to_string(req_len));
+  }
+  uint32_t num_blocks = block_ids.size();
+  uint64_t head = (uint64_t) req_len << 32 | num_blocks;
+  // only write to local through unix domain socket instead network;
+  write_sock(fd, (char*)&head, sizeof(head));
+  write_sock(fd, req_id.data(), req_len);
+  write_sock(fd, (char *) block_ids.data(), num_blocks * sizeof(uint32_t));
+  return true;
+}
+
+bool read_req(int fd, RequestId& req_id, std::vector<uint32_t> & blocks) {
+  if (fd == -1) {
+    LOG(ERROR) << "req_req: socket not connected;";
+    return false;
+  }
+
+  uint64_t head;
+  auto ret = read_sock(fd, (char*)&head, sizeof(head));
+  if (ret < 0 || ret != sizeof(head)) {
+    LOG(ERROR) << "unexpected eof of socket;";
+    return false;
+  }
+
+  uint32_t req_len = head >> 32;
+  if (req_len == 0 || req_len > MAX_REQ_ID_LENGTH) {
+    throw std::runtime_error("invalid request id length: " + std::to_string(req_len));
+  }
+  req_id.resize(req_len);
+  ret = read_sock(fd, req_id.data(), req_len);
+  if (ret < 0 || ret != req_len) {
+    LOG(ERROR) << "unexpected eof of socket;";
+    return false;
+  }
+  uint32_t num_blocks = head & 0xffffffff;
+  blocks.resize(num_blocks);
+  ret = read_sock(fd, (char *) blocks.data(), num_blocks * sizeof(uint32_t));
+  if (ret < 0 || ret != num_blocks * sizeof(uint32_t)) {
+    LOG(ERROR) << "unexpected eof of socket;";
+    return false;
+  }
+  return true;
+}
 
 void CudaIpcWrite::init(const cudaIpcHandles *handles) {
   auto num_layers = ctx_->num_layers();
@@ -53,24 +147,14 @@ void SocketWriter::connect(const WorkerInfo &dst_info) {
     if (!try_connect_uds(path.c_str(), &socket_fd_)) {
       throw std::runtime_error("fail to connect uds server on target worker;");
     }
-    write_sock(socket_fd_, (char *) &src_inst_id_, sizeof(uint32_t));
-    write_sock(socket_fd_, (char *) &src_worker_id_, sizeof(uint32_t));
+    if (!write_handshake(socket_fd_, src_inst_id_, src_worker_id_)) {
+      throw std::runtime_error("fail to establish connection to " + dst_inst_id_ + ", " + std::to_string(dst_worker_id_));
+    }
   }
 }
 
 void SocketWriter::write(const RequestId &req_id, const std::vector<uint32_t> &block_ids) {
-  if (socket_fd_ == -1) {
-    throw std::runtime_error("socket writer not connected;");
-  }
-  auto req_len = req_id.length();
-  assert(req_len < 255);
-  uint8_t req_len_byte = req_len;
-
-  write_sock(socket_fd_, (char *) &req_len_byte, sizeof(uint8_t));
-  write_sock(socket_fd_, req_id.data(), req_len);
-  uint32_t num_blocks = block_ids.size();
-  write_sock(socket_fd_, (char *) &num_blocks, sizeof(uint32_t));
-  write_sock(socket_fd_, (char *) block_ids.data(), num_blocks * sizeof(uint32_t));
+  write_req(socket_fd_, req_id, block_ids);
 }
 
 void SocketWriter::close() {
@@ -118,33 +202,19 @@ CudaIpcChannel::~CudaIpcChannel() {
   notify_writer_.close();
 }
 
-void recv_transfer_done(InstanceId inst_id,
+void recv_transfer_done(const InstanceId& inst_id,
                         WorkerId worker_id,
                         int sock_fd,
                         ITransferService *service,
                         const std::atomic_bool *shutdown) {
-  char buf[MAX_REQ_ID_LENGTH + sizeof(uint32_t)];
-  uint8_t req_id_len;
   while (!shutdown->load(std::memory_order_relaxed)) {
-    auto read = try_read(sock_fd, (char *) &req_id_len, sizeof(uint8_t), 10);
-    if (read > 0) {
-      read_sock(sock_fd, buf, req_id_len + sizeof(uint32_t));
-      std::string req_id(buf, req_id_len);
-      uint32_t num_blocks;
-      memcpy(&num_blocks, buf + req_id_len, sizeof(uint32_t));
-      LOG(INFO) << "KVT cuda_ipc server: receive transfer finish notification of req: "
-                << req_id << " with " << num_blocks << " blocks;";
-
-      std::vector<uint32_t> block_ids(num_blocks);
-      auto size = num_blocks * sizeof(uint32_t);
-      auto read_len = read_sock(sock_fd, (char *) block_ids.data(), size);
-      if (read_len != size) {
-        LOG(ERROR) << "KVT cuda_ipc server: unexpected message size of notification of req"
-                   << req_id << ", expect " << size
-                   << "bytes, but only read" << read_len << " bytes";
-      } else {
-        service->on_recv(inst_id, worker_id, req_id, std::move(block_ids));
-      }
+    std::string req_id;
+    std::vector<uint32_t> block_ids;
+    auto ret = read_req(sock_fd, req_id, block_ids);
+    if (ret) {
+      service->on_recv(inst_id, worker_id, req_id, std::move(block_ids));
+    } else {
+      break;
     }
   }
   LOG(INFO) << "KVT cuda_ipc server: connection from (" << inst_id << ", " << worker_id << ") exit;";
@@ -176,9 +246,8 @@ void CudaTransferServer::start_server(ITransferService *service, Context *ctx) {
   const auto &ipc_handles = cuda_ctx->get_ipc_handles();
   worker_info->other_info.resize(sizeof(ipc_handles));
   memcpy(worker_info->other_info.data(), ipc_handles.buf, sizeof(ipc_handles));
-  char sock_path[64]{"\0"};
-  sprintf(sock_path, SOCK_PATH, inst_id_, worker_id_);
-  start_uds_server(sock_path, &socket_fd_);
+  std::string sock_path("/tmp/kvt-ipc-" + inst_id_ + "-" + std::to_string(worker_id_) + ".sock");
+  start_uds_server(sock_path.c_str(), &socket_fd_);
   worker_info->addr = sock_path;
   pool_.spawn(&CudaTransferServer::handle_connect_reqs, this);
   LOG(INFO) << "KVT: CudaTransferServer of (" << inst_id_ << ":" << worker_id_ << ") started at "
@@ -187,29 +256,22 @@ void CudaTransferServer::start_server(ITransferService *service, Context *ctx) {
 
 void CudaTransferServer::handle_connect_reqs() {
   while (!shutdown_.load(std::memory_order_relaxed)) {
-    LOG(INFO) << "KVT: cuda_ipc server: (" << inst_id_ << ":" << worker_id_ << ") wait connection ...; ";
+    LOG(INFO) << "KVT: cuda_ipc server: (" << inst_id_ << ":" << worker_id_ << ") wait new connection ...; ";
     int client_sock = wait_conn(socket_fd_, 2);
     if (client_sock != -1) {
-      uint32_t src_inst_id;
+      InstanceId src_inst_id;
       uint32_t src_worker_id;
+      if (read_handshake(client_sock, src_inst_id, src_worker_id)) {
+        if (src_worker_id >= MAX_WORKERS_PER_INST) {
+          LOG(WARNING) << "KVT cuda_ipc server: accept connection from invalid worker: ("
+                       << src_inst_id << ":" << src_worker_id << "), discard.";
+          continue;
+        }
 
-      if (read_sock(client_sock, (char *) &src_inst_id, sizeof(uint32_t)) != sizeof(uint32_t)) {
-        LOG(WARNING) << "KVT cuda_ipc server: accept unknown connection;";
-        continue;
+        LOG(INFO) << "KVT cuda_ipc server: uds server: accept connection from ("
+                  << src_inst_id << ":" << src_worker_id << ")";
+        pool_.spawn(&recv_transfer_done, src_inst_id, src_worker_id, client_sock, service_, &shutdown_);
       }
-      if (read_sock(client_sock, (char *) &src_worker_id, sizeof(uint32_t)) != sizeof(uint32_t)) {
-        LOG(WARNING) << "KVT cuda_ipc server: accept unknown connection;";
-        continue;
-      }
-      if (src_worker_id >= MAX_WORKERS_PER_INST) {
-        LOG(WARNING) << "KVT cuda_ipc server: accept connection from invalid worker: ("
-                     << src_inst_id << ":" << src_worker_id << "), discard.";
-        continue;
-      }
-
-      LOG(INFO) << "KVT cuda_ipc server: uds server: accept connection from ("
-                << src_inst_id << ":" << src_worker_id << ")";
-      pool_.spawn(&recv_transfer_done, src_inst_id, src_worker_id, client_sock, service_, &shutdown_);
     }
   }
   LOG(INFO) << "KVT cuda_ipc server: uds server exit ...";

@@ -5,7 +5,7 @@
 using namespace blade_llm;
 
 TEST(CommonTest, TestWorkerInfo) {
-  WorkerInfo wi(1234, 4);
+  WorkerInfo wi("1234", 4);
   wi.tp_size = 8;
   wi.worker_tp_rank = 2;
   wi.block_size = 1024;

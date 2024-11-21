@@ -22,7 +22,7 @@ TEST(NamingTest, TestShmNaming) {
   n_client.connect(PATH);
   auto info = n_client.get_worker_info("1", 1);
   EXPECT_FALSE(info.has_value());
-  Context ctx("1", 1, 1);
+  Context ctx("1", 1);
   ctx.set_tp(2, 0);
   ctx.set_block_params(512, 128, 8);
   SupportTransferProtocols protocols;
@@ -204,9 +204,7 @@ const std::string FakeHttpClient::FAKE_URL = "http://fake";
 
 void worker_naming_test(INamingClient* client) {
   WorkerNamingClient worker_client(client);
-  WorkerInfo wi;
-  wi.inst_id = Context::get_inst_id(client->inst_name);
-  wi.worker_id = 1;
+  WorkerInfo wi(client->inst_id, 1);
   wi.tp_size = 4;
   wi.worker_tp_rank = 1;
   wi.block_size = 1024 * 64;
@@ -233,7 +231,7 @@ void worker_naming_test(INamingClient* client) {
   memcpy(other_info_ptr, rkeys.data(), sizeof(uint32_t) * rkeys.size());
   worker_client.register_worker(wi);
 
-  auto worker_opt = worker_client.get_worker_info(client->inst_name, wi.worker_id);
+  auto worker_opt = worker_client.get_worker_info(client->inst_id, wi.worker_id);
 
   EXPECT_TRUE(worker_opt.has_value());
   auto wii = worker_opt.value();

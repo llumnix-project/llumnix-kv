@@ -55,11 +55,11 @@ class FakeSendStubFactory : public ISendStubFactory {
 
   FakeSendStubFactory(Context *ctx, const std::vector<uint64_t> &dst, std::queue<std::string> &n):
     ctx(ctx), dst_layer(dst), notifies(&n) {}
-  SendStub create_stub(const InstanceName& i, WorkerId w, uint32_t start_layer, uint32_t num_layers,
+  SendStub create_stub(const InstanceId& i, WorkerId w, uint32_t start_layer, uint32_t num_layers,
                        std::optional<TransferProtocol> p) override {
     LOG(INFO) << "Create SendStub";
     auto channel = std::make_unique<FakeChannel>(ctx, dst_layer, notifies);
-    WorkerInfo dst_info(std::stoi(i), w);
+    WorkerInfo dst_info(i, w);
     dst_info.tp_size = 1;
     dst_info.worker_tp_rank = 0;
     dst_info.block_size =  16 * KB;
@@ -105,7 +105,7 @@ TEST(KVTransferClientTest, TestKernelSyncAndDataTransfer) {
   host_layer_addrs.push_back(reinterpret_cast<uint64_t>(host_layer_1));
   std::vector<uint32_t> dst_blocks{4, 5, 6, 7};
 
-  auto ctx = std::make_unique<Context>("1", 1,  0);
+  auto ctx = std::make_unique<Context>("1",  0);
   ctx->set_tp(1, 0);
   ctx->set_layer_data_address(0, device_layer_addrs);
   auto block_size = 16 * KB;

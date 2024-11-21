@@ -26,7 +26,7 @@ class ShmNamingClient : public INamingWorkerClient {
   ShmNamingClient() = default;
   void connect(const std::string& path);
   void register_worker(const WorkerInfo &worker_info) override;
-  std::optional<WorkerInfo> get_worker_info(const InstanceName& inst_id, uint32_t worker_id) override;
+  std::optional<WorkerInfo> get_worker_info(const InstanceId& inst_id, uint32_t worker_id) override;
  private:
   sharedMemoryInfo info_{};
 };

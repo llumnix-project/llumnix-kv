@@ -5,14 +5,14 @@
 using namespace blade_llm;
 
 TEST(ContextTest, TestContextBasicMethod) {
-  Context ctx("1", 1, 0);
+  Context ctx("1", 0);
   ctx.set_tp(2, 0);
   ctx.set_layer_data_address(1, {0, 1024, 2048});
   ctx.set_block_params(KB, 256, 1);
   const auto w_info = ctx.worker_info();
   EXPECT_EQ(w_info.tp_size, 2);
   EXPECT_EQ(w_info.worker_tp_rank, 0);
-  EXPECT_EQ(w_info.inst_id, 1);
+  EXPECT_EQ(w_info.inst_id, "1");
   EXPECT_EQ(w_info.worker_id, 0);
   EXPECT_EQ(w_info.block_size, KB);
   EXPECT_EQ(w_info.token_size, 256);
@@ -27,7 +27,7 @@ TEST(ContextTest, TestContextBasicMethod) {
 }
 
 TEST(ContextTest, TestCudaIpcContext) {
-  Context ctx("1", 1, 0);
+  Context ctx("1", 0);
   ctx.set_tp(2, 0);
   void *layer_0, *layer_1, *layer_2;
   cuda_malloc(&layer_0, KB);

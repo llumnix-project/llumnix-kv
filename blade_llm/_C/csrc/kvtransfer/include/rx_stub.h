@@ -17,11 +17,11 @@ class ReqRecvTask : public noncopyable {
   const InstanceId src_inst_id;
   const WorkerId src_worker_id;
 
-  ReqRecvTask(InstanceId src_inst_id, WorkerId src_worker_id, const RequestId &req_id) :
+  ReqRecvTask(const InstanceId& src_inst_id, WorkerId src_worker_id, const RequestId &req_id) :
       req_id(req_id),
       src_inst_id(src_inst_id),
       src_worker_id(src_worker_id) {};
-  ReqRecvTask(InstanceId src_inst_id,
+  ReqRecvTask(const InstanceId& src_inst_id,
               WorkerId src_worker_id,
               const RequestId &req_id,
               std::vector<uint32_t> &&blocks) :
@@ -45,7 +45,7 @@ class KvRecvStub : public noncopyable {
  public:
   const InstanceId src_inst_id;
   const WorkerId src_worker_id;
-  KvRecvStub(InstanceId inst_id, WorkerId worker_id) :
+  KvRecvStub(const InstanceId& inst_id, WorkerId worker_id) :
       src_inst_id(inst_id),
       src_worker_id(worker_id) {};
   KvRecvStub(KvRecvStub &&other) noexcept;

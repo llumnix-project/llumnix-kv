@@ -84,7 +84,7 @@ void EASNamingClient::store(const std::string &k, const std::string &v) {
   http_client_->post(EAS_POST_PATH, ss.str());
 }
 
-std::optional<std::string> EASNamingClient::get(const InstanceName& inst, const std::string &k) {
+std::optional<std::string> EASNamingClient::get(const InstanceId& inst, const std::string &k) {
   load();
   auto pod_opt = get_pod_kv(inst);
   if (pod_opt.has_value()) {

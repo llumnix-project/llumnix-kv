@@ -7,13 +7,13 @@
 #include <atomic>
 #include <string>
 #include <vector>
-
-#include <assert.h>
+#include <cassert>
 #include <iostream>
 
 #define MAX_OTHER_INFO_LEN (8192)
 #define MAX_ADDRESS_LEN (64)
 #define INVALID_INST_WORKER_ID (UINT32_MAX)
+#define MAX_INSTANCE_NAME_LEN (256)
 #define KB (1ULL << 10ULL) // 1KB
 
 
@@ -37,13 +37,11 @@ class noncopyable {
   ~noncopyable() = default;
 };
 
-typedef uint64_t InstanceId;
-typedef std::string InstanceName;
+typedef std::string InstanceId;
 typedef uint32_t WorkerId;
 typedef std::string RequestId;
 
 struct WorkerInfo {
-  InstanceId inst_id;
   WorkerId worker_id;
   uint32_t tp_size;
   uint32_t worker_tp_rank;
@@ -52,26 +50,26 @@ struct WorkerInfo {
   uint32_t layer_num_blocks{1};
   uint32_t num_layers{1};
   uint8_t transfer_protocols{0};
+  InstanceId inst_id;
   std::string addr;
   std::vector<uint8_t> other_info;
 
   WorkerInfo() :
-      inst_id(INVALID_INST_WORKER_ID),
       worker_id(INVALID_INST_WORKER_ID),
       tp_size(0),
       worker_tp_rank(0),
       block_size(0),
       token_size(0) {};
 
-  WorkerInfo(const InstanceId &i_id, const WorkerId &w_id) :
-      inst_id(i_id),
+  WorkerInfo(const InstanceId& id, const WorkerId &w_id) :
+      inst_id(id),
       worker_id(w_id),
       tp_size(1),
       worker_tp_rank(0),
       block_size(16 * KB),
       token_size(KB) {};
 
-  WorkerInfo(InstanceId inst_id,
+  WorkerInfo(InstanceId&& inst_id,
              WorkerId worker_id,
              uint32_t tp_size,
              uint32_t worker_tp_rank,
@@ -80,7 +78,7 @@ struct WorkerInfo {
              uint32_t layer_num_blocks,
              uint32_t num_layers,
              uint32_t protocols) :
-      inst_id(inst_id),
+      inst_id(std::move(inst_id)),
       worker_id(worker_id),
       tp_size(tp_size),
       worker_tp_rank(worker_tp_rank),
@@ -147,12 +145,12 @@ class RequestInfo {
   const std::vector<uint32_t> src_blocks;
   const std::vector<uint32_t> dst_blocks;
  private:
-  std::atomic_bool is_all_transferred_{false};
+  mutable std::atomic_bool is_all_transferred_{false};
   std::vector<ReqSendTask> task_;
   uint32_t last_seen_ = 0;
 
  public:
-  RequestInfo(InstanceId dst_inst_id_,
+  RequestInfo(const InstanceId& dst_inst_id_,
               WorkerId dst_worker_id_,
               RequestId req_id_,
               std::vector<uint32_t> src_blocks_,
@@ -193,7 +191,7 @@ class RequestInfo {
   friend class ReqSendTask;
 
   void set_transfer_done() const {
-    const_cast<RequestInfo *>(this)->is_all_transferred_.store(true, std::memory_order_release);
+    is_all_transferred_.store(true, std::memory_order_release);
   }
 };
 

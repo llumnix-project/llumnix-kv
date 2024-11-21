@@ -20,20 +20,12 @@ void CudaEventBarrier::wait(uint32_t layer_idx) {
   }
 }
 
-Context::Context(const InstanceName &inst, const WorkerId &worker) :
+Context::Context(const InstanceId &inst, const WorkerId &worker) :
     inst_name(inst),
-    inst_id(Context::get_inst_id(inst)),
     worker_id(worker),
     cuda_barrier_(std::make_unique<NoCudaBarrier>()) {
-  worker_info_ = WorkerInfo(inst_id, worker_id);
+  worker_info_ = WorkerInfo(inst, worker_id);
 };
-
-Context::Context(const InstanceName &name, const InstanceId &id, const WorkerId &worker_id) :
-    inst_name(name),
-    inst_id(id),
-    worker_id(worker_id),
-    worker_info_(id, worker_id),
-    cuda_barrier_(std::make_unique<NoCudaBarrier>()) {};
 
 void Context::set_tp(uint32_t tp_size, uint32_t worker_tp_rank) {
   worker_info_.tp_size = tp_size;
@@ -116,8 +108,5 @@ void Context::register_protocol(std::unique_ptr<IProtocolContext> &&ctx) {
   auto ret = protocol_ctxs_.emplace(p.type, std::move(ctx));
   assert(ret.second);
   transfer_protos_.set_support(p);
-}
-InstanceId Context::get_inst_id(const InstanceName &name) {
-  return std::hash<InstanceName>{}(name);
 }
 }

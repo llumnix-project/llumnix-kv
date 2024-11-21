@@ -366,7 +366,7 @@ KvSendStub::~KvSendStub() {
   send_backend_.reset();
 }
 
-SendStub KvSendStubFactory::create_stub(const InstanceName& dst_inst_name,
+SendStub KvSendStubFactory::create_stub(const InstanceId& dst_inst_name,
                                         WorkerId dst_worker_id,
                                         uint32_t start_layer,
                                         uint32_t num_layers,

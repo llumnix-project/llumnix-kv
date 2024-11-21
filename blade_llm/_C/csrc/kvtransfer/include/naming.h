@@ -17,13 +17,13 @@ typedef std::string Schema;
 
 class INamingClient {
  public:
-  const InstanceName inst_name;
-  explicit INamingClient(const InstanceName &n) : inst_name(n) {};
+  const InstanceId inst_id;
+  explicit INamingClient(const InstanceId &n) : inst_id(n) {};
   virtual Schema get_schema() = 0;
   virtual void connect(const Schema &schema, const std::string &path) = 0;
   virtual void store(const std::string &k, const std::string &v) = 0;
   virtual void remove(const std::string &key) = 0;
-  virtual std::optional<std::string> get(const InstanceName &, const std::string &k) = 0;
+  virtual std::optional<std::string> get(const InstanceId &, const std::string &k) = 0;
   virtual const std::vector<std::string> &list() = 0;
   virtual bool is_binary_store() {
     return true;
@@ -34,7 +34,7 @@ class INamingClient {
 class INamingWorkerClient {
  public:
   virtual void register_worker(const WorkerInfo &worker_info) = 0;
-  virtual std::optional<WorkerInfo> get_worker_info(const InstanceName &, WorkerId) = 0;
+  virtual std::optional<WorkerInfo> get_worker_info(const InstanceId &, WorkerId) = 0;
   virtual ~INamingWorkerClient() = default;
 };
 
@@ -45,7 +45,7 @@ class GeneralNamingClient : public INamingClient {
   GeneralNamingClient() : INamingClient("unused") {};
 
   explicit GeneralNamingClient(std::unique_ptr<INamingClient> &&client) :
-      INamingClient(client->inst_name),
+      INamingClient(client->inst_id),
       client_(std::move(client)) {};
 
   Schema get_schema() override {
@@ -57,7 +57,7 @@ class GeneralNamingClient : public INamingClient {
   void store(const std::string &k, const std::string &v) override {
     client_->store(k, v);
   };
-  std::optional<std::string> get(const InstanceName &n, const std::string &k) override {
+  std::optional<std::string> get(const InstanceId &n, const std::string &k) override {
     return client_->get(n, k);
   };
   void remove(const std::string &key) override {
@@ -88,7 +88,7 @@ class WorkerNamingClient : public INamingWorkerClient {
     }
   };
 
-  std::optional<WorkerInfo> get_worker_info(const InstanceName &name, WorkerId wid) override {
+  std::optional<WorkerInfo> get_worker_info(const InstanceId &name, WorkerId wid) override {
     auto worker_key = "worker_" + std::to_string(wid);
     auto worker_value = client_->get(name, worker_key);
     if (worker_value.has_value()) {
@@ -109,14 +109,14 @@ class WorkerNamingClient : public INamingWorkerClient {
 class INamingClientFactory {
  public:
   virtual const Schema &get_schema() = 0;
-  virtual std::unique_ptr<INamingClient> create(const InstanceName &name) = 0;
+  virtual std::unique_ptr<INamingClient> create(const InstanceId &name) = 0;
   virtual ~INamingClientFactory() = default;
 };
 
 class NamingManager {
  public:
   NamingManager();
-  GeneralNamingClient connect_naming(const InstanceName &myname, const std::string &url);
+  GeneralNamingClient connect_naming(const InstanceId &myname, const std::string &url);
  private:
   std::shared_mutex shared_mutex_;
   std::unordered_map<Schema, std::unique_ptr<INamingClientFactory>> factories_;

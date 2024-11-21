@@ -1,6 +1,5 @@
 #include "common.h"
 #include <cstring>
-#include <cassert>
 #include <endian.h>
 #include <stdexcept>
 #include <sstream>
@@ -9,7 +8,7 @@
 namespace blade_llm {
 
 std::vector<uint8_t> WorkerInfo::to_bytes() const {
-  uint32_t tmp[10];
+  uint32_t tmp[11];
   tmp[0] = htobe32(worker_id);
   tmp[1] = htobe32(tp_size);
   tmp[2] = htobe32(worker_tp_rank);
@@ -18,17 +17,25 @@ std::vector<uint8_t> WorkerInfo::to_bytes() const {
   tmp[5] = htobe32(layer_num_blocks);
   tmp[6] = htobe32(num_layers);
   tmp[7] = htobe32(transfer_protocols);
-  tmp[8] = htobe32(addr.size());
-  tmp[9] = htobe32(other_info.size());
-  auto length = sizeof(uint32_t) * 10 + sizeof(InstanceId) + addr.size() + other_info.size();
+  tmp[8] = htobe32(inst_id.size());
+  if (inst_id.size() == 0 || inst_id.size() > MAX_INSTANCE_NAME_LEN) {
+    throw std::runtime_error("invalid worker instance name with size: " + std::to_string(inst_id.size()));
+  }
+  tmp[9] = htobe32(addr.size());
+
+  if (other_info.size() > MAX_OTHER_INFO_LEN) {
+    throw std::runtime_error("invalid worker info, too large other info;");
+  }
+  tmp[10] = htobe32(other_info.size());
+
+  auto length = sizeof(uint32_t) * 11 + inst_id.size() + addr.size() + other_info.size();
   std::vector<uint8_t> ret(length);
   auto dst = ret.data();
-  // TODO : string instance id
-  auto inst_id_t = htobe64(inst_id);
-  memcpy(dst, &inst_id_t, sizeof(inst_id_t));
-  dst += sizeof(inst_id_t);
-  memcpy(dst, tmp, sizeof(uint32_t) * 10);
-  dst += sizeof(uint32_t) * 10;
+  memcpy(dst, tmp, sizeof(uint32_t) * 11);
+  dst += sizeof(uint32_t) * 11;
+
+  memcpy(dst, inst_id.data(), inst_id.size());
+  dst += inst_id.size();
   if (!addr.empty()) {
     memcpy(dst, addr.data(), addr.size());
     dst += addr.size();
@@ -39,19 +46,16 @@ std::vector<uint8_t> WorkerInfo::to_bytes() const {
   return ret;
 }
 WorkerInfo WorkerInfo::from_bytes(const unsigned char *src, size_t length) {
-  auto at_least_size = sizeof(uint32_t) * 10 + sizeof(InstanceId);
+  auto at_least_size = sizeof(uint32_t) * 11 + 1;
   if (length < at_least_size) {
     throw std::runtime_error("invalid worker info binary;");
   }
 
   WorkerInfo wi;
-  uint64_t inst_id_t;
-  memcpy(&inst_id_t, src, sizeof(inst_id_t));
-  src += sizeof(inst_id_t);
-  wi.inst_id = be64toh(inst_id_t);
-  uint32_t tmp[10];
-  memcpy(&tmp[0], src, sizeof(uint32_t) * 10);
-  src += sizeof(uint32_t) * 10;
+  uint32_t tmp[11];
+  memcpy(&tmp[0], src, sizeof(uint32_t) * 11);
+  src += sizeof(uint32_t) * 11;
+
   wi.worker_id = be32toh(tmp[0]);
   wi.tp_size = be32toh(tmp[1]);
   wi.worker_tp_rank = be32toh(tmp[2]);
@@ -60,8 +64,22 @@ WorkerInfo WorkerInfo::from_bytes(const unsigned char *src, size_t length) {
   wi.layer_num_blocks = be32toh(tmp[5]);
   wi.num_layers = be32toh(tmp[6]);
   wi.transfer_protocols = (uint8_t)be32toh(tmp[7]);
-  auto addr_len = be32toh(tmp[8]);
-  auto other_info_len = be32toh(tmp[9]);
+  auto inst_name_len = be32toh(tmp[8]);
+  auto addr_len = be32toh(tmp[9]);
+  auto other_info_len = be32toh(tmp[10]);
+
+  if (inst_name_len > 0 && inst_name_len < MAX_INSTANCE_NAME_LEN) {
+    at_least_size += inst_name_len - 1;
+    if (length < at_least_size) {
+      throw std::runtime_error("invalid worker info binary;");
+    }
+    wi.inst_id.resize(inst_name_len);
+    memcpy(wi.inst_id.data(), src, inst_name_len);
+    src += inst_name_len;
+  } else {
+    throw std::runtime_error("invalid worker binary, too large instance name;");
+  }
+
   if (addr_len > 0) {
     at_least_size += addr_len;
     if (length < at_least_size) {
@@ -73,6 +91,9 @@ WorkerInfo WorkerInfo::from_bytes(const unsigned char *src, size_t length) {
   }
 
   if (other_info_len > 0) {
+    if (other_info_len > MAX_OTHER_INFO_LEN) {
+      throw std::runtime_error("invalid worker binary, too large other info;");
+    }
     at_least_size += other_info_len;
     if (length < at_least_size) {
       throw std::runtime_error("invalid worker info binary;");
@@ -83,6 +104,9 @@ WorkerInfo WorkerInfo::from_bytes(const unsigned char *src, size_t length) {
   return wi;
 }
 std::string WorkerInfo::to_string() const {
+  if (inst_id.size() > MAX_INSTANCE_NAME_LEN) {
+    throw std::runtime_error("invalid worker instance name, too large;");
+  }
   std::stringstream ss;
   ss << inst_id << ","
      << worker_id << ","
@@ -94,13 +118,20 @@ std::string WorkerInfo::to_string() const {
      << num_layers << ","
      << (uint32_t)transfer_protocols;
   if (!addr.empty()) {
+    if (addr.size() > MAX_ADDRESS_LEN) {
+      throw std::runtime_error("invalid worker address, too large;");
+    }
     ss << "," << addr ;
   }
   if (!other_info.empty()) {
+    if (other_info.size() > MAX_OTHER_INFO_LEN) {
+      throw std::runtime_error("invalid worker other info, too large;");
+    }
     ss << "," << base64_encode(other_info);
   }
   return ss.str();
 }
+
 WorkerInfo WorkerInfo::from_string(const std::string &src) {
   WorkerInfo w;
   std::vector<std::string> tmp;
@@ -119,7 +150,7 @@ WorkerInfo WorkerInfo::from_string(const std::string &src) {
     throw std::runtime_error("invalid worker info string;");
   }
 
-  w.inst_id = stoul(tmp[0]);
+  w.inst_id = tmp[0];
   w.worker_id = stoul(tmp[1]);
   w.tp_size = stoul(tmp[2]);
   w.worker_tp_rank = stoul(tmp[3]);
@@ -134,8 +165,6 @@ WorkerInfo WorkerInfo::from_string(const std::string &src) {
   if (tmp.size() > 10) {
     w.other_info = base64_decode(tmp[10]);
   }
-
   return w;
 }
-
 }

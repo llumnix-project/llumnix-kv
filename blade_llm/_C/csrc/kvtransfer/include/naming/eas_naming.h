@@ -52,7 +52,7 @@ class EASNamingClient : public INamingClient, noncopyable {
   void connect(const Schema &schema, const std::string &path) override;
   void store(const std::string &k, const std::string &v) override;
   void remove(const std::string &key) override;
-  std::optional<std::string> get(const InstanceName&, const std::string &k) override;
+  std::optional<std::string> get(const InstanceId&, const std::string &k) override;
   const std::vector<std::string> &list() override;
   bool is_binary_store() override {
     return false;
@@ -78,7 +78,7 @@ class EASNamingClientFactory : public INamingClientFactory, noncopyable {
   const Schema &get_schema() override {
     return EAS_NAMING_SCHEMA;
   }
-  std::unique_ptr<INamingClient> create(const InstanceName& inst_name) override {
+  std::unique_ptr<INamingClient> create(const InstanceId& inst_name) override {
     return std::make_unique<EASNamingClient>(inst_name, std::make_unique<CurlHttpClient>());
   };
 };

@@ -31,14 +31,14 @@ class Message {
     }
   };
 
-  uint32_t dst_inst_id;
+  InstanceId dst_inst_id;
   uint32_t dst_worker_id;
   std::optional<std::string> req_id;
   std::optional<DataEntry> data{};
-  Message(uint32_t inst_id, uint32_t worker_id) :
+  Message(const InstanceId& inst_id, uint32_t worker_id) :
       dst_inst_id(inst_id), dst_worker_id(worker_id) {};
 
-  Message(uint32_t inst_id, uint32_t worker_id, const std::string &id) :
+  Message(const InstanceId& inst_id, uint32_t worker_id, const std::string &id) :
       dst_inst_id(inst_id), dst_worker_id(worker_id), req_id(id) {};
 
   void set_data(uint32_t layer_idx, size_t src_offset, size_t dst_offset, size_t length) {
@@ -84,11 +84,11 @@ std::ostream& operator<<(std::ostream& os, const Message& msg) {
 
 class FakeChannel : public IChannel {
  public:
-  uint32_t dst_inst_id;
+  InstanceId dst_inst_id;
   uint32_t dst_worker_id;
   std::queue<Message> q;
 
-  FakeChannel() : q(), dst_inst_id(0), dst_worker_id(INVALID_INST_WORKER_ID) {};
+  FakeChannel() : q(), dst_inst_id("0"), dst_worker_id(INVALID_INST_WORKER_ID) {};
   void connect(const WorkerInfo &info) override {
     dst_inst_id = info.inst_id;
     dst_worker_id = info.worker_id;
@@ -154,14 +154,14 @@ static void test_parse_block_generate(int p_rank, int d_rank) {
   int head_dim = 256;
   int ntpb = 64;
 
-  auto p_info = WorkerInfo(0, 0);
+  auto p_info = WorkerInfo("0", 0);
   p_info.tp_size = 16;
   p_info.worker_tp_rank = p_rank;
   p_info.token_size = 2 * (kv_heads / p_info.tp_size) * head_dim * sizeof(uint16_t);
   p_info.block_size = p_info.token_size * ntpb;
   std::cout << "p_info.token_size=" << p_info.token_size << " p_info.block_size=" << p_info.block_size << std::endl;
 
-  auto d_info = WorkerInfo(1, 0);
+  auto d_info = WorkerInfo("1", 0);
   d_info.tp_size = 4;
   d_info.worker_tp_rank = d_rank;
   d_info.token_size = 2 * (kv_heads / d_info.tp_size) * head_dim * sizeof(uint16_t);
@@ -178,7 +178,7 @@ static void test_parse_block_generate(int p_rank, int d_rank) {
   {
     std::vector<RequestInfo *> reqs;
     // the first send;
-    RequestInfo req0(1, 0, "req_id00000000000000000000000000", {0, 1, 2}, {4, 5, 6});
+    RequestInfo req0("1", 0, "req_id00000000000000000000000000", {0, 1, 2}, {4, 5, 6});
     req0.add_send_task(0, 8, false);
     reqs.push_back(&req0);
 
@@ -200,147 +200,147 @@ static void test_parse_block_generate(int p_rank, int d_rank) {
     if (d_rank == 0) {
       if (p_rank == 0) {
         for (int layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 0,    1048576, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 512,  1050624, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 1024, 1052672, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 1536, 1054720, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 2048, 1056768, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 2560, 1058816, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 3072, 1060864, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 3584, 1062912, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 4096, 1064960, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 4608, 1067008, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 5120, 1069056, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 5632, 1071104, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 6144, 1073152, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 6656, 1075200, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 7168, 1077248, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 7680, 1079296, 512);
         }
       } else if (p_rank == 1) {
         for (int layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 0,    1049088, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 512,  1051136, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 1024, 1053184, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 1536, 1055232, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 2048, 1057280, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 2560, 1059328, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 3072, 1061376, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 3584, 1063424, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 4096, 1065472, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 4608, 1067520, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 5120, 1069568, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 5632, 1071616, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 6144, 1073664, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 6656, 1075712, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 7168, 1077760, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 7680, 1079808, 512);
         }
       } else if (p_rank == 2) {
         for (int layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 0,    1049600, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 512,  1051648, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 1024, 1053696, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 1536, 1055744, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 2048, 1057792, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 2560, 1059840, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 3072, 1061888, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 3584, 1063936, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 4096, 1065984, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 4608, 1068032, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 5120, 1070080, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 5632, 1072128, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 6144, 1074176, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 6656, 1076224, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 7168, 1078272, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 7680, 1080320, 512);
         }
       } else {
         for (int layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 0,    1050112, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 512,  1052160, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 1024, 1054208, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 1536, 1056256, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 2048, 1058304, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 2560, 1060352, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 3072, 1062400, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 3584, 1064448, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 4096, 1066496, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 4608, 1068544, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 5120, 1070592, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 5632, 1072640, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 6144, 1074688, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 6656, 1076736, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 7168, 1078784, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 7680, 1080832, 512);
         }
       }
     }
-    expect_q.emplace_back(1, 0);  // flush
+    expect_q.emplace_back("1", 0);  // flush
     EXPECT_EQ(actual_q, expect_q);
   }
 }
@@ -359,14 +359,14 @@ static void dgtp_test_parse_block_generate(int p_rank, int d_rank) {
   int head_dim = 256;
   int ntpb = 64;
 
-  auto p_info = WorkerInfo(0, 0);
+  auto p_info = WorkerInfo("0", 0);
   p_info.tp_size = 4;
   p_info.worker_tp_rank = p_rank;
   p_info.token_size = 2 * (kv_heads / p_info.tp_size) * head_dim * sizeof(uint16_t);
   p_info.block_size = p_info.token_size * ntpb;
   std::cout << "p_info.token_size=" << p_info.token_size << " p_info.block_size=" << p_info.block_size << std::endl;
 
-  auto d_info = WorkerInfo(1, 0);
+  auto d_info = WorkerInfo("1", 0);
   d_info.tp_size = 16;
   d_info.worker_tp_rank = d_rank;
   d_info.token_size = 2 * (kv_heads / d_info.tp_size) * head_dim * sizeof(uint16_t);
@@ -383,7 +383,7 @@ static void dgtp_test_parse_block_generate(int p_rank, int d_rank) {
   {
     std::vector<RequestInfo *> reqs;
     // the first send;
-    RequestInfo req0(1, 0, "req_id00000000000000000000000000", {0, 1, 2}, {4, 5, 6});
+    RequestInfo req0("1", 0, "req_id00000000000000000000000000", {0, 1, 2}, {4, 5, 6});
     req0.add_send_task(0, 8, false);
     reqs.push_back(&req0);
 
@@ -405,147 +405,147 @@ static void dgtp_test_parse_block_generate(int p_rank, int d_rank) {
     if (p_rank == 0) {
       if (d_rank == 0) {
         for (int layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 0,     262144, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 2048,  262656, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 4096,  263168, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 6144,  263680, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 8192,  264192, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 10240, 264704, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 12288, 265216, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 14336, 265728, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 16384, 266240, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 18432, 266752, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 20480, 267264, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 22528, 267776, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 24576, 268288, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 26624, 268800, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 28672, 269312, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 30720, 269824, 512);
         }
       } else if (d_rank == 1) {
         for (int layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 512,   262144, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 2560,  262656, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 4608,  263168, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 6656,  263680, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 8704,  264192, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 10752, 264704, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 12800, 265216, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 14848, 265728, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 16896, 266240, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 18944, 266752, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 20992, 267264, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 23040, 267776, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 25088, 268288, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 27136, 268800, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 29184, 269312, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 31232, 269824, 512);
         }
       } else if (d_rank == 2) {
         for (int layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 1024,  262144, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 3072,  262656, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 5120,  263168, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 7168,  263680, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 9216,  264192, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 11264, 264704, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 13312, 265216, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 15360, 265728, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 17408, 266240, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 19456, 266752, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 21504, 267264, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 23552, 267776, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 25600, 268288, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 27648, 268800, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 29696, 269312, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 31744, 269824, 512);
         }
       } else {
         for (int layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 1536,  262144, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 3584,  262656, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 5632,  263168, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 7680,  263680, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 9728,  264192, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 11776, 264704, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 13824, 265216, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 15872, 265728, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 17920, 266240, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 19968, 266752, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 22016, 267264, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 24064, 267776, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 26112, 268288, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 28160, 268800, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 30208, 269312, 512);
-          expect_q.emplace_back(1, 0);
+          expect_q.emplace_back("1", 0);
           expect_q.back().set_data(layer_idx, 32256, 269824, 512);
         }
       }
     }
-    expect_q.emplace_back(1, 0);  // flush
+    expect_q.emplace_back("1", 0);  // flush
     EXPECT_EQ(actual_q, expect_q);
   }
 }
@@ -560,18 +560,18 @@ TEST(SendStubTest, ParseBlockSendDGtP) {
 TEST(SendStubTest, ParseBlockSendPEqD) {
   uint32_t bs = 16 * KB;
   uint32_t ts = KB;
-  WorkerInfo src_info(0, 0);
+  WorkerInfo src_info("0", 0);
   src_info.block_size = bs;
   src_info.token_size = ts;
 
-  WorkerInfo dst_info(1, 0);
+  WorkerInfo dst_info("1", 0);
   dst_info.block_size = bs;
   dst_info.token_size = ts;
 
   auto fbc = std::make_shared<FakeChannel>();
   fbc->connect(dst_info);
   auto q = &fbc->q;
-  Context ctx("0", 0, 1);
+  Context ctx("0", 1);
   ctx.set_block_params(bs, ts, 8);
   ctx.set_layer_data_address(0, {0, 8 * bs});
   uint32_t num_layers = 2;
@@ -581,7 +581,7 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
   {
     std::vector<RequestInfo *> reqs;
     // the first send;
-    RequestInfo req0(1, 0, "req_id00000000000000000000000000", {0, 1, 2}, {4, 5, 6});
+    RequestInfo req0("1", 0, "req_id00000000000000000000000000", {0, 1, 2}, {4, 5, 6});
     req0.add_send_task(0, 8, false);
     reqs.push_back(&req0);
 
@@ -602,7 +602,7 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
     while (layer < 2) {
       auto msg = q->front();
       q->pop();
-      EXPECT_EQ(msg.dst_inst_id, 1);
+      EXPECT_EQ(msg.dst_inst_id, "1");
       EXPECT_EQ(msg.dst_worker_id, 0);
       EXPECT_TRUE(msg.data.has_value());
       EXPECT_EQ(msg.data.value().layer_idx, layer);
@@ -613,13 +613,13 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
     }
     auto flush = q->front();
     q->pop();
-    EXPECT_EQ(flush.dst_inst_id, 1);
+    EXPECT_EQ(flush.dst_inst_id, "1");
     EXPECT_EQ(flush.dst_worker_id, 0);
   }
   {
     // the second send;
     std::vector<RequestInfo *> reqs;
-    RequestInfo req1(1, 0, "req_id00000000000000000000000001", {0, 1, 2}, {4, 5, 6});
+    RequestInfo req1("1", 0, "req_id00000000000000000000000001", {0, 1, 2}, {4, 5, 6});
     req1.add_send_task(0, 17, false);
     reqs.push_back(&req1);
     auto step_1 = std::make_shared<Step>(1);
@@ -653,14 +653,14 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
     }
     auto flush = q->front();
     q->pop();
-    EXPECT_EQ(flush.dst_inst_id, 1);
+    EXPECT_EQ(flush.dst_inst_id, "1");
     EXPECT_EQ(flush.dst_worker_id, 0);
   }
   {
     // the third send
     std::vector<RequestInfo *> reqs;
     auto tasks = std::make_shared<std::vector<ReqSendTask>>();
-    RequestInfo req3(1, 0, "req_id00000000000000000000000002", {3, 4, 5}, {7, 8, 9});
+    RequestInfo req3("1", 0, "req_id00000000000000000000000002", {3, 4, 5}, {7, 8, 9});
     req3.add_send_task(0, 17, false);
     req3.pop_tasks(*tasks);
     tasks->clear();
@@ -696,7 +696,7 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
       EXPECT_EQ(b2.data.value().length, 16 * ts);
       auto flush = q->front();
       q->pop();
-      EXPECT_EQ(flush.dst_inst_id, 1);
+      EXPECT_EQ(flush.dst_inst_id, "1");
       EXPECT_EQ(flush.dst_worker_id, 0);
       auto b3 = q->front();
       q->pop();
@@ -718,21 +718,21 @@ class MockChannel : public IChannel {
 TEST(SendStubTest, UseMockChannel) {
   uint32_t bs = 16 * KB;
   uint32_t ts = KB;
-  WorkerInfo src_info(0, 0);
+  WorkerInfo src_info("0", 0);
   src_info.block_size = bs;
   src_info.token_size = ts;
 
-  WorkerInfo dst_info(1, 0);
+  WorkerInfo dst_info("1", 0);
   dst_info.block_size = bs;
   dst_info.token_size = ts;
 
-  Context ctx("0", 0, 1);
+  Context ctx("0", 1);
   ctx.set_block_params(bs, ts, 8);
   ctx.set_layer_data_address(0, {0, 8 * bs});
   uint32_t num_layers = 2;
 
   std::vector<RequestInfo *> reqs;
-  RequestInfo req0(1, 0, "req_id00000000000000000000000000", {0, 1, 2}, {4, 5, 6});
+  RequestInfo req0("1", 0, "req_id00000000000000000000000000", {0, 1, 2}, {4, 5, 6});
   req0.add_send_task(0, 8, false);
   reqs.push_back(&req0);
   IpcBlock expect_data(0, 4 * bs, 8 * ts);

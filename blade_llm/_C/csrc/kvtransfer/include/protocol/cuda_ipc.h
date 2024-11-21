@@ -42,13 +42,18 @@ class CudaIpcWrite : public noncopyable {
   ~CudaIpcWrite() noexcept;
  private:
   bool is_connected_;
-  std::vector<void *> dst_ipc_ptr_;
+  std::vector<void *> dst_ipc_ptr_{};
   CudaIpcContext *ctx_;
 };
 
+bool write_handshake(int fd, const InstanceId&, WorkerId);
+bool write_req(int fd, const RequestId &, const std::vector<uint32_t> &);
+bool read_handshake(int fd, InstanceId&, WorkerId&);
+bool read_req(int fd, RequestId&, std::vector<uint32_t> &);
+
 class SocketWriter : public noncopyable {
  public:
-  SocketWriter(InstanceId inst_id, WorkerId worker_id) :
+  SocketWriter(const InstanceId& inst_id, WorkerId worker_id) :
       src_inst_id_(inst_id),
       src_worker_id_(worker_id) {};
   void connect(const WorkerInfo &dst);
@@ -59,15 +64,15 @@ class SocketWriter : public noncopyable {
   int socket_fd_{-1};
   InstanceId src_inst_id_;
   WorkerId src_worker_id_;
-  InstanceId dst_inst_id_{INVALID_INST_WORKER_ID};
+  InstanceId dst_inst_id_;
   WorkerId dst_worker_id_{INVALID_INST_WORKER_ID};
 };
 
 class CudaIpcChannel : public IChannel, public noncopyable {
  public:
-  CudaIpcChannel(InstanceId inst_id, WorkerId worker_id, CudaIpcContext *ctx) :
+  CudaIpcChannel(const InstanceId& inst_name, WorkerId worker_id, CudaIpcContext *ctx) :
       data_writer_(ctx),
-      notify_writer_(inst_id, worker_id) {};
+      notify_writer_(inst_name, worker_id) {};
   void connect(const WorkerInfo &dst) override;
   void send_data(size_t layer_index, const std::vector<IpcBlock> &data) override;
   void send_notification(IIterator<const ReqSendTask *> *reqs) override;

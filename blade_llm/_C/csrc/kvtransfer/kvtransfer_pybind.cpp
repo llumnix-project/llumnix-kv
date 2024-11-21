@@ -25,7 +25,7 @@ const std::vector<TransferProtocol> &support_transfer_protocols() {
   return LIBRARY_SUPPORT_TRANSFER_PROTOCOLS;
 }
 
-GeneralNamingClient connect_naming(const InstanceName &name, const std::string &url) {
+GeneralNamingClient connect_naming(const InstanceId &name, const std::string &url) {
   return NAMING_MANAGER->connect_naming(name, url);
 }
 
@@ -218,7 +218,7 @@ void submit_req_recv(const std::string &src_inst_name,
 
   if (KV_SERVICE != nullptr) {
     LOG(INFO) << "KVT: submit recv request: " << req_id << " from "
-              << src_inst_name << ":" << src_worker_id << ";";
+              << src_inst_name << ":" << src_worker_id <<";";
     KV_SERVICE->submit_recv(src_inst_name, src_worker_id, req_id, dst_block_ids);
   } else {
     throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv service is not start");
