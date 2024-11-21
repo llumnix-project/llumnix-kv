@@ -4,52 +4,49 @@
 #pragma once
 #include <string>
 #include <optional>
+#include <stdexcept>
 
 namespace blade_llm {
-enum ErrorCode {
-  SUCCESS,
+
+enum class ErrorKind: unsigned int {
+  OTHER_ERROR = 0,
   // connection related
-  INVALID_TARGET,
-  TARGET_NOT_FOUND,
-  TARGET_CONNOT_CONNECT,
-  TARGET_DISCONNECTED,
+  INVALID_TARGET = 1,
+  TARGET_NOT_FOUND = 2,
+  TARGET_CONNOT_CONNECT = 3,
+  TARGET_DISCONNECTED = 4,
   // request related
-  REQUEST_NOT_FOUND,
-  INVALID_REQUEST_PARAM,
-  UNEXPECTED_REQ_RECV,
+  REQUEST_NOT_FOUND = 5,
+  INVALID_REQUEST_PARAM = 6,
+  UNEXPECTED_REQ_RECV = 7,
   //
-  INVALID_OPERATION,
-  UNKNOWN_FAILURE,
+  INVALID_OPERATION = 8,
 };
 
-struct Error {
-  ErrorCode code;
-  std::string msg;
+static const char *ERROR_NAMES[] = {"Other error",
+                                    "Invalid target",
+                                    "Target not found",
+                                    "Target cannot connect",
+                                    "Target disconnected",
+                                    "Request not found",
+                                    "Invalid request",
+                                    "Unexpected request",
+                                    "Invalid operation"};
 
-  Error(ErrorCode code, const std::string &msg) : code(code), msg(msg) {}
-  Error(Error &&other) noexcept: code(other.code), msg(std::move(other.msg)) {}
-  std::string to_string() const noexcept {
-    return std::string("ErrorCode: ") + std::to_string(code) + ", msg: " + msg;
-  }
-};
-
-template<typename T>
-class Result {
+class KVTransferException : public std::exception {
  public:
-  Result(Error &&err) : ok_(std::nullopt), error_(std::move(err)) {}
-  Result(T &&ok) : ok_(std::move(ok)), error_(Error(SUCCESS, "")) {}
-
-  static Result<T> error(ErrorCode code, const std::string &msg) {
-    return Result<T>(Error(code, msg));
+  KVTransferException(ErrorKind kind, const std::string &msg) :
+      msg_(ERROR_NAMES[static_cast<unsigned int>(kind)]) {
+    if (!msg.empty()) {
+      msg_ += ": " + msg;
+    }
   }
-
-  bool is_ok() const { return ok_.has_value(); }
-  bool is_err() const { return !ok_.has_value(); }
-  T &ok() { return ok_.value(); }
-  Error &err() { return error_; }
+  const char *what() const noexcept override {
+    return msg_.c_str();
+  }
  private:
-  std::optional<T> ok_;
-  Error error_;
+  std::string msg_;
 };
+
 }
 #endif //KVTRANSFER_INCLUDE_ERROR_H_

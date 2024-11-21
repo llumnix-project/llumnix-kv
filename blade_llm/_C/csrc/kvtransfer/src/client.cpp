@@ -64,13 +64,13 @@ std::unique_ptr<KvTransferClient> KvTransferClient::create(std::unique_ptr<Conte
   return std::make_unique<KvTransferClient>(std::move(ctx), std::move(factory));
 }
 
-Result<bool> KvTransferClient::add_target(const InstanceName &inst_name,
-                                          const WorkerId &worker_id,
-                                          uint32_t start_layer,
-                                          uint32_t num_layers,
-                                          std::optional<TransferProtocol> proto_opt) {
+void KvTransferClient::add_target(const InstanceName &inst_name,
+                                  const WorkerId &worker_id,
+                                  uint32_t start_layer,
+                                  uint32_t num_layers,
+                                  std::optional<TransferProtocol> proto_opt) {
   if (worker_id >= MAX_WORKERS_PER_INST) {
-    return Result<bool>::error(ErrorCode::INVALID_TARGET, "invalid worker id;");
+    throw KVTransferException(ErrorKind::INVALID_TARGET, "invalid worker id;");
   }
   auto &inst = targets_[inst_name];
   while (inst.size() <= worker_id) {
@@ -81,27 +81,23 @@ Result<bool> KvTransferClient::add_target(const InstanceName &inst_name,
       inst[worker_id] = stub_factory_->create_stub(inst_name, worker_id, start_layer, num_layers, proto_opt);
     } catch (const std::exception &e) {
       LOG(ERROR) << "KVT client: connect target worker(" << inst_name << ":" << worker_id << ") failed: " << e.what();
-      return Result<bool>::error(ErrorCode::TARGET_CONNOT_CONNECT, e.what());
+      throw KVTransferException(ErrorKind::TARGET_CONNOT_CONNECT, e.what());
     }
     inst[worker_id]->start();
   }
   auto state = inst[worker_id]->check_state();
   if (state != StubState::WORKING) {
-    return Result<bool>::error(ErrorCode::TARGET_DISCONNECTED, "target worker disconnected");
+    throw KVTransferException(ErrorKind::TARGET_DISCONNECTED, "target worker disconnected");
   }
-
-  LOG(WARNING) << "KVT client: target worker(" << inst_name << ":" << worker_id
-               << ") already connected;";
-  return {true};
 }
 
-Result<bool> KvTransferClient::remove_target(const InstanceName &inst_name, const WorkerId &worker_id) {
+void KvTransferClient::remove_target(const InstanceName &inst_name, const WorkerId &worker_id) {
   if (worker_id >= MAX_WORKERS_PER_INST) {
-    return {true};
+    return;
   }
   auto &inst = targets_[inst_name];
   while (inst.size() <= worker_id) {
-    return {true};
+    return;
   }
 
   if (inst[worker_id] != nullptr) {
@@ -111,20 +107,19 @@ Result<bool> KvTransferClient::remove_target(const InstanceName &inst_name, cons
       inst[worker_id].reset(nullptr);
     }
   }
-  return {true};
 }
 
-Result<bool> KvTransferClient::submit_req_send(const InstanceName &dst_inst_name,
-                                               const WorkerId &dst_worker_id,
-                                               const RequestId &req_id,
-                                               uint32_t new_tokens,
-                                               bool has_last_token,
-                                               std::vector<uint32_t> src_block_ids,
-                                               std::vector<uint32_t> dst_block_ids) {
+void KvTransferClient::submit_req_send(const InstanceName &dst_inst_name,
+                                       const WorkerId &dst_worker_id,
+                                       const RequestId &req_id,
+                                       uint32_t new_tokens,
+                                       bool has_last_token,
+                                       std::vector<uint32_t> src_block_ids,
+                                       std::vector<uint32_t> dst_block_ids) {
 
   if (dst_worker_id >= MAX_WORKERS_PER_INST) {
     LOG(ERROR) << "KVT client: invalid worker id: " << dst_worker_id << ";";
-    return Result<bool>::error(ErrorCode::INVALID_REQUEST_PARAM, "invalid worker id;");
+    throw KVTransferException(ErrorKind::INVALID_REQUEST_PARAM, "invalid worker id;");
   }
 
   auto &inst = targets_[dst_inst_name];
@@ -133,39 +128,39 @@ Result<bool> KvTransferClient::submit_req_send(const InstanceName &dst_inst_name
       LOG(WARNING) << "KVT client: target worker(" << dst_inst_name << ":" << dst_worker_id
                    << ") not connected, try to connect use default transfer config;";
       auto num_layers = ctx_->num_layers();
-      auto ret = add_target(dst_inst_name, dst_worker_id, 0, num_layers);
-      if (ret.is_err()) {
-        return ret;
-      }
+      add_target(dst_inst_name, dst_worker_id, 0, num_layers);
     } else {
       LOG(ERROR) << "KVT client: submit request(" << req_id << ") to unknown target ("
                  << dst_inst_name << ":" << dst_worker_id << "), add it first;";
-      return Result<bool>::error(ErrorCode::TARGET_NOT_FOUND, "target worker not connect;");
+      throw KVTransferException(ErrorKind::TARGET_NOT_FOUND, "target worker not connect;");
     }
   }
   if (inst[dst_worker_id]->check_state() == StubState::POISONED) {
     LOG(ERROR) << "KVT client: detect stub to worker(" << dst_inst_name << ":" << dst_worker_id
                << ") disconnected because of error, try to reset; ";
     LOG(ERROR) << "KVT client: fail to submit request(" << req_id << ") because target worker disconnected.";
-    return Result<bool>::error(ErrorCode::TARGET_DISCONNECTED, "target worker disconnected;");
+    throw KVTransferException(ErrorKind::TARGET_DISCONNECTED, "target worker disconnected;");
   }
   auto dst_inst_id = inst[dst_worker_id]->dst_info().inst_id;
-  auto req_info = std::make_unique<RequestInfo>(dst_inst_id, dst_worker_id, req_id, std::move(src_block_ids), std::move(dst_block_ids));
+  auto req_info = std::make_unique<RequestInfo>(dst_inst_id,
+                                                dst_worker_id,
+                                                req_id,
+                                                std::move(src_block_ids),
+                                                std::move(dst_block_ids));
   req_info->add_send_task(0, new_tokens, has_last_token);
   reqs_[req_id].emplace_back(std::move(req_info));
   LOG(INFO) << "KVT client step=" << step_id_ << ": accept send request(" << req_id
             << ") to worker(" << dst_inst_id << ":" << dst_worker_id << ") with "
             << new_tokens << " tokens. has_last_token=" << has_last_token;
-  return {true};
 }
-Result<bool> KvTransferClient::submit_delta_send(const RequestId &req_id,
-                                                 uint32_t seen_tokens,
-                                                 uint32_t new_tokens,
-                                                 bool has_last_token) {
+void KvTransferClient::submit_delta_send(const RequestId &req_id,
+                                         uint32_t seen_tokens,
+                                         uint32_t new_tokens,
+                                         bool has_last_token) {
   auto r = reqs_.find(req_id);
   if (r == reqs_.end()) {
     LOG(ERROR) << "KVT client: request(" << req_id << ") not found for delta send;";
-    return Result<bool>::error(ErrorCode::REQUEST_NOT_FOUND, "request not found;");
+    throw KVTransferException(ErrorKind::REQUEST_NOT_FOUND, "request not found;");
   }
 
   for (auto &req : r->second) {
@@ -175,10 +170,9 @@ Result<bool> KvTransferClient::submit_delta_send(const RequestId &req_id,
               << " send of request("
               << req_id << ") to worker (" << req->dst_inst_id << ":" << req->dst_worker_id << ");";
   }
-  return {true};
 }
 
-Result<bool> KvTransferClient::start_send() {
+void KvTransferClient::start_send() {
   LOG(INFO) << "KVT client: start send step: " << step_id_ << " with " << reqs_.size() << " requests;";
   auto step = std::make_shared<Step>(step_id_++);
   auto batch_reqs = std::make_shared<std::vector<ReqSendTask>>();
@@ -207,18 +201,17 @@ Result<bool> KvTransferClient::start_send() {
               << "): notify all layer ready, elapse: " << start.get_elapse_ms() << " ms;";
   });
   step_guards_.push(step_guard);
-  return {true};
 }
 
-Result<bool> KvTransferClient::notify_event_record() {
+void KvTransferClient::notify_event_record() {
   if (!step_guards_.empty()) {
     step_guards_.back()->after_record_one();
-    return {true};
+  } else {
+    throw KVTransferException(ErrorKind::INVALID_OPERATION, "event record before step start;");
   }
-  return Result<bool>::error(ErrorCode::INVALID_OPERATION, "event record before step start;");
 }
 
-Result<bool> KvTransferClient::flush_send() {
+void KvTransferClient::flush_send() {
   if (!step_guards_.empty()) {
     step_guards_.back()->layer_ready_all();
     while (!step_guards_.empty()) {
@@ -229,20 +222,19 @@ Result<bool> KvTransferClient::flush_send() {
       }
     }
   }
-return {true};
 }
 
-Result<bool> KvTransferClient::check_transfer_done(const RequestId &req_id) {
+bool KvTransferClient::check_transfer_done(const RequestId &req_id) {
   auto r = reqs_.find(req_id);
   if (r == reqs_.end()) {
-    return {true};
+    return true;
   }
   for (const auto &req : r->second) {
     if (!req->is_all_transferred()) {
-      return {false};
+      return false;
     }
   }
   reqs_.erase(r);
-  return {true};
+  return true;
 }
 }

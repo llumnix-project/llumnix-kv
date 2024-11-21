@@ -28,7 +28,7 @@ void KvRecvStub::on_recv(const RequestId &req_id, std::vector<uint32_t> &&dst_bl
   assert(ok);
 }
 
-Result<bool> KvRecvStub::check_recv_done(const RequestId &req_id, const std::vector<uint32_t> &blocks) {
+bool KvRecvStub::check_recv_done(const RequestId &req_id, const std::vector<uint32_t> &blocks) {
   size_t expect_blocks = blocks.size();
   std::shared_lock<std::shared_mutex> lock(task_m_);
   auto task = recv_tasks_.find(req_id);
@@ -37,18 +37,18 @@ Result<bool> KvRecvStub::check_recv_done(const RequestId &req_id, const std::vec
     if (recv_blocks.size() < expect_blocks) {
       LOG(ERROR) << "KVT rx_stub: recv " << recv_blocks.size() << ", but expect "
                  << expect_blocks << " blocks of request: " << req_id;
-      return Result<bool>::error(UNEXPECTED_REQ_RECV, "unexpected request blocks;");
+      throw KVTransferException(ErrorKind::UNEXPECTED_REQ_RECV, "unexpected request blocks;");
     }
     for (auto i = 0; i < expect_blocks; i++) {
       if (recv_blocks[i] != blocks[i]) {
         LOG(ERROR) << "KVT rx_stub: expect block[" << i << "] = " << blocks[i] <<
                    ", but get block[" << i << "] = " << recv_blocks[i] << " of request " << req_id;
-        return Result<bool>::error(UNEXPECTED_REQ_RECV, "unexpected request blocks;");
+        throw KVTransferException(ErrorKind::UNEXPECTED_REQ_RECV, "unexpected request blocks;");
       }
     }
-    return {true};
+    return true;
   } else {
-    return {false};
+    return false;
   }
 }
 

@@ -32,12 +32,12 @@ KvRecvStub &KvTransferService::get_or_create_conn(InstanceId src_inst_id,
   return src[src_worker_id].value();
 }
 
-Result<bool> KvTransferService::submit_recv(const InstanceName& src_inst_name,
-                                            WorkerId src_worker_id,
-                                            const RequestId &req_id,
-                                            const std::vector<uint32_t> &dst_block_ids) {
+void KvTransferService::submit_recv(const InstanceName& src_inst_name,
+                                    WorkerId src_worker_id,
+                                    const RequestId &req_id,
+                                    const std::vector<uint32_t> &dst_block_ids) {
   if (dst_block_ids.empty()) {
-    return Result<bool>::error(ErrorCode::INVALID_REQUEST_PARAM, "receive blocks can't be empty;");
+    throw KVTransferException(ErrorKind::INVALID_REQUEST_PARAM, "receive blocks can't be empty;");
   }
   auto [r, _] = reqs_.try_emplace(req_id);
   auto src_inst_id = Context::get_inst_id(src_inst_name);
@@ -45,14 +45,13 @@ Result<bool> KvTransferService::submit_recv(const InstanceName& src_inst_name,
       .set_dst_blocks(dst_block_ids);
   LOG(INFO) << "KVT service: accept request(" << req_id << ") recv from worker("
             << src_inst_id << "," << src_worker_id << ")";
-  return {true};
 }
 
-Result<bool> KvTransferService::check_recv_done(const RequestId &req_id) {
+bool KvTransferService::check_recv_done(const RequestId &req_id) {
   auto f = reqs_.find(req_id);
   if (f == reqs_.end()) {
     LOG(ERROR) << "request " << req_id << " not submit to recv;";
-    return Result<bool>::error(REQUEST_NOT_FOUND, "receive of request not submit;");
+    throw KVTransferException(ErrorKind::REQUEST_NOT_FOUND, "receive of request not submit;");
   }
   for (const auto &r : f->second) {
     bool is_done = false;
@@ -61,12 +60,7 @@ Result<bool> KvTransferService::check_recv_done(const RequestId &req_id) {
         inst != recv_conns_.end()) {
       if (inst->second.size() > r.src_worker_id) {
         if (inst->second[r.src_worker_id].has_value()) {
-          auto ret = inst->second[r.src_worker_id]->check_recv_done(r.req_id, r.dst_blocks());
-          if (ret.is_ok()) {
-            is_done = ret.ok();
-          } else {
-            return ret;
-          }
+          is_done = inst->second[r.src_worker_id]->check_recv_done(r.req_id, r.dst_blocks());
         }
       }
     }

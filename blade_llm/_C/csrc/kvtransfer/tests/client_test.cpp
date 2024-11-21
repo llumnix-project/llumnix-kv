@@ -123,25 +123,20 @@ TEST(KVTransferClientTest, SendTo1) {
   KvTransferClient client(std::move(ctx), std::move(factory));
   client.add_target("2", 1, 0, 2);
   {
-    auto ret = client.submit_req_send("3", 1, req1.req_id, 1, false,
-                                      req1.src_blocks, req1.dst_blocks);
-    EXPECT_TRUE(ret.is_err());
-    EXPECT_EQ(ret.err().code, ErrorCode::TARGET_NOT_FOUND);
+    EXPECT_THROW(client.submit_req_send("3", 1, req1.req_id, 1, false,
+                                        req1.src_blocks, req1.dst_blocks), KVTransferException);
   }
   {
-    auto ret = client.submit_req_send("2", 1, req1.req_id, 1, false,
-                                      req1.src_blocks, req1.dst_blocks);
-    EXPECT_TRUE(ret.is_ok());
+    client.submit_req_send("2", 1, req1.req_id, 1, false,
+                           req1.src_blocks, req1.dst_blocks);
     client.start_send();
     client.notify_event_record();
     client.flush_send();
   }
   {
-    auto unknown_submit = client.submit_delta_send("UNKNOWN_REQ_ID", 1, 1, false);
-    EXPECT_FALSE(unknown_submit.is_ok());
+    EXPECT_THROW(client.submit_delta_send("UNKNOWN_REQ_ID", 1, 1, false), KVTransferException);
     req1.add_send_task(1, 1, true);
-    auto ret = client.submit_delta_send(req1.req_id, 1, 1, true);
-    EXPECT_TRUE(ret.is_ok());
+    client.submit_delta_send(req1.req_id, 1, 1, true);
     client.start_send();
     client.notify_event_record();
     client.flush_send();
@@ -174,29 +169,19 @@ TEST(KVTransferClientTest, SendTo2) {
   KvTransferClient client(std::move(ctx), std::move(factory));
   client.add_target("2", 1, 0, 2);
   client.add_target("3", 1, 0, 2);
-  {
-    auto ret = client.submit_req_send("3", 1, req0.req_id, 1, false,
-                                      req0.src_blocks, req0.dst_blocks);
-    EXPECT_TRUE(ret.ok());
-  }
-  {
-    auto ret = client.submit_req_send("2", 1, req1.req_id, 1, false,
-                                      req1.src_blocks, req1.dst_blocks);
-    EXPECT_TRUE(ret.is_ok());
-  }
+  client.submit_req_send("3", 1, req0.req_id,
+                         1, false,
+                         req0.src_blocks, req0.dst_blocks);
+  client.submit_req_send("2", 1, req1.req_id,
+                         1, false,
+                         req1.src_blocks, req1.dst_blocks);
   client.start_send();
   client.flush_send();
 
   req1.add_send_task(1, 1, true);
   req0.add_send_task(1, 1, true);
-  {
-    auto ret = client.submit_delta_send(req0.req_id, 1, 1, true);
-    EXPECT_TRUE(ret.is_ok());
-  }
-  {
-    auto ret = client.submit_delta_send(req1.req_id, 1, 1, true);
-    EXPECT_TRUE(ret.is_ok());
-  }
+  client.submit_delta_send(req0.req_id, 1, 1, true);
+  client.submit_delta_send(req1.req_id, 1, 1, true);
   client.start_send();
   client.notify_event_record();
   client.flush_send();
@@ -229,25 +214,18 @@ TEST(KVTransferClientTest, SendToPP2) {
   KvTransferClient client(std::move(ctx), std::move(factory));
   client.add_target("2", 1, 0, 2);
   client.add_target("3", 1, 0, 2);
-  {
-    auto ret = client.submit_req_send("3", 1, req0.req_id, 1, false,
-                                      req0.src_blocks, req0.dst_blocks);
-    EXPECT_TRUE(ret.ok());
-  }
-  {
-    auto ret = client.submit_req_send("2", 1, req1.req_id, 1, false,
-                                      req1.src_blocks, req1.dst_blocks);
-    EXPECT_TRUE(ret.is_ok());
-  }
+  client.submit_req_send("3", 1, req0.req_id,
+                         1, false,
+                         req0.src_blocks, req0.dst_blocks);
+  client.submit_req_send("2", 1, req1.req_id,
+                         1, false,
+                         req1.src_blocks, req1.dst_blocks);
   client.start_send();
   client.flush_send();
 
   req1.add_send_task(1, 1, true);
   req0.add_send_task(1, 1, true);
-  {
-    auto ret = client.submit_delta_send(req0.req_id, 1, 1, true);
-    EXPECT_TRUE(ret.is_ok());
-  }
+  client.submit_delta_send(req0.req_id, 1, 1, true);
   client.start_send();
   client.notify_event_record();
   client.flush_send();

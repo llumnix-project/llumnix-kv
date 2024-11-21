@@ -50,7 +50,7 @@ class KvRecvStub : public noncopyable {
       src_worker_id(worker_id) {};
   KvRecvStub(KvRecvStub &&other) noexcept;
   void on_recv(const RequestId&, std::vector<uint32_t> &&block_ids);
-  Result<bool> check_recv_done(const RequestId&, const std::vector<uint32_t> &block_ids);
+  bool check_recv_done(const RequestId&, const std::vector<uint32_t> &block_ids);
   void earse(const RequestId&);
  private:
   std::shared_mutex task_m_;

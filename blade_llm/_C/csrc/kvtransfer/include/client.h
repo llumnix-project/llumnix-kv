@@ -22,30 +22,30 @@ class KvTransferClient : public noncopyable {
  public:
   static std::unique_ptr<KvTransferClient> create(std::unique_ptr<Context> &&,
                                                   const std::vector<TransferProtocol> &,
-                                                  std::unique_ptr<ISendStubFactory> && f);
+                                                  std::unique_ptr<ISendStubFactory> &&f);
 
   KvTransferClient(std::unique_ptr<Context> &&, std::unique_ptr<ISendStubFactory> &&);
-  Result<bool> add_target(const InstanceName&,
-                          const WorkerId&,
-                          uint32_t start_layer,
-                          uint32_t num_layers,
-                          std::optional<TransferProtocol> = std::nullopt);
-  Result<bool> remove_target(const InstanceName&, const WorkerId&);
-  Result<bool> submit_req_send(const InstanceName& dst_inst,
-                               const WorkerId& dst_worker,
-                               const RequestId &,
-                               uint32_t new_tokens,
-                               bool has_last_token,
-                               std::vector<uint32_t> src_block_ids,
-                               std::vector<uint32_t> dst_block_ids);
-  Result<bool> submit_delta_send(const RequestId &,
-                                 uint32_t seen_tokens,
-                                 uint32_t new_tokens,
-                                 bool has_last_token);
-  Result<bool> start_send();
-  Result<bool> notify_event_record();
-  Result<bool> flush_send();
-  Result<bool> check_transfer_done(const RequestId &);
+  void add_target(const InstanceName &,
+                  const WorkerId &,
+                  uint32_t start_layer,
+                  uint32_t num_layers,
+                  std::optional<TransferProtocol> = std::nullopt);
+  void remove_target(const InstanceName &, const WorkerId &);
+  void submit_req_send(const InstanceName &dst_inst,
+                       const WorkerId &dst_worker,
+                       const RequestId &,
+                       uint32_t new_tokens,
+                       bool has_last_token,
+                       std::vector<uint32_t> src_block_ids,
+                       std::vector<uint32_t> dst_block_ids);
+  void submit_delta_send(const RequestId &,
+                         uint32_t seen_tokens,
+                         uint32_t new_tokens,
+                         bool has_last_token);
+  void start_send();
+  void notify_event_record();
+  void flush_send();
+  bool check_transfer_done(const RequestId &);
   Context *context() { return ctx_.get(); };
   void enable_auto_connect() { auto_connect_ = true; }
 

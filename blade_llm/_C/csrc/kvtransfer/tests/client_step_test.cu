@@ -116,10 +116,8 @@ TEST(KVTransferClientTest, TestKernelSyncAndDataTransfer) {
   auto f = std::make_unique<FakeSendStubFactory>(ctx.get(), host_layer_addrs, notifies);
   KvTransferClient client(std::move(ctx), std::move(f));
 
-  auto add_target_ret = client.add_target("0", 0, 0, 2);
-  EXPECT_TRUE(add_target_ret.is_ok());
-  auto ret = client.submit_req_send("0", 0, TEST_REQ_ID, 16 * 4, true, {0, 1, 2, 3}, dst_blocks);
-  EXPECT_TRUE(ret.is_ok());
+  client.add_target("0", 0, 0, 2);
+  client.submit_req_send("0", 0, TEST_REQ_ID, 16 * 4, true, {0, 1, 2, 3}, dst_blocks);
   client.start_send();
   std::this_thread::sleep_for(std::chrono::milliseconds (100)); // let start_send to run;
   // mock layer 0
@@ -167,8 +165,7 @@ TEST(KVTransferClientTest, TestKernelSyncAndDataTransfer) {
     }
   }
   auto done_ret = client.check_transfer_done(TEST_REQ_ID);
-  EXPECT_TRUE(done_ret.is_ok());
-  EXPECT_TRUE(done_ret.ok());
+  EXPECT_TRUE(done_ret);
 
   client.remove_target("0", 0);
   LOG(INFO) << "finish";

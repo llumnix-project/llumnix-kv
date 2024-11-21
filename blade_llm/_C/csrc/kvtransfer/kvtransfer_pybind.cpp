@@ -1,5 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <pybind11/pytypes.h>
+
 #include "client.h"
 #include "service.h"
 #include "server.h"
@@ -12,8 +14,6 @@ namespace blade_llm {
 static std::unique_ptr<KvTransferClient> KV_CLIENT = nullptr;
 static ITransferServer *KV_SERVER = nullptr;
 static KvTransferService *KV_SERVICE = nullptr;
-
-static thread_local std::optional<Error> ERROR_OPT = std::nullopt;
 static std::vector<TransferProtocol> LIBRARY_SUPPORT_TRANSFER_PROTOCOLS;
 static NamingManager *NAMING_MANAGER = new NamingManager();
 
@@ -64,12 +64,9 @@ void add_target(const std::string &inst_name,
                 uint32_t num_layers,
                 std::optional<TransferProtocol> protocol) {
   if (KV_CLIENT != nullptr) {
-    auto ret = KV_CLIENT->add_target(inst_name, worker_id, start_layer, num_layers, protocol);
-    if (ret.is_err()) {
-      ERROR_OPT.emplace(std::move(ret.err()));
-    }
+    KV_CLIENT->add_target(inst_name, worker_id, start_layer, num_layers, protocol);
   } else {
-    ERROR_OPT.emplace(Error(ErrorCode::INVALID_OPERATION, "kv client is not initialized"));
+    throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv client is not initialized");
   }
 }
 
@@ -81,18 +78,15 @@ void submit_req_send(const std::string &dst_inst_name,
                      std::vector<uint32_t> src_block_ids,
                      std::vector<uint32_t> dst_block_ids) {
   if (KV_CLIENT != nullptr) {
-    auto ret = KV_CLIENT->submit_req_send(dst_inst_name,
-                                          dst_worker_id,
-                                          req_id,
-                                          new_tokens,
-                                          has_last_token,
-                                          std::move(src_block_ids),
-                                          std::move(dst_block_ids));
-    if (ret.is_err()) {
-      ERROR_OPT.emplace(std::move(ret.err()));
-    }
+    KV_CLIENT->submit_req_send(dst_inst_name,
+                               dst_worker_id,
+                               req_id,
+                               new_tokens,
+                               has_last_token,
+                               std::move(src_block_ids),
+                               std::move(dst_block_ids));
   } else {
-    ERROR_OPT.emplace(Error(ErrorCode::INVALID_OPERATION, "kv client is not initialized"));
+    throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv client is not initialized");
   }
 }
 
@@ -101,61 +95,42 @@ void submit_delta_send(const std::string &req_id,
                        uint32_t new_tokens,
                        bool has_last_token) {
   if (KV_CLIENT != nullptr) {
-    auto ret = KV_CLIENT->submit_delta_send(req_id,
-                                            seen_tokens,
-                                            new_tokens,
-                                            has_last_token);
-    if (ret.is_err()) {
-      ERROR_OPT.emplace(std::move(ret.err()));
-    }
+    KV_CLIENT->submit_delta_send(req_id, seen_tokens, new_tokens, has_last_token);
+  } else {
+    throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv client is not initialized");
   }
 }
 
 void start_send() {
   if (KV_CLIENT != nullptr) {
-    auto ret = KV_CLIENT->start_send();
-    if (ret.is_err()) {
-      ERROR_OPT.emplace(std::move(ret.err()));
-    }
+    KV_CLIENT->start_send();
   } else {
-    ERROR_OPT.emplace(Error(ErrorCode::INVALID_OPERATION, "kv client is not initialized"));
+    throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv client is not initialized");
   }
 }
 
 void notify_event_record() {
   if (KV_CLIENT != nullptr) {
-    auto ret = KV_CLIENT->notify_event_record();
-    if (ret.is_err()) {
-      ERROR_OPT.emplace(std::move(ret.err()));
-    }
+    KV_CLIENT->notify_event_record();
   } else {
-    ERROR_OPT.emplace(Error(ErrorCode::INVALID_OPERATION, "kv client is not initialized"));
+    throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv client is not initialized");
   }
 };
 
 void flush_send() {
   if (KV_CLIENT != nullptr) {
-    auto ret = KV_CLIENT->flush_send();
-    if (ret.is_err()) {
-      ERROR_OPT.emplace(std::move(ret.err()));
-    }
+    KV_CLIENT->flush_send();
   } else {
-    ERROR_OPT.emplace(Error(ErrorCode::INVALID_OPERATION, "kv client is not initialized"));
+    throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv client is not initialized");
   }
 }
 
 bool check_transfer_done(const std::string &req_id) {
   if (KV_CLIENT != nullptr) {
-    auto ret = KV_CLIENT->check_transfer_done(req_id);
-    if (ret.is_err()) {
-      ERROR_OPT.emplace(std::move(ret.err()));
-    } else {
-      return ret.ok();
-    }
+    return KV_CLIENT->check_transfer_done(req_id);
   } else {
-    ERROR_OPT.emplace(Error(ErrorCode::INVALID_OPERATION, "kv client is not initialized"));
+    throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv client is not initialized");
   }
-  return false;
 }
 
 void init_kv_transfer_server(const std::string &inst_name,
@@ -244,39 +219,17 @@ void submit_req_recv(const std::string &src_inst_name,
   if (KV_SERVICE != nullptr) {
     LOG(INFO) << "KVT: submit recv request: " << req_id << " from "
               << src_inst_name << ":" << src_worker_id << ";";
-    auto ret = KV_SERVICE->submit_recv(src_inst_name,
-                                       src_worker_id,
-                                       req_id,
-                                       dst_block_ids);
-    if (ret.is_err()) {
-      ERROR_OPT.emplace(std::move(ret.err()));
-    }
+    KV_SERVICE->submit_recv(src_inst_name, src_worker_id, req_id, dst_block_ids);
   } else {
-    ERROR_OPT.emplace(Error(ErrorCode::INVALID_OPERATION, "kv service is not start"));
+    throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv service is not start");
   }
 }
 
 bool check_recv_done(const std::string &req_id) {
   if (KV_SERVICE != nullptr) {
-    auto ret = KV_SERVICE->check_recv_done(req_id);
-    if (ret.is_err()) {
-      ERROR_OPT.emplace(std::move(ret.err()));
-    } else {
-      return ret.ok();
-    }
+    return KV_SERVICE->check_recv_done(req_id);
   } else {
-    ERROR_OPT.emplace(Error(ErrorCode::INVALID_OPERATION, "kv service is not start"));
-  }
-  return false;
-}
-
-std::string check_error() {
-  if (ERROR_OPT.has_value()) {
-    auto str = ERROR_OPT.value().to_string();
-    ERROR_OPT.reset();
-    return str;
-  } else {
-    return "";
+    throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv service is not start");
   }
 }
 }
@@ -284,6 +237,7 @@ std::string check_error() {
 namespace py = pybind11;
 PYBIND11_MODULE(kvtransfer_ops, m) {
   // class
+  py::register_exception<blade_llm::KVTransferException>(m, "KVTransferError", PyExc_RuntimeError);
   py::class_<blade_llm::TransferProtocol> protocol(m, "TransferProtocol");
   protocol.def(py::init<blade_llm::TransferProtocol::Kind>())
       .def_readwrite("type", &blade_llm::TransferProtocol::type)
@@ -318,6 +272,5 @@ PYBIND11_MODULE(kvtransfer_ops, m) {
   m.def("submit_req_recv", &blade_llm::submit_req_recv, "submit kv recv task to kv server;");
   m.def("check_recv_done", &blade_llm::check_recv_done, "check if all kv data of a request are received;");
   // common
-  m.def("check_error", &blade_llm::check_error, "check error message;");
   m.def("lib_support_transfer_protocols", &blade_llm::support_transfer_protocols, "get supported transfer types");
 }
