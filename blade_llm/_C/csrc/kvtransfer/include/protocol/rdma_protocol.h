@@ -7,6 +7,16 @@
 #include "context.h"
 #include "channel.h"
 #include "server.h"
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <thread>
+#include <future>
+#include "thrid_party/logging.h"
 
 #ifdef ENABLE_RDMA
 #include <accl/barex/barex.h>
@@ -18,16 +28,6 @@
 #include <accl/barex/xsimple_mempool.h>
 #include <accl/barex/xthreadpool.h>
 #include <accl/barex/xtimer.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netdb.h>
-#include <arpa/inet.h>
-#include <thread>
-#include <future>
-#include "thrid_party/logging.h"
 #endif
 
 namespace blade_llm {

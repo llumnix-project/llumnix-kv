@@ -1,16 +1,13 @@
 
-#include "protocol/rdma_protocol.h"
-#include "thrid_party/logging.h"
-
-#ifdef ENABLE_RDMA
-#include "naming.h"
-#include "assert.h"
-#include <stdlib.h>
-#include <unistd.h>
 #include <sys/epoll.h>
 #include <future>
 #include <sstream>
+#include "protocol/rdma_protocol.h"
+#include "thrid_party/logging.h"
+#include "naming.h"
+#include "assert.h"
 
+#ifdef ENABLE_RDMA
 // just in this cpp
 using namespace accl::barex;
 #endif
