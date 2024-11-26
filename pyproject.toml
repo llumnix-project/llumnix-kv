@@ -11,7 +11,7 @@ exclude = [
   './blade_llm/module/triton/*.py',
   # TODO(xiafei.qiuxf): exclude triton code from checking, reopening soon.
 ]
-target-version = 'py38'
+target-version = 'py310'
 
 [tool.ruff.lint]
 # The following are ruff defaults.
