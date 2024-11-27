@@ -122,14 +122,11 @@ struct BarexCtx : public noncopyable {
     return this->tp_.get();
   }
   auto *mp() const noexcept {
-    return this->mp_.get();
+    return this->mp_;
   }
  private:
-  using XDevice = accl::barex::XDevice;
-  static XDevice *choose_nic(const std::vector<XDevice *> &nic_devs, int gpu_dev);
- private:
   // 记得这里的顺序决定了析构顺序, 要注意成员放置顺序.
-  std::unique_ptr<accl::barex::XSimpleMempool, XMempoolDeleter> mp_;
+  accl::barex::XSimpleMempool* mp_ = nullptr;
   std::unique_ptr<accl::barex::XThreadpool, XThreadpoolDeleter> tp_;
   std::unique_ptr<accl::barex::XContext> xctx_;
 

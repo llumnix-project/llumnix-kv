@@ -9,6 +9,8 @@
 #include "protocol.h"
 #include "thrid_party/logging.h"
 
+namespace py = pybind11;
+
 namespace blade_llm {
 
 static std::unique_ptr<KvTransferClient> KV_CLIENT = nullptr;
@@ -232,9 +234,20 @@ bool check_recv_done(const std::string &req_id) {
     throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv service is not start");
   }
 }
+
+#ifdef ENABLE_TORCH
+
+PyObject* alloc_phy_cont_mem(size_t size, PyObject* device);
+
+static py::object alloc_phy_cont_mem_w(size_t size, py::handle device) {
+  auto* res = alloc_phy_cont_mem(size, device.ptr());
+  return py::reinterpret_steal<py::object>(py::handle(res));
 }
 
-namespace py = pybind11;
+#endif  // ENABLE_TORCH
+
+}  // namespace blade_llm
+
 PYBIND11_MODULE(kvtransfer_ops, m) {
   // class
   py::register_exception<blade_llm::KVTransferException>(m, "KVTransferError", PyExc_RuntimeError);
@@ -256,6 +269,10 @@ PYBIND11_MODULE(kvtransfer_ops, m) {
       .def("store", &blade_llm::GeneralNamingClient::store, "get key from naming service;")
       .def("remove", &blade_llm::GeneralNamingClient::remove, "remove key from naming service;")
       .def("list", &blade_llm::GeneralNamingClient::list, "list keys from naming service;");
+
+#ifdef ENABLE_TORCH
+  m.def("alloc_phy_cont_mem", &blade_llm::alloc_phy_cont_mem_w, "alloca physical contiguous memory");
+#endif  // ENABLE_TORCH
 
   m.def("connect_naming", &blade_llm::connect_naming, "connect to naming service;");
   // client

@@ -34,7 +34,9 @@ class FileSysNaming : public INamingClient, noncopyable {
   }
   ~FileSysNaming() override {
     stop_.store(true, std::memory_order_release);
-    periodic_task_.join();
+    if (periodic_task_.joinable()) {
+      periodic_task_.join();
+    }
   }
  private:
   void write_file(const std::string &path, const std::string &content);

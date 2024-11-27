@@ -24,6 +24,13 @@ GeneralNamingClient NamingManager::connect_naming(const InstanceId& myname, cons
   auto schema = url.substr(0, pos);
   auto content = url.substr(pos + 1, url.size());
   std::unique_lock<std::shared_mutex> w_lock(shared_mutex_);
+  {
+    auto ret = naming_clients_.find(url);
+    if (ret != naming_clients_.end()) {
+      return ret->second;
+    }
+  }
+
   auto f = factories_.find(schema);
   if (f != factories_.end()) {
     auto client = f->second->create(myname);

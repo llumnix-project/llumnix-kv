@@ -6,6 +6,16 @@
 #include "thrid_party/logging.h"
 #include "naming.h"
 #include "assert.h"
+#include <fstream>
+#include <mutex>
+
+#ifdef ENABLE_TORCH
+#include <c10/core/Storage.h>
+#include <c10/core/Allocator.h>
+#include <c10/core/Device.h>
+#include <torch/csrc/Device.h>
+#include <torch/csrc/Storage.h>
+#endif  // ENABLE_TORCH
 
 #ifdef ENABLE_RDMA
 // just in this cpp
@@ -159,12 +169,152 @@ BarexMRGuard::~BarexMRGuard() {
   RTCHECK(result == accl::barex::BAREX_SUCCESS);
 }
 
-auto BarexCtx::choose_nic(const std::vector<XDevice *> &nic_devs, int gpu_dev) -> XDevice * {
-  // TODO(zhanyi.ww): 选择离 gpu_dev 最近的网卡.
+// GPU 0 对应 NIC: RET[0]
+// filename 格式: vsolar_1,vsolar_1,vsolar_1,vsolar_1,vsolar_0,vsolar_0,vsolar_0,vsolar_0
+static std::vector<std::string> load_nic_affinity(const char* filename) {
+  auto file = std::ifstream(filename);
+  if (!file.is_open()) {
+    throw std::runtime_error(std::string("load_nic_affinity failed. filename=") + filename);
+  }
+
+  auto result = std::vector<std::string>();
+  std::string line;
+  std::getline(file, line);
+  size_t start = 0;
+  size_t end;
+  while ((end = line.find(',', start)) != std::string::npos) {
+    result.push_back(line.substr(start, end - start));
+    start = end + 1;
+  }
+  if (start < line.length()) {
+    result.push_back(line.substr(start));
+  }
+
+  return result;
+}
+
+static const std::vector<std::string>& get_nic_affinity() noexcept {
+  static std::vector<std::string> result;
+  static std::once_flag load_nic_aff_once;
+  std::call_once(load_nic_aff_once, [] () {
+    result = load_nic_affinity("/tmp/pai_blade_llm_kvtransfer_rdma_nic_affinity.txt");
+  });
+  return result;
+}
+
+// CUDA_VISIBLE_DEVICES=4,5,6,7
+// 返回空若 CUDA_VISIBLE_DEVICES 未设置.
+static std::vector<int> parse_cuda_visible_devs() {
+  const char* env_data = getenv("CUDA_VISIBLE_DEVICES");
+  if (env_data == nullptr) {
+    return {};
+  }
+  std::string line(env_data);
+  if (line.empty()) {
+    return {};
+  }
+
+  std::vector<int> result;
+  size_t start = 0;
+  size_t end;
+  while ((end = line.find(',', start)) != std::string::npos) {
+    result.push_back(std::stoi(line.substr(start, end - start)));
+    start = end + 1;
+  }
+  if (start < line.length()) {
+    result.push_back(std::stoi(line.substr(start)));
+  }
+  return result;
+}
+
+static const std::vector<int>& get_cuda_visible_devs() noexcept {
+  static std::vector<int> result;
+  static std::once_flag once;
+  std::call_once(once, [] () {
+    result = parse_cuda_visible_devs();
+  });
+  return result;
+}
+
+using XDevice = accl::barex::XDevice;
+using accl::barex::XSimpleMempool;
+
+static XDevice* choose_nic(const std::vector<XDevice *> &nic_devs, int gpu_dev) noexcept {
   assert(gpu_dev >= 0);
   assert(!nic_devs.empty());
-  return gpu_dev >= nic_devs.size() ? nic_devs[0] : nic_devs[gpu_dev];
+
+  int real_gpu_rank = gpu_dev;
+  const auto& cuda_visible_env = get_cuda_visible_devs();
+  if (!cuda_visible_env.empty()) {
+    real_gpu_rank = cuda_visible_env.at(gpu_dev);
+  }
+  const auto& lovely_nic = get_nic_affinity().at(real_gpu_rank);
+
+  for (auto* nic_dev : nic_devs) {
+    if (nic_dev->GetName() == lovely_nic) {
+      LOG(INFO) << "choose_nic. gpu_dev=" << gpu_dev
+                << ", real_gpu_rank=" << real_gpu_rank
+                << ", lovely_nic=" << lovely_nic;
+      return nic_dev;
+    }
+  }
+
+  // https://project.aone.alibaba-inc.com/v2/project/664220/req/61087840
+  // 如 aone 所示, XPU 要求必须亲和网卡, 这里 kvtransfer 可能无法发送数据.
+  auto* dev = gpu_dev >= nic_devs.size() ? nic_devs[0] : nic_devs[gpu_dev];
+  LOG(WARNING) << "choose_nic fallback, may not work on XPU. gpu_dev=" << gpu_dev
+               << ", dev=" << dev->GetName();
+  return dev;
 }
+
+class MpManager {
+public:
+  struct GPUCtx {
+    XDevice* lovely_nic = nullptr;
+    std::unique_ptr<accl::barex::XSimpleMempool, XMempoolDeleter> mp;
+  };
+public:
+  MpManager() = default;
+
+  MpManager(const MpManager&) = delete;
+  MpManager(MpManager&&) = delete;
+
+  std::pair<XDevice*, XSimpleMempool*> get_gpu_ctx(int gpu_id) const;
+private:
+  std::mutex m_;
+  std::unordered_map<int, GPUCtx> map_;
+};
+
+std::pair<XDevice*, XSimpleMempool*> MpManager::get_gpu_ctx(int gpu_id) const {
+  auto& self = *const_cast<MpManager*>(this);   // SAFETY: we have a mutex!
+  auto guard = std::lock_guard<std::mutex>(self.m_);
+
+  auto iter = self.map_.find(gpu_id);
+  if (iter != self.map_.end()) {
+    return {iter->second.lovely_nic, iter->second.mp.get()};
+  }
+
+  GPUCtx ctx;
+  XDeviceManager *manager = nullptr;
+  auto result = XDeviceManager::Singleton(manager);
+  RTCHECK(result == accl::barex::BAREX_SUCCESS);
+  auto all_nic_devs = manager->AllDevices();
+  RTCHECK(!all_nic_devs.empty());
+  ctx.lovely_nic = choose_nic(all_nic_devs, gpu_id);
+
+  XSimpleMempool *mempool = nullptr;
+  std::string mpname = "mp-" + std::to_string(gpu_id);
+  result = XSimpleMempool::NewInstance(mempool, std::move(mpname), {ctx.lovely_nic});
+  RTCHECK(result == accl::barex::BAREX_SUCCESS);
+  ctx.mp.reset(mempool);
+
+  auto [iter2, ok] = self.map_.emplace(gpu_id, std::move(ctx));
+  assert(ok);
+  assert(iter2->second.mp.get() == mempool);
+  return {iter2->second.lovely_nic, iter2->second.mp.get()};
+}
+
+static MpManager g_mp_manager;
 
 static void BarexCtxMain(XContext *ctx, std::atomic<bool> *stop_flag) {
   int evfd = ctx->GetEventFd();
@@ -192,17 +342,8 @@ BarexCtx::BarexCtx(std::string mp_name,
                    Context *ctx,
                    std::unique_ptr<accl::barex::XChannelCallback> ctxcb) {
   auto &self = *this;
-  XDeviceManager *manager = nullptr;
-  auto result = XDeviceManager::Singleton(manager);
-  RTCHECK(result == accl::barex::BAREX_SUCCESS);
-  auto all_nic_devs = manager->AllDevices();
-  RTCHECK(!all_nic_devs.empty());
-  auto *nic_dev = choose_nic(all_nic_devs, ctx->device_id());
-
-  XSimpleMempool *mempool = nullptr;
-  result = XSimpleMempool::NewInstance(mempool, std::move(mp_name), {nic_dev});
-  RTCHECK(result == accl::barex::BAREX_SUCCESS);
-  self.mp_.reset(mempool);
+  auto [nic_dev, mp] = g_mp_manager.get_gpu_ctx(ctx->device_id());
+  self.mp_ = mp;
 
   const auto &layer_ptr = ctx->layer_data_address();
   // accl.barex 注册 MR 个数最大为 65536, 即要求 layer_ptr.size <= 65536.
@@ -216,9 +357,6 @@ BarexCtx::BarexCtx(std::string mp_name,
     if (tmp_max_mr_gb > 0) {
       max_mr_size = max_mr_size * tmp_max_mr_gb;
     }
-  } else {
-    setenv("ACCL_MAX_USER_MR_GB", "2", 1);
-    max_mr_size = max_mr_size * 2;
   }
   auto layer_blk_size = ctx->block_size() * ctx->layer_num_blocks();
   LOG(INFO) << "layer size(layer_blk_size) = " << layer_blk_size << ", max_mr_size = " << max_mr_size;
@@ -230,19 +368,23 @@ BarexCtx::BarexCtx(std::string mp_name,
     memp_t out;
     auto layer_blk_p = reinterpret_cast<void *>(layer_p);
     // 虽然注释上提到 RegUserMr 要求对齐. 但钉钉确认了, 只要是 cudaMalloc 返回的地址都可以.
-    result = self.mp_->RegUserMr(out, layer_blk_p, layer_blk_size, GPU);
+    auto result = self.mp_->RegUserMr(out, layer_blk_p, layer_blk_size, GPU, ctx->device_id());
     RTCHECK(result == accl::barex::BAREX_SUCCESS);
-    self.layer_mr_.emplace_back(BarexMRGuard::DeregGuard(std::move(out), self.mp_.get()));
+    RTCHECK(out.d_type == GPU);
+    RTCHECK(out.device_id == ctx->device_id());
+    LOG(INFO) << "RegUserMr. layer_blk_p=" << layer_blk_p << ", layer_blk_size=" << layer_blk_size
+              << ", gpuid=" << ctx->device_id();
+    self.layer_mr_.emplace_back(BarexMRGuard::DeregGuard(std::move(out), self.mp()));
   }
 
   XThreadpool *threadpool = nullptr;
-  result = XThreadpool::NewInstance(threadpool, tpcnt, std::move(tp_name));
+  auto result = XThreadpool::NewInstance(threadpool, tpcnt, std::move(tp_name));
   RTCHECK(result == accl::barex::BAREX_SUCCESS);
   self.tp_.reset(threadpool);
 
   XContext *context = nullptr;
   ContextConfig config = XConfigUtil::DefaultContextConfig();
-  result = XContext::NewInstance(context, config, ctxcb.get(), nic_dev, mempool, threadpool);
+  result = XContext::NewInstance(context, config, ctxcb.get(), nic_dev, self.mp(), threadpool);
   ctxcb.release();
   RTCHECK(result == accl::barex::BAREX_SUCCESS);
   self.xctx_.reset(context);
@@ -729,6 +871,72 @@ std::unique_ptr<RDMAProtoContext> RDMAProtoContext::server_context(std::string &
 std::unique_ptr<RDMAProtoContext> RDMAProtoContext::client_context(std::string &&name, int num_threads) {
   return std::make_unique<RDMAProtoContext>(std::move(name), num_threads, false, std::make_unique<CliCtxCallback>());
 }
+
+#ifdef ENABLE_TORCH
+
+struct DataPtrCtx {
+  void* const ptr = nullptr;
+  XAllocator* const allocator = nullptr;
+  int const gpu_id = 0;  // for debug
+  size_t const size = 0;
+public:
+  DataPtrCtx(void* p, XAllocator* a, int g, size_t s) noexcept:
+    ptr(p), allocator(a), gpu_id(g), size(s) {
+    // DataPtrCtx 构造场景也非常稀疏, 打印点日志没关系的.
+    auto& self = *this;
+    LOG(INFO) << "DataPtrCtx. ptr=" << self.ptr
+              << ", allocator=" << self.allocator
+              << ", gpu_id=" << self.gpu_id
+              << ", size=" << self.size;
+  }
+
+  DataPtrCtx(const DataPtrCtx&) = delete;
+  DataPtrCtx(DataPtrCtx&&) = delete;
+
+  ~DataPtrCtx() {
+    auto& self = *this;
+    self.allocator->Release(self.ptr);
+    // DataPtrCtx 析构场景非常稀疏. 打印点日志没关系的.
+    LOG(INFO) << "~DataPtrCtx. ptr=" << self.ptr
+              << ", allocator=" << self.allocator
+              << ", gpu_id=" << self.gpu_id
+              << ", size=" << self.size;
+  }
+};
+
+static void DataPtrCtxDeleter(void* rctx) noexcept {
+  auto* ctx = reinterpret_cast<DataPtrCtx*>(rctx);
+  delete ctx;
+}
+
+// def alloc_phy_cont_mem(size, device: torch.device) -> torch.UntypedStorage
+PyObject* alloc_phy_cont_mem(size_t size, PyObject* device) {
+  RTCHECK(THPDevice_Check(device));
+  auto* dev = reinterpret_cast<THPDevice*>(device);
+  RTCHECK(dev->device.type() == c10::DeviceType::CUDA);
+  RTCHECK(dev->device.has_index());
+  int gpu_id = dev->device.index();
+
+  XAllocator* gpu_allocator = nullptr;
+  auto [_, mp] = g_mp_manager.get_gpu_ctx(gpu_id);
+  auto result = mp->GetXAllocator(gpu_allocator, GPU);
+  RTCHECK(result == accl::barex::BAREX_SUCCESS);
+  // cudaMalloc 至少 256 对齐. align 在 PPU 上不生效, 即 PPU 上 kvcache 不保证对齐.
+  void* const buf = gpu_allocator->Alloc(size, gpu_id, nullptr /* attr */, 512 /* align */);
+
+  auto* dpctx = new DataPtrCtx(buf, gpu_allocator, gpu_id, size);
+  auto data_ptr = c10::DataPtr(buf, dpctx, DataPtrCtxDeleter, dev->device);
+  auto storage = c10::Storage(c10::Storage::use_byte_size_t{},
+    size,
+    std::move(data_ptr),
+    nullptr,  // allocator, non-resizable!
+    false /* resizable */);
+  return THPStorage_Wrap(std::move(storage));
+}
+
+#endif   // ENABLE_TORCH
+
 #endif // ENABLE_RDMA
+
 
 }  // namespace blade_llm
