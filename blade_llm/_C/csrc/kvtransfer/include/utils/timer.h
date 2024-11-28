@@ -11,7 +11,7 @@ class TimeWatch {
   size_t get_elapse_ms();
   size_t get_elapse_us();
  private:
-  std::chrono::time_point<std::chrono::system_clock> start;
+  std::chrono::time_point<std::chrono::steady_clock> start;
 };
 
 static auto get_unix_timestamp() {
@@ -22,4 +22,3 @@ static auto get_unix_timestamp() {
 
 } // namespace blade_llm
 #endif //KVTRANSFER_INCLUDE_UTILS_TIMER_H_
-

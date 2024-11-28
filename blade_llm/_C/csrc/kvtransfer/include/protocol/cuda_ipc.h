@@ -75,7 +75,7 @@ class CudaIpcChannel : public IChannel, public noncopyable {
       notify_writer_(inst_name, worker_id) {};
   void connect(const WorkerInfo &dst) override;
   void send_data(size_t layer_index, const std::vector<IpcBlock> &data) override;
-  void send_notification(IIterator<const ReqSendTask *> *reqs) override;
+  void send_notification(const std::vector<const ReqSendTask*>& reqs) override;
   void flush() override;
   void close() override;
   ~CudaIpcChannel() override;

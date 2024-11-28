@@ -807,18 +807,16 @@ void RDMAChannel::flush() {
   return fut;
 }
 
-void RDMAChannel::send_notification(IIterator<const ReqSendTask *> *reqs) {
+void RDMAChannel::send_notification(const std::vector<const ReqSendTask*>& reqs) {
   auto &self = *this;
   self.do_init();
-  // self.send_futs_.reserve(data.size());
-  assert(self.send_futs_.empty());
 
-  auto opt = reqs->next();
-  while (opt.has_value()) {
-    auto r = opt.value();
+  assert(self.send_futs_.empty());
+  self.send_futs_.reserve(reqs.size());
+
+  for (const auto* r : reqs) {
     const auto &reqid = r->req_id();
     const auto &block_ids = r->dst_blocks();
-    LOG(INFO) << "KVT: send notification of request " << reqid;
     // 编码规则见 RDMAServer::CtxCallback::OnRecvCall
     memp_t bufmr;
     auto const msglen = get_encode_size(src_inst_id_, src_worker_id_, reqid, block_ids);
@@ -830,7 +828,6 @@ void RDMAChannel::send_notification(IIterator<const ReqSendTask *> *reqs) {
     assert(use_ch->GetMempool() == self.ctx_->mp());
     auto fut = Send(use_ch, std::move(bufmr));
     self.send_futs_.emplace_back(std::move(fut));
-    opt = reqs->next();
   }
 
   when_all_succeed(self.send_futs_);

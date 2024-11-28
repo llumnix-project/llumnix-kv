@@ -192,17 +192,10 @@ std::tuple<size_t, size_t, size_t, size_t> merge_interval(std::vector<IpcBlock> 
 }
 
 void KvSendStub::start_async() {
-  auto dst_id = dst_info_.inst_id;
-  auto dst_worker_id = dst_info_.worker_id;
+  auto const dst_id = dst_info_.inst_id;
+  auto const dst_worker_id = dst_info_.worker_id;
   std::vector<IpcBlock> send_blocks;
-  std::vector<const ReqSendTask *> send_reqs;
-  LOG(INFO) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id << ":" << gettid()
-            << "): start to send kv of layer[" << start_layer_ << ", " << num_layers_ << ");";
-
-  size_t min_block_n = std::numeric_limits<size_t>::max();
-  size_t max_block_n = 0;
-  size_t total_block_n = 0;
-  size_t finished_req_n = 0;
+  std::vector<const ReqSendTask *> finished_req;
 
   decltype(parse_block_send_p_lt_d)* parse_block_send = nullptr;
   if (src_info_.tp_size == dst_info_.tp_size) {
@@ -222,30 +215,36 @@ void KvSendStub::start_async() {
     }
 
 #ifndef NDEBUG
+    // 用于提高 https://aone.alibaba-inc.com/v2/project/664220/req/60815172 复现概率.
     usleep(300 * 1000);  // sleep 300ms
 #endif
 
+    TimeWatch start;  // iterator begin
     uint64_t wait_time_us = 0;
-    TimeWatch start;
-    send_blocks.clear();
-    send_reqs.clear();
+
+    assert(finished_req.empty());
+    assert(send_blocks.empty());
     for (const auto& task : *batch.tasks) {
       if (task.new_tokens <= 0 ||
           task.dst_inst_id() != dst_id ||
           task.dst_worker_id() != dst_worker_id) {
         continue;
       }
-      send_reqs.push_back(&task);
+
       parse_block_send(&src_info_, &dst_info_, &task, send_blocks);
+
+      if (task.reach_last_token) {
+        finished_req.emplace_back(&task);
+      }
     }
-    if (send_reqs.empty()) {
+    if (send_blocks.empty()) {
+      assert(finished_req.empty());
+      // see KvSendStub.send_batch, 这里需要 finish
+      batch.step->finish_one();
       continue;
     }
-    auto step_idx = batch.step->step_idx;
-    LOG(INFO) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id
-              << "): step(" << step_idx << ") start to send "
-              << send_reqs.size() << " requests;";
 
+    auto const step_idx = batch.step->step_idx;
     auto const sb_num = send_blocks.size();
     auto const [min, max, total, cnt] = merge_interval(send_blocks);
 
@@ -261,47 +260,39 @@ void KvSendStub::start_async() {
       ch_->flush();
       auto elapse = start.get_elapse_us();
       batch.step->finish_one();
-      LOG(INFO) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id
-                << "): finish send " << send_reqs.size() << " requests("
-                << sb_num << "->" << cnt << " blocks), block_size(min=" << min
-                << ",max=" << max << ",total=" << total
-                << "), elapse: total use "
-                << elapse << "us, wait use " << wait_time_us << "us;";
-      auto iter = Iterator<const ReqSendTask *>::copy_from(send_reqs)
-          .filter([](auto t) { return t->reach_last_token; });
-      if (iter.has_next()) {
-        ch_->send_notification(&iter);
+
+      uint64_t send_notify_us = 0;
+      if (!finished_req.empty()) {
+        TimeWatch wait_start;
+        ch_->send_notification(finished_req);
+        send_notify_us = wait_start.get_elapse_us();
       }
 
-      for (auto task : send_reqs) {
-        if (!task->reach_last_token) {
-          continue;
-        }
-        auto req_id = task->req_id();
-        const auto block_n = task->dst_blocks().size();
+      for (auto task : finished_req) {
+        assert(task->reach_last_token);
+        LOG(INFO) << "KVT tx_stub. dst_id=" << dst_id << ",dst_worker_id=" << dst_worker_id
+                  << ",step_idx=" << step_idx << ",send finish reqid=" << task->req_id();
         task->set_transfer_done();
         // DO NOT ACCESS task! IT MAY BE FREED!
         // Add clang tidy: USE-AFTER-MOVED to detect the bug.
-        min_block_n = std::min(min_block_n, block_n);
-        max_block_n = std::max(max_block_n, block_n);
-        total_block_n += block_n;
-        finished_req_n += 1;
-        LOG(INFO) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id
-                  << "): send finish notification of request(" << req_id << ");";
       }
+
+      LOG(INFO) << "KVT tx_stub. dst_id=" << dst_id << ",dst_worker_id=" << dst_worker_id
+                << ",step_idx=" << step_idx << ",finished_req_size=" << finished_req.size()
+                << ",blocks=" << sb_num << "->" << cnt << ",block_size(min/max/sum)="
+                << min << '/' << max << '/' << total << ",total_us=" << elapse
+                << ",wait_us=" << wait_time_us << ",send_notify_us=" << send_notify_us;
+
+      send_blocks.clear();
+      finished_req.clear();
     } catch (std::exception &e) {
       LOG(ERROR) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id
                  << "): fail to send data, caused by: " << e.what() << ";";
       state_.store(StubState::POISONED, std::memory_order_release);
       break;
     }
-
-    if (step_idx > 0 && (step_idx & 15) == 0) {
-      LOG(INFO) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id
-                << ") metric: req_blocks(min=" << min_block_n << ",max=" << max_block_n << ",total=" << total_block_n
-                << "), finished_reqs=" << finished_req_n << ")";
-    }
   }
+
   auto state = state_.load(std::memory_order_relaxed);
   if (state == StubState::STOPPING) {
     if (!state_.compare_exchange_weak(state, StubState::DISCARD, std::memory_order_seq_cst)) {

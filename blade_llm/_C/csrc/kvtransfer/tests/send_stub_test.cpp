@@ -106,13 +106,10 @@ class FakeChannel : public IChannel {
     q.emplace(dst_inst_id, dst_worker_id);
   }
 
-  void send_notification(IIterator<const ReqSendTask *> *reqs) override {
-    auto opt = reqs->next();
-    while (opt.has_value()) {
-      auto r = opt.value();
+  void send_notification(const std::vector<const ReqSendTask*>& reqs) override {
+    for (const auto* r : reqs) {
       auto req_id = r->req_id();
       q.emplace(dst_inst_id, dst_worker_id, req_id);
-      opt = reqs->next();
     }
   }
 };
@@ -130,7 +127,7 @@ class ProxyChannel : public IChannel {
   void flush() override {
     ch_->flush();
   }
-  void send_notification(IIterator<const ReqSendTask *> *reqs) override {
+  void send_notification(const std::vector<const ReqSendTask*>& reqs) override {
     ch_->send_notification(reqs);
   }
  private:
@@ -712,7 +709,7 @@ class MockChannel : public IChannel {
   MOCK_METHOD(void, connect, (const WorkerInfo &dst_info), (override));
   MOCK_METHOD(void, flush, (), (override));
   MOCK_METHOD(void, send_data, (size_t layer_idx, (const std::vector<IpcBlock> &data)), (override));
-  MOCK_METHOD(void, send_notification, (IIterator<const ReqSendTask *> * reqs), (override));
+  MOCK_METHOD(void, send_notification, (const std::vector<const ReqSendTask*>& reqs), (override));
 };
 
 TEST(SendStubTest, UseMockChannel) {

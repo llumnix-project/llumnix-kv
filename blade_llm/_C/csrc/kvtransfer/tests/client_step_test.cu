@@ -36,10 +36,8 @@ class FakeChannel: public IChannel {
       cuda_d2h_mem_copy(dst_ptr, src_ptr, b.length);
     }
   };
-  void send_notification(IIterator<const ReqSendTask *> *reqs) override {
-    auto next = reqs->next();
-    if (next.has_value()) {
-      auto req = next.value();
+  void send_notification(const std::vector<const ReqSendTask*>& reqs) override {
+    for (const auto* req : reqs) {
       notifies->push(req->req_id());
     }
   };

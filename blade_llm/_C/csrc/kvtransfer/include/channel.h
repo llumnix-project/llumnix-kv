@@ -24,10 +24,25 @@ class IChannel {
  public:
   virtual void connect(const WorkerInfo &dst_info) = 0;
   virtual void send_data(size_t layer_index, const std::vector<IpcBlock> &data) = 0;
-  virtual void send_notification(IIterator<const ReqSendTask *> *reqs) = 0;
+  virtual void send_notification(const std::vector<const ReqSendTask*>& reqs) = 0;
   virtual void flush() = 0;
   virtual void close() {};
   virtual ~IChannel() = default;
+
+  // ONLY FOR TEST
+  void send_notification(IIterator<const ReqSendTask *> *reqs) {
+    std::vector<const ReqSendTask*> vreqs;
+    auto opt = reqs->next();
+    while (opt.has_value()) {
+      vreqs.emplace_back(opt.value());
+      opt = reqs->next();
+    }
+    if (vreqs.empty()) {
+      return ;
+    }
+    return this->send_notification(vreqs);
+  }
+
 };
 
 using Channel = std::unique_ptr<IChannel>;

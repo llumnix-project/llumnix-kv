@@ -201,7 +201,7 @@ TEST(RDMAChannelTest, TestTransefer) {
     channel.send_data(1, {{0, 0, token_size}, {2 * token_size, 2 * token_size, token_size}});
     channel.flush();
     auto nf = CopySource<const ReqSendTask *>::from(reqs);
-    channel.send_notification(nf.get());
+    ((IChannel*)&channel)->send_notification(nf.get());
     channel.close();
     cudaFree(layer_0);
     cudaFree(layer_1);
