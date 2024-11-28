@@ -87,6 +87,7 @@ class FakeChannel : public IChannel {
   InstanceId dst_inst_id;
   uint32_t dst_worker_id;
   std::queue<Message> q;
+  std::shared_ptr<std::atomic<int>> flush_cnt = std::make_shared<std::atomic<int>>(0);
 
   FakeChannel() : q(), dst_inst_id("0"), dst_worker_id(INVALID_INST_WORKER_ID) {};
   void connect(const WorkerInfo &info) override {
@@ -104,6 +105,7 @@ class FakeChannel : public IChannel {
   }
   void flush() override {
     q.emplace(dst_inst_id, dst_worker_id);
+    flush_cnt->fetch_add(1);
   }
 
   void send_notification(const std::vector<const ReqSendTask*>& reqs) override {
@@ -168,6 +170,7 @@ static void test_parse_block_generate(int p_rank, int d_rank) {
   auto fbc = std::make_unique<FakeChannel>();
   fbc->connect(d_info);
   auto& fbcq = fbc->q;
+  auto flush_cnt = fbc->flush_cnt;
   auto tx = KvSendStub(d_info, p_info, 0, num_layers, std::move(fbc));
   tx.start();
   EXPECT_EQ(tx.check_state(), StubState::WORKING);
@@ -187,7 +190,7 @@ static void test_parse_block_generate(int p_rank, int d_rank) {
     BatchSendTask task(step_0, std::move(tasks));
     tx.send_batch(task);
     step_0->notify_layer_ready(num_layers);
-    while (!step_0->check_done()) {
+    while (flush_cnt->load() < 1) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     EXPECT_FALSE(req0.is_all_transferred());
@@ -373,6 +376,7 @@ static void dgtp_test_parse_block_generate(int p_rank, int d_rank) {
   auto fbc = std::make_unique<FakeChannel>();
   fbc->connect(d_info);
   auto& fbcq = fbc->q;
+  auto flush_cnt = fbc->flush_cnt;
   auto tx = KvSendStub(d_info, p_info, 0, num_layers, std::move(fbc));
   tx.start();
   EXPECT_EQ(tx.check_state(), StubState::WORKING);
@@ -392,7 +396,7 @@ static void dgtp_test_parse_block_generate(int p_rank, int d_rank) {
     BatchSendTask task(step_0, std::move(tasks));
     tx.send_batch(task);
     step_0->notify_layer_ready(num_layers);
-    while (!step_0->check_done()) {
+    while (flush_cnt->load() < 1) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     EXPECT_FALSE(req0.is_all_transferred());
@@ -567,6 +571,7 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
 
   auto fbc = std::make_shared<FakeChannel>();
   fbc->connect(dst_info);
+  auto flush_cnt = fbc->flush_cnt;
   auto q = &fbc->q;
   Context ctx("0", 1);
   ctx.set_block_params(bs, ts, 8);
@@ -590,7 +595,7 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
     BatchSendTask task(step_0, std::move(tasks));
     tx.send_batch(task);
     step_0->notify_layer_ready(num_layers);
-    while (!step_0->check_done()) {
+    while (flush_cnt->load() < 1) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     EXPECT_FALSE(req0.is_all_transferred());
@@ -627,7 +632,7 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
     BatchSendTask task(step_1, std::move(tasks));
     tx.send_batch(task);
     step_1->notify_layer_ready(num_layers);
-    while (!step_1->check_done()) {
+    while (flush_cnt->load() < 2) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     EXPECT_FALSE(req1.is_all_transferred());
@@ -670,7 +675,7 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
     BatchSendTask task(step_2, std::move(tasks));
     tx.send_batch(task);
     step_2->notify_layer_ready(num_layers);
-    while (!step_2->check_done()) {
+    while (flush_cnt->load() < 3) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
@@ -750,9 +755,7 @@ TEST(SendStubTest, UseMockChannel) {
   BatchSendTask task(step_0, std::move(tasks));
   tx.send_batch(task);
   step_0->notify_layer_ready(num_layers);
-  while (!step_0->check_done()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  usleep(3 * 1000 * 1000);  // 3s
 }
 
 std::tuple<size_t, size_t, size_t, size_t> merge_interval(std::vector<IpcBlock> &input);

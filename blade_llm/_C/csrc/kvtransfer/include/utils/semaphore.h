@@ -15,7 +15,8 @@ class SyncSemaphore {
   SyncSemaphore() = default;
   void wait(uint32_t cond);
   void release();
-  void release(uint32_t cond);
+  // return new value.
+  uint32_t release(uint32_t cond);
  private:
   cacheline_pad_t pad0_{};
   uint32_t ready_{0};

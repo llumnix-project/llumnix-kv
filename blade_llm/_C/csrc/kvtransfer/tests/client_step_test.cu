@@ -116,19 +116,19 @@ TEST(KVTransferClientTest, TestKernelSyncAndDataTransfer) {
 
   client.add_target("0", 0, 0, 2);
   client.submit_req_send("0", 0, TEST_REQ_ID, 16 * 4, true, {0, 1, 2, 3}, dst_blocks);
-  client.start_send();
+  auto zyidx33 = client.start_send();
   std::this_thread::sleep_for(std::chrono::milliseconds (100)); // let start_send to run;
   // mock layer 0
   clientTestKernel<<<blocks, threads, 0, stream>>>((char *)(layer_0), data_size,  10);
   cudaEventRecord(events[0], stream);
-  client.notify_event_record();
+  client.notify_event_record(zyidx33);
   // mock layer 1
   clientTestKernel<<<blocks, threads, 0, stream>>>((char *)(layer_1), data_size,  20);
   cudaEventRecord(events[1], stream);
-  client.notify_event_record();
+  client.notify_event_record(zyidx33);
   cudaStreamSynchronize(stream);
   LOG(INFO) << "cuda stream synced;";
-  client.flush_send();
+  client.flush_send(zyidx33);
 
   int cnt = 0;
   while(cnt < 20 && notifies.empty()) {

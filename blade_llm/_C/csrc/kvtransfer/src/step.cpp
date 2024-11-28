@@ -4,37 +4,26 @@ namespace blade_llm {
 void Step::wait_layer_ready(uint32_t layer_i) {
   data_signal_.wait(layer_i);
 };
-void Step::notify_layer_ready(uint32_t layer_i) {
-  data_signal_.release(layer_i);
-}
-void Step::start_one() {
-  start_cnt_.fetch_add(1, std::memory_order_seq_cst);
-}
-void Step::finish_one() {
-  finish_cnt_.fetch_add(1, std::memory_order_seq_cst);
-};
-
-bool Step::check_done() {
-  auto s_cnt = start_cnt_.load(std::memory_order_relaxed);
-  if (s_cnt > 0) {
-    auto f_cnt = finish_cnt_.load(std::memory_order_relaxed);
-    return s_cnt == f_cnt;
-  }
-  return false;
+uint32_t Step::notify_layer_ready(uint32_t layer_i) {
+  return data_signal_.release(layer_i);
 }
 
 void StepGuard::wait_layers() {
-  step_->notify_layer_ready(0);
+  auto val = step_->notify_layer_ready(0);
+  if (val > 0) {
+    assert(val == num_layers);
+    return ;
+  }
   for(auto layer_i = 0; layer_i < num_layers; layer_i ++ ) {
     record_signal_.wait(layer_i);
     cu_barrier_->wait(layer_i);
-    step_->notify_layer_ready(layer_i + 1);
-    ready_layers_.fetch_add(1, std::memory_order_seq_cst);
+    const auto next_layer = layer_i + 1;
+    val = step_->notify_layer_ready(next_layer);
+    if (val > next_layer) {
+      assert(val == num_layers);
+      return ;
+    }
   }
-}
-
-uint32_t StepGuard::ready_layers() {
-  return ready_layers_.load(std::memory_order_relaxed);
 }
 
 void StepGuard::after_record_one() {
@@ -51,6 +40,7 @@ std::shared_ptr<Step> &StepGuard::step() {
 }
 void StepGuard::layer_ready_all() {
   after_record_all();
-  step_->notify_layer_ready(num_layers);
+  auto val = step_->notify_layer_ready(num_layers);
+  assert(val == num_layers);
 }
 }

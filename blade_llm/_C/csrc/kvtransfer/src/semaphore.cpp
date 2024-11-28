@@ -1,4 +1,5 @@
 #include "utils/semaphore.h"
+#include <assert.h>
 
 namespace blade_llm {
 void SyncSemaphore::wait(uint32_t cond) {
@@ -14,10 +15,13 @@ void SyncSemaphore::release() {
   cv_.notify_all();
 }
 
-void SyncSemaphore::release(uint32_t cond) {
+uint32_t SyncSemaphore::release(uint32_t cond) {
   std::unique_lock<std::mutex> lc(c_mutex_);
-  ready_ = cond;
-  cv_.notify_all();
-}
+  if (ready_ < cond) {
+    ready_ = cond;
+    cv_.notify_all();
+  }
+  return ready_;
 }
 
+}

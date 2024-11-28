@@ -129,17 +129,17 @@ TEST(KVTransferClientTest, SendTo1) {
   {
     client.submit_req_send("2", 1, req1.req_id, 1, false,
                            req1.src_blocks, req1.dst_blocks);
-    client.start_send();
-    client.notify_event_record();
-    client.flush_send();
+    auto idx = client.start_send();
+    client.notify_event_record(idx);
+    client.flush_send(idx);
   }
   {
     EXPECT_THROW(client.submit_delta_send("UNKNOWN_REQ_ID", 1, 1, false), KVTransferException);
     req1.add_send_task(1, 1, true);
     client.submit_delta_send(req1.req_id, 1, 1, true);
-    client.start_send();
-    client.notify_event_record();
-    client.flush_send();
+    auto idx = client.start_send();
+    client.notify_event_record(idx);
+    client.flush_send(idx);
   }
 }
 
@@ -175,16 +175,16 @@ TEST(KVTransferClientTest, SendTo2) {
   client.submit_req_send("2", 1, req1.req_id,
                          1, false,
                          req1.src_blocks, req1.dst_blocks);
-  client.start_send();
-  client.flush_send();
+  auto idx35 = client.start_send();
+  client.flush_send(idx35);
 
   req1.add_send_task(1, 1, true);
   req0.add_send_task(1, 1, true);
   client.submit_delta_send(req0.req_id, 1, 1, true);
   client.submit_delta_send(req1.req_id, 1, 1, true);
-  client.start_send();
-  client.notify_event_record();
-  client.flush_send();
+  auto idx33 = client.start_send();
+  client.notify_event_record(idx33);
+  client.flush_send(idx33);
 }
 
 TEST(KVTransferClientTest, SendToPP2) {
@@ -220,13 +220,13 @@ TEST(KVTransferClientTest, SendToPP2) {
   client.submit_req_send("2", 1, req1.req_id,
                          1, false,
                          req1.src_blocks, req1.dst_blocks);
-  client.start_send();
-  client.flush_send();
+  auto idx36 = client.start_send();
+  client.flush_send(idx36);
 
   req1.add_send_task(1, 1, true);
   req0.add_send_task(1, 1, true);
   client.submit_delta_send(req0.req_id, 1, 1, true);
-  client.start_send();
-  client.notify_event_record();
-  client.flush_send();
+  auto zyidx34 = client.start_send();
+  client.notify_event_record(zyidx34);
+  client.flush_send(zyidx34);
 }

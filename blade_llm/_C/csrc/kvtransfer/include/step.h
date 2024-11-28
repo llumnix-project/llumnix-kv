@@ -11,15 +11,9 @@ class Step {
   const size_t step_idx;
   explicit Step(size_t i) : step_idx(i) {}
   void wait_layer_ready(uint32_t layer_i);
-  void notify_layer_ready(uint32_t layer_i);
-  void start_one();
-  void finish_one();
-  bool check_done();
+  uint32_t notify_layer_ready(uint32_t layer_i);
  private:
   SyncSemaphore data_signal_;
-  SyncSemaphore record_signal;
-  std::atomic_size_t start_cnt_{};
-  std::atomic_size_t finish_cnt_{};
 };
 
 class StepGuard {
@@ -42,13 +36,11 @@ class StepGuard {
   [[nodiscard]] size_t step_id() const;
   std::shared_ptr<Step>& step();
   void wait_layers();
-  uint32_t ready_layers();
   void after_record_one();
   void after_record_all();
   void layer_ready_all();
 
  private:
-  std::atomic_size_t ready_layers_{0};
   std::shared_ptr<Step> step_;
   SyncSemaphore record_signal_;
   ICUDABarrier *cu_barrier_;

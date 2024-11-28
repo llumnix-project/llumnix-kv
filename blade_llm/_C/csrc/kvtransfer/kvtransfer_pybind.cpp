@@ -103,25 +103,24 @@ void submit_delta_send(const std::string &req_id,
   }
 }
 
-void start_send() {
-  if (KV_CLIENT != nullptr) {
-    KV_CLIENT->start_send();
-  } else {
+size_t start_send() {
+  if (KV_CLIENT == nullptr) {
     throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv client is not initialized");
   }
+  return KV_CLIENT->start_send();
 }
 
-void notify_event_record() {
+void notify_event_record(size_t step_id) {
   if (KV_CLIENT != nullptr) {
-    KV_CLIENT->notify_event_record();
+    KV_CLIENT->notify_event_record(step_id);
   } else {
     throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv client is not initialized");
   }
 };
 
-void flush_send() {
+void flush_send(size_t step_id) {
   if (KV_CLIENT != nullptr) {
-    KV_CLIENT->flush_send();
+    KV_CLIENT->flush_send(step_id);
   } else {
     throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv client is not initialized");
   }

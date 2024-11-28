@@ -172,7 +172,7 @@ void KvTransferClient::submit_delta_send(const RequestId &req_id,
   }
 }
 
-void KvTransferClient::start_send() {
+size_t KvTransferClient::start_send() {
   LOG(INFO) << "KVT client: start send step: " << step_id_ << " with " << reqs_.size() << " requests;";
   auto step = std::make_shared<Step>(step_id_++);
   auto batch_reqs = std::make_shared<std::vector<ReqSendTask>>();
@@ -194,34 +194,32 @@ void KvTransferClient::start_send() {
   auto ctx = context();
   auto step_guard = std::make_shared<StepGuard>(ctx, step);
   single_thd_.spawn([step_guard]() {
+#ifndef NDEBUG
+    // see https://project.aone.alibaba-inc.com/v2/project/664220/req/60271832
+    usleep(10 * 1000);  // sleep 10ms
+#endif
     LOG(INFO) << "KVT client: (step " << step_guard->step_id() << "): start to sync data ready by layer...";
     TimeWatch start;
     step_guard->wait_layers();
     LOG(INFO) << "KVT client: (step " << step_guard->step_id()
               << "): notify all layer ready, elapse: " << start.get_elapse_ms() << " ms;";
   });
-  step_guards_.push(step_guard);
+  last_step_guard_ = std::move(step_guard);
+  return last_step_guard_->step_id();
 }
 
-void KvTransferClient::notify_event_record() {
-  if (!step_guards_.empty()) {
-    step_guards_.back()->after_record_one();
-  } else {
+void KvTransferClient::notify_event_record(size_t step_id) {
+  if (!last_step_guard_ || last_step_guard_->step_id() != step_id) {
     throw KVTransferException(ErrorKind::INVALID_OPERATION, "event record before step start;");
   }
+  last_step_guard_->after_record_one();
 }
 
-void KvTransferClient::flush_send() {
-  if (!step_guards_.empty()) {
-    step_guards_.back()->layer_ready_all();
-    while (!step_guards_.empty()) {
-      if (step_guards_.front()->step()->check_done()) {
-        step_guards_.pop();
-      } else {
-        break;
-      }
-    }
+void KvTransferClient::flush_send(size_t step_id) {
+  if (!last_step_guard_ || last_step_guard_->step_id() != step_id) {
+    throw KVTransferException(ErrorKind::INVALID_OPERATION, "event record before step start;");
   }
+  last_step_guard_->layer_ready_all();
 }
 
 bool KvTransferClient::check_transfer_done(const RequestId &req_id) {

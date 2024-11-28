@@ -239,8 +239,6 @@ void KvSendStub::start_async() {
     }
     if (send_blocks.empty()) {
       assert(finished_req.empty());
-      // see KvSendStub.send_batch, 这里需要 finish
-      batch.step->finish_one();
       continue;
     }
 
@@ -259,7 +257,6 @@ void KvSendStub::start_async() {
       }
       ch_->flush();
       auto elapse = start.get_elapse_us();
-      batch.step->finish_one();
 
       uint64_t send_notify_us = 0;
       if (!finished_req.empty()) {
@@ -325,7 +322,6 @@ void KvSendStub::send_batch(const BatchSendTask &batch) {
   auto num_tasks = batch.tasks->size();
   if (num_tasks > 0) {
     auto task = batch;
-    batch.step->start_one();
     send_tasks_.push(std::move(task));
   }
 }
