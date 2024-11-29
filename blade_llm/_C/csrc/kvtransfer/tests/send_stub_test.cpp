@@ -176,19 +176,16 @@ static void test_parse_block_generate(int p_rank, int d_rank) {
   EXPECT_EQ(tx.check_state(), StubState::WORKING);
 
   {
+    auto step_0 = std::make_shared<Step>(0);
+    BatchSendTask task(step_0);
+
     std::vector<RequestInfo *> reqs;
     // the first send;
     RequestInfo req0("1", 0, "req_id00000000000000000000000000", {0, 1, 2}, {4, 5, 6});
-    req0.add_send_task(0, 8, false);
+    task.tasks.emplace_back(&req0, 0, 8, false);
     reqs.push_back(&req0);
 
-    auto step_0 = std::make_shared<Step>(0);
-    auto tasks = std::make_shared<std::vector<ReqSendTask>>();
-    for (auto& r : reqs) {
-      r->pop_tasks(*tasks);
-    }
-    BatchSendTask task(step_0, std::move(tasks));
-    tx.send_batch(task);
+    tx.send_batch(std::move(task));
     step_0->notify_layer_ready(num_layers);
     while (flush_cnt->load() < 1) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -382,19 +379,16 @@ static void dgtp_test_parse_block_generate(int p_rank, int d_rank) {
   EXPECT_EQ(tx.check_state(), StubState::WORKING);
 
   {
+    auto step_0 = std::make_shared<Step>(0);
+    BatchSendTask task(step_0);
+
     std::vector<RequestInfo *> reqs;
     // the first send;
     RequestInfo req0("1", 0, "req_id00000000000000000000000000", {0, 1, 2}, {4, 5, 6});
-    req0.add_send_task(0, 8, false);
+    task.tasks.emplace_back(&req0, 0, 8, false);
     reqs.push_back(&req0);
 
-    auto step_0 = std::make_shared<Step>(0);
-    auto tasks = std::make_shared<std::vector<ReqSendTask>>();
-    for (auto& r : reqs) {
-      r->pop_tasks(*tasks);
-    }
-    BatchSendTask task(step_0, std::move(tasks));
-    tx.send_batch(task);
+    tx.send_batch(std::move(task));
     step_0->notify_layer_ready(num_layers);
     while (flush_cnt->load() < 1) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -581,19 +575,16 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
   tx.start();
   EXPECT_EQ(tx.check_state(), StubState::WORKING);
   {
+    auto step_0 = std::make_shared<Step>(0);
+    BatchSendTask task(step_0);
+
     std::vector<RequestInfo *> reqs;
     // the first send;
     RequestInfo req0("1", 0, "req_id00000000000000000000000000", {0, 1, 2}, {4, 5, 6});
-    req0.add_send_task(0, 8, false);
+    task.tasks.emplace_back(&req0, 0, 8, false);
     reqs.push_back(&req0);
 
-    auto step_0 = std::make_shared<Step>(0);
-    auto tasks = std::make_shared<std::vector<ReqSendTask>>();
-    for (auto& r : reqs) {
-      r->pop_tasks(*tasks);
-    }
-    BatchSendTask task(step_0, std::move(tasks));
-    tx.send_batch(task);
+    tx.send_batch(std::move(task));
     step_0->notify_layer_ready(num_layers);
     while (flush_cnt->load() < 1) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -619,18 +610,15 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
     EXPECT_EQ(flush.dst_worker_id, 0);
   }
   {
+    auto step_1 = std::make_shared<Step>(1);
+    BatchSendTask task(step_1);
+
     // the second send;
     std::vector<RequestInfo *> reqs;
     RequestInfo req1("1", 0, "req_id00000000000000000000000001", {0, 1, 2}, {4, 5, 6});
-    req1.add_send_task(0, 17, false);
+    task.tasks.emplace_back(&req1, 0, 17, false);
     reqs.push_back(&req1);
-    auto step_1 = std::make_shared<Step>(1);
-    auto tasks = std::make_shared<std::vector<ReqSendTask>>();
-    for (auto& r : reqs) {
-      r->pop_tasks(*tasks);
-    }
-    BatchSendTask task(step_1, std::move(tasks));
-    tx.send_batch(task);
+    tx.send_batch(std::move(task));
     step_1->notify_layer_ready(num_layers);
     while (flush_cnt->load() < 2) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -659,21 +647,15 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
     EXPECT_EQ(flush.dst_worker_id, 0);
   }
   {
+    auto step_2 = std::make_shared<Step>(2);
+    BatchSendTask task(step_2);
+
     // the third send
     std::vector<RequestInfo *> reqs;
-    auto tasks = std::make_shared<std::vector<ReqSendTask>>();
     RequestInfo req3("1", 0, "req_id00000000000000000000000002", {3, 4, 5}, {7, 8, 9});
-    req3.add_send_task(0, 17, false);
-    req3.pop_tasks(*tasks);
-    tasks->clear();
-    req3.add_send_task(17, 16, true);
+    task.tasks.emplace_back(&req3, 17, 16, true);
     reqs.push_back(&req3);
-    auto step_2 = std::make_shared<Step>(2);
-    for (auto& r : reqs) {
-      r->pop_tasks(*tasks);
-    }
-    BatchSendTask task(step_2, std::move(tasks));
-    tx.send_batch(task);
+    tx.send_batch(std::move(task));
     step_2->notify_layer_ready(num_layers);
     while (flush_cnt->load() < 3) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -733,9 +715,11 @@ TEST(SendStubTest, UseMockChannel) {
   ctx.set_layer_data_address(0, {0, 8 * bs});
   uint32_t num_layers = 2;
 
+  auto step_0 = std::make_shared<Step>(0);
+  BatchSendTask task(step_0);
   std::vector<RequestInfo *> reqs;
   RequestInfo req0("1", 0, "req_id00000000000000000000000000", {0, 1, 2}, {4, 5, 6});
-  req0.add_send_task(0, 8, false);
+  task.tasks.emplace_back(&req0, 0, 8, false);
   reqs.push_back(&req0);
   IpcBlock expect_data(0, 4 * bs, 8 * ts);
 
@@ -747,13 +731,7 @@ TEST(SendStubTest, UseMockChannel) {
 
   auto tx = KvSendStub(dst_info, src_info, 0, num_layers, std::make_unique<ProxyChannel>(&channel));
   tx.start();
-  auto step_0 = std::make_shared<Step>(0);
-  auto tasks = std::make_shared<std::vector<ReqSendTask>>();
-  for (auto& r : reqs) {
-    r->pop_tasks(*tasks);
-  }
-  BatchSendTask task(step_0, std::move(tasks));
-  tx.send_batch(task);
+  tx.send_batch(std::move(task));
   step_0->notify_layer_ready(num_layers);
   usleep(3 * 1000 * 1000);  // 3s
 }

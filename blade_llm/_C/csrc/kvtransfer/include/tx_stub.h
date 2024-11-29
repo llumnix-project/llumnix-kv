@@ -18,13 +18,23 @@ namespace blade_llm {
 struct BatchSendTask {
   BatchSendTask() = default;
 
-  BatchSendTask(std::shared_ptr<Step> s, std::shared_ptr<std::vector<ReqSendTask>> t):
-    step(std::move(s)),
-    tasks(std::move(t)) {}
+  BatchSendTask(std::shared_ptr<Step> s) noexcept:
+    step(std::move(s)) {}
 
+  BatchSendTask(const BatchSendTask&) = delete;
+
+  BatchSendTask(BatchSendTask&& other) noexcept:
+    step(std::move(other.step)),
+    tasks(std::move(other.tasks)) {}
+
+  BatchSendTask& operator=(BatchSendTask&& other) noexcept {
+    this->step = std::move(other.step);
+    this->tasks = std::move(other.tasks);
+    return *this;
+  }
 public:
   std::shared_ptr<Step> step;
-  std::shared_ptr<std::vector<ReqSendTask>> tasks;
+  std::vector<ReqSendTask> tasks;
 };
 
 enum StubState {
@@ -39,7 +49,7 @@ class ISendStub {
  public:
   virtual void start() = 0;
   [[nodiscard]] virtual const WorkerInfo& dst_info() const = 0;
-  virtual void send_batch(const BatchSendTask &) = 0;
+  virtual void send_batch(BatchSendTask) = 0;
   virtual StubState check_state() = 0;
   virtual void stop() = 0;
   virtual ~ISendStub() = default;
@@ -76,7 +86,7 @@ class KvSendStub : public ISendStub, public noncopyable {
   [[nodiscard]] const WorkerInfo &dst_info() const override {
     return dst_info_;
   }
-  void send_batch(const BatchSendTask &) override;
+  void send_batch(BatchSendTask) override;
   StubState check_state() override;
   void stop() override;
   ~KvSendStub() override;

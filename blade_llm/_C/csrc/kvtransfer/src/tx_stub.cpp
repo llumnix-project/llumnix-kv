@@ -224,12 +224,11 @@ void KvSendStub::start_async() {
 
     assert(finished_req.empty());
     assert(send_blocks.empty());
-    for (const auto& task : *batch.tasks) {
-      if (task.new_tokens <= 0 ||
-          task.dst_inst_id() != dst_id ||
-          task.dst_worker_id() != dst_worker_id) {
-        continue;
-      }
+    assert(!batch.tasks.empty());
+    for (const auto& task : batch.tasks) {
+      assert(task.new_tokens > 0);
+      assert(task.dst_inst_id() == dst_id);
+      assert(task.dst_worker_id() == dst_worker_id);
 
       parse_block_send(&src_info_, &dst_info_, &task, send_blocks);
 
@@ -237,10 +236,7 @@ void KvSendStub::start_async() {
         finished_req.emplace_back(&task);
       }
     }
-    if (send_blocks.empty()) {
-      assert(finished_req.empty());
-      continue;
-    }
+    assert(!send_blocks.empty());
 
     auto const step_idx = batch.step->step_idx;
     auto const sb_num = send_blocks.size();
@@ -318,12 +314,9 @@ void KvSendStub::start() {
   }
 }
 
-void KvSendStub::send_batch(const BatchSendTask &batch) {
-  auto num_tasks = batch.tasks->size();
-  if (num_tasks > 0) {
-    auto task = batch;
-    send_tasks_.push(std::move(task));
-  }
+void KvSendStub::send_batch(BatchSendTask batch) {
+  assert(!batch.tasks.empty());
+  send_tasks_.push(std::move(batch));
 }
 
 void KvSendStub::stop() {

@@ -99,7 +99,7 @@ class ReqSendTask {
   const RequestInfo* const req_ = nullptr;
 public:
   const uint32_t seen_tokens{0};
-  const uint32_t new_tokens{0};
+  const uint32_t new_tokens{0};  // always gt 0.
   const bool reach_last_token{false};
 public:
   ReqSendTask(RequestInfo* req, uint32_t seen_, uint32_t new_, bool last_):
@@ -146,8 +146,10 @@ class RequestInfo {
   const std::vector<uint32_t> dst_blocks;
  private:
   mutable std::atomic_bool is_all_transferred_{false};
-  std::vector<ReqSendTask> task_;
+#ifndef NDEBUG
   uint32_t last_seen_ = 0;
+  bool has_last_ = false;
+#endif
 
  public:
   RequestInfo(const InstanceId& dst_inst_id_,
@@ -164,27 +166,19 @@ class RequestInfo {
   RequestInfo(const RequestInfo&) = delete;
   RequestInfo(RequestInfo&&) = delete;
 
-  void add_send_task(uint32_t seen, uint32_t new_tokens, bool has_last) {
-    RTCHECK(seen == this->last_seen_);
+  void update_send(uint32_t seen, uint32_t new_tokens, bool has_last) {
+#ifndef NDEBUG
+    assert(!this->has_last_);
+    assert(this->last_seen_ == seen);
+    assert(new_tokens > 0);
     this->last_seen_ += new_tokens;
-    this->task_.emplace_back(this, seen, new_tokens, has_last);
+    this->has_last_ = has_last;
+#endif
+    return ;
   }
 
   bool is_all_transferred() const {
     return is_all_transferred_.load(std::memory_order_acquire);
-  }
-
-  void pop_tasks(std::vector<ReqSendTask>& out) {
-    out.reserve(out.size() + this->task_.size());
-    for (auto&& task : this->task_) {
-      out.emplace_back(std::move(task));
-    }
-    this->task_.clear();
-  }
-
-  // ONLY FOR TEST
-  const auto& tasks() const noexcept {
-    return this->task_;
   }
 
  private:

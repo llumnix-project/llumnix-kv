@@ -54,11 +54,17 @@ class KvTransferClient : public noncopyable {
   void enable_auto_connect() { auto_connect_ = true; }
 
  private:
+  void add_send_task(RequestInfo* reqinfo, uint32_t seen, uint32_t new_tokens, bool has_last);
+ private:
   bool auto_connect_{false};
   size_t step_id_{0};
   std::unique_ptr<Context> ctx_;
   std::unordered_map<RequestId, std::vector<std::unique_ptr<RequestInfo>>> reqs_;
   std::unordered_map<InstanceId, std::vector<SendStub>> targets_;
+  // 用来临时暂存 submit_req_send/submit_delta_send 创建的 send task.
+  // start_send() 会清空该字段.
+  // targets_tasks_buf_ value 长度一般是 p_info->tp_size / d_info->tp_size; 约 1/2/4.
+  std::unordered_map<InstanceId, std::vector<std::pair<WorkerId, BatchSendTask>>> targets_tasks_buf_;
   std::shared_ptr<StepGuard> last_step_guard_;  // may be null.
   std::unique_ptr<ISendStubFactory> stub_factory_;
   ThreadPool single_thd_;

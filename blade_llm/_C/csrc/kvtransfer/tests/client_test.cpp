@@ -11,13 +11,33 @@ using ::testing::ElementsAre;
 
 using namespace blade_llm;
 
+struct TestRequestInfo : public RequestInfo {
+  std::vector<ReqSendTask> task_;
+public:
+  using RequestInfo::RequestInfo;
+
+  void add_send_task(uint32_t seen, uint32_t new_tokens, bool has_last) {
+    auto& self = *this;
+    self.update_send(seen, new_tokens, has_last);
+    self.task_.emplace_back(this, seen, new_tokens, has_last);
+  }
+
+  void pop_tasks(std::vector<ReqSendTask>& out) {
+    out.reserve(out.size() + this->task_.size());
+    for (auto&& task : this->task_) {
+      out.emplace_back(std::move(task));
+    }
+    this->task_.clear();
+  }
+};
+
 MATCHER_P(batchCheck, expect_req_info, "unexpected batch") {
   auto expect = std::vector<ReqSendTask>();
   for (auto* r : expect_req_info) {
     r->pop_tasks(expect);
   }
   auto tasks = std::vector<const ReqSendTask*>();
-  for (const auto& t : *arg.tasks) {
+  for (const auto& t : arg.tasks) {
     if (t.dst_inst_id() == expect_req_info[0]->dst_inst_id &&
         t.dst_worker_id() == expect_req_info[0]->dst_worker_id) {
       tasks.emplace_back(&t);
@@ -46,7 +66,7 @@ class MockSendStub : public ISendStub {
   MockSendStub() = default;
   MOCK_METHOD(void, start, (), (override));
   MOCK_METHOD(const WorkerInfo&, dst_info, (), (const, override));
-  MOCK_METHOD(void, send_batch, (const BatchSendTask&), (override));
+  MOCK_METHOD(void, send_batch, (BatchSendTask), (override));
   MOCK_METHOD(StubState, check_state, (), (override));
   MOCK_METHOD(void, stop, (), (override));
 };
@@ -70,8 +90,8 @@ class ProxyStub : public ISendStub {
     return info_;
   }
 
-  void send_batch(const BatchSendTask &batch) override {
-    stub->send_batch(batch);
+  void send_batch(BatchSendTask batch) override {
+    stub->send_batch(std::move(batch));
   }
 
   StubState check_state() override {
@@ -105,9 +125,9 @@ class FakeStubFactory : public ISendStubFactory {
 
 TEST(KVTransferClientTest, SendTo1) {
   auto ctx = std::make_unique<Context>("1", 1);
-  RequestInfo req1("2", 1, "REQ00000001", {0, 1}, {0, 1});
+  TestRequestInfo req1("2", 1, "REQ00000001", {0, 1}, {0, 1});
   req1.add_send_task(0, 1, false);
-  std::vector<RequestInfo*> expect_reqs{&req1};
+  std::vector<TestRequestInfo*> expect_reqs{&req1};
   MockSendStub stub;
 
   EXPECT_CALL(stub, start())
@@ -145,12 +165,12 @@ TEST(KVTransferClientTest, SendTo1) {
 
 TEST(KVTransferClientTest, SendTo2) {
   auto ctx = std::make_unique<Context>("1", 1);
-  RequestInfo req0("3", 1, "REQ00000000", {0, 1}, {0, 1});
+  TestRequestInfo req0("3", 1, "REQ00000000", {0, 1}, {0, 1});
   req0.add_send_task(0, 1, false);
-  RequestInfo req1("2", 1, "REQ00000001", {2, 3}, {2, 3});
+  TestRequestInfo req1("2", 1, "REQ00000001", {2, 3}, {2, 3});
   req1.add_send_task(0, 1, false);
-  std::vector<RequestInfo*> expect_reqs0{&req1};
-  std::vector<RequestInfo*> expect_reqs1{&req0};
+  std::vector<TestRequestInfo*> expect_reqs0{&req1};
+  std::vector<TestRequestInfo*> expect_reqs1{&req0};
 
   MockSendStub stub0;
   EXPECT_CALL(stub0, check_state())
@@ -189,12 +209,12 @@ TEST(KVTransferClientTest, SendTo2) {
 
 TEST(KVTransferClientTest, SendToPP2) {
   auto ctx = std::make_unique<Context>("1", 1);
-  RequestInfo req0("3", 1, "REQ00000001", {0, 1}, {0, 1});
+  TestRequestInfo req0("3", 1, "REQ00000001", {0, 1}, {0, 1});
   req0.add_send_task(0, 1, false);
-  RequestInfo req1("2", 1, "REQ00000001", {0, 1}, {2, 3});
+  TestRequestInfo req1("2", 1, "REQ00000001", {0, 1}, {2, 3});
   req1.add_send_task(0, 1, false);
-  std::vector<RequestInfo*> expect_reqs0{&req1};
-  std::vector<RequestInfo*> expect_reqs1{&req0};
+  std::vector<TestRequestInfo*> expect_reqs0{&req1};
+  std::vector<TestRequestInfo*> expect_reqs1{&req0};
 
   MockSendStub stub0;
   EXPECT_CALL(stub0, check_state())
