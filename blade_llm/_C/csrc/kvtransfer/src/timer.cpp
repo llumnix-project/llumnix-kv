@@ -15,4 +15,11 @@ size_t TimeWatch::get_elapse_us() {
   auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
   return duration.count();
 }
+
+size_t TimeWatch::get_elapse_ns() {
+  auto end = std::chrono::steady_clock::now();
+  auto duration = std::chrono::nanoseconds(end - start);
+  return duration.count();
+}
+
 }

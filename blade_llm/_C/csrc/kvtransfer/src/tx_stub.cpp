@@ -221,6 +221,8 @@ void KvSendStub::start_async() {
 
     TimeWatch start;  // iterator begin
     uint64_t wait_time_us = 0;
+    auto const queue_dur = start.start_ts() - batch.step->start_send_ts;
+    auto const queue_us = std::chrono::duration_cast<std::chrono::microseconds>(queue_dur).count();
 
     assert(finished_req.empty());
     assert(send_blocks.empty());
@@ -252,7 +254,7 @@ void KvSendStub::start_async() {
         ch_->send_data(i, send_blocks);
       }
       ch_->flush();
-      auto elapse = start.get_elapse_us();
+      auto elapse_us = start.get_elapse_us();
 
       uint64_t send_notify_us = 0;
       if (!finished_req.empty()) {
@@ -273,8 +275,11 @@ void KvSendStub::start_async() {
       LOG(INFO) << "KVT tx_stub. dst_id=" << dst_id << ",dst_worker_id=" << dst_worker_id
                 << ",step_idx=" << step_idx << ",finished_req_size=" << finished_req.size()
                 << ",blocks=" << sb_num << "->" << cnt << ",block_size(min/max/sum)="
-                << min << '/' << max << '/' << total << ",total_us=" << elapse
-                << ",wait_us=" << wait_time_us << ",send_notify_us=" << send_notify_us;
+                << min << '/' << max << '/' << total
+                << ",send_non_overlay_us=" << elapse_us - wait_time_us
+                << ",wait_us=" << wait_time_us
+                << ",send_notify_us=" << send_notify_us
+                << ",queue_us=" << queue_us;
 
       send_blocks.clear();
       finished_req.clear();

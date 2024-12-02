@@ -5,13 +5,22 @@
 #include <chrono>
 
 namespace blade_llm {
+
+using SteadyClock = std::chrono::steady_clock;
+using Timepoint = SteadyClock::time_point;
+
 class TimeWatch {
  public:
   TimeWatch();
   size_t get_elapse_ms();
   size_t get_elapse_us();
+  size_t get_elapse_ns();
+
+  auto start_ts() const noexcept {
+    return this->start;
+  }
  private:
-  std::chrono::time_point<std::chrono::steady_clock> start;
+  Timepoint start;
 };
 
 static auto get_unix_timestamp() {

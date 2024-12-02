@@ -754,6 +754,9 @@ std::tuple<uint64_t, uint64_t, uint64_t> method_copygpuwrite(ClientCtx& ctx, con
   }
   group_by_dst(input);
 
+  uint64_t sync_max = 0;
+  uint64_t sync_min = UINT64_MAX;
+  uint64_t sync_sum = 0;
   for (int i = 0; i < rounds; ++i) {
     auto now = std::chrono::steady_clock::now();
 
@@ -800,6 +803,10 @@ std::tuple<uint64_t, uint64_t, uint64_t> method_copygpuwrite(ClientCtx& ctx, con
 
     auto cuda_rt = cudaStreamSynchronize(ctx.cpy_stream);
     RTCHECK(cuda_rt == cudaSuccess);
+    uint64_t sync_dur_ns = std::chrono::nanoseconds(std::chrono::steady_clock::now() - now).count();
+    sync_max = std::max(sync_max, sync_dur_ns);
+    sync_min = std::min(sync_min, sync_dur_ns);
+    sync_sum += sync_dur_ns;
 
     WriteBatch(ctx.chs(), std::move(datasp));
 
@@ -809,6 +816,11 @@ std::tuple<uint64_t, uint64_t, uint64_t> method_copygpuwrite(ClientCtx& ctx, con
     sum += dur_ns;
   }
 
+  printf("sync_min_us=%f sync_max_us=%f sync_sum_us=%f, sync_avg_us=%f\n",
+    double(sync_min) / 1000,
+    double(sync_max) / 1000,
+    double(sync_sum) / 1000,
+    double(sync_sum) / 1000 / rounds);
   return {min, max, sum};
 }
 
@@ -882,7 +894,7 @@ ZY_IS_SERVER=1 ZY_TOKEN_SIZE=1024 ZY_BLOCK_SIZE=65536 ZY_BLOCK_NUM=128 ZY_SERVER
 
 ZY_IS_SERVER=0 ZY_TOKEN_SIZE=2048 ZY_BLOCK_SIZE=131072 ZY_SRV_TOKEN_SIZE=1024 ZY_SRV_BLOCK_SIZE=65536 ZY_BLOCK_NUM=128 ZY_ROUNDS=80  ZY_METHOD=copywrite ZY_SERVER_PORT=33333 ZY_SERVER_IP=22.10.109.211 ZY_GPU_ID=7 ZY_NIC_DEV=mlx5_7 ZY_SERVER_ADDR=0x7fdb44800000 ZY_SERVER_RKEY=331331 ZY_BLOCK_IDS=0   ./kvbench
 
-ZY_IS_SERVER=0 ZY_TOKEN_SIZE=2048 ZY_BLOCK_SIZE=131072 ZY_SRV_TOKEN_SIZE=1024 ZY_SRV_BLOCK_SIZE=65536 ZY_BLOCK_NUM=128 ZY_ROUNDS=80 ZY_BLOCK_IDS=0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,82,84,86,88,90,92,94,96,98,100,102 ZY_SERVER_PORT=33333 ZY_SERVER_IP=22.10.109.211 ZY_METHOD=copygpuwrite ZY_GPU_ID=7 ZY_NIC_DEV=mlx5_7 ZY_SERVER_ADDR=0x7f7a84800000 ZY_SERVER_RKEY=331374 ./kvbench
+ZY_IS_SERVER=0 ZY_TOKEN_SIZE=2048 ZY_BLOCK_SIZE=131072 ZY_SRV_TOKEN_SIZE=1024 ZY_SRV_BLOCK_SIZE=65536 ZY_BLOCK_NUM=128 ZY_ROUNDS=80 ZY_BLOCK_IDS=0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,82,84,86,88,90,92,94,96,98,100,102 ZY_SERVER_PORT=33333 ZY_SERVER_IP=22.10.109.211 ZY_METHOD=copygpuwrite ZY_GPU_ID=7 ZY_NIC_DEV=mlx5_7 ZY_SERVER_ADDR=0x7f42c4800000 ZY_SERVER_RKEY=331346 ./kvbench
 
 ===== ppu
 

@@ -195,7 +195,6 @@ void KvTransferClient::submit_delta_send(const RequestId &req_id,
 }
 
 size_t KvTransferClient::start_send() {
-  LOG(INFO) << "KVT client: start send step: " << step_id_ << " with " << reqs_.size() << " requests;";
   auto step = std::make_shared<Step>(step_id_++);
 
   for (auto& [inst_id, workers_task] : targets_tasks_buf_) {
@@ -225,12 +224,16 @@ size_t KvTransferClient::start_send() {
     // see https://project.aone.alibaba-inc.com/v2/project/664220/req/60271832
     usleep(10 * 1000);  // sleep 10ms
 #endif
-    LOG(INFO) << "KVT client: (step " << step_guard->step_id() << "): start to sync data ready by layer...";
-    TimeWatch start;
+
+    auto start = TimeWatch();
     step_guard->wait_layers();
-    LOG(INFO) << "KVT client: (step " << step_guard->step_id()
-              << "): notify all layer ready, elapse: " << start.get_elapse_ms() << " ms;";
+    step_guard->wait_layers_exec_ns = start.get_elapse_ns();
+
+    auto wait_dur = start.start_ts() - step_guard->step()->start_send_ts;
+    auto wait_ns = std::chrono::nanoseconds(wait_dur).count();
+    step_guard->wait_layers_queue_ns = wait_ns;
   });
+  assert(!last_step_guard_);
   last_step_guard_ = std::move(step_guard);
   return last_step_guard_->step_id();
 }
@@ -249,6 +252,10 @@ void KvTransferClient::flush_send(size_t step_id) {
     throw KVTransferException(ErrorKind::INVALID_OPERATION, "event record before step start;");
   }
   last_step_guard_->layer_ready_all();
+
+  auto exec_ns = SteadyClock::now() - last_step_guard_->step()->start_send_ts;
+  last_step_guard_->python_exec_ns = std::chrono::nanoseconds(exec_ns).count();
+  last_step_guard_.reset();
 }
 
 bool KvTransferClient::check_transfer_done(const RequestId &req_id) {
