@@ -24,11 +24,16 @@ class FakeChannel: public IChannel {
   const std::vector<uint64_t> src_layer;
   const std::vector<uint64_t> dst_layer;
   std::queue<std::string> *notifies;
+  std::vector<IpcBlock>* data_;
+
   FakeChannel(Context *ctx, const std::vector<uint64_t> &dst, std::queue<std::string> *n) :
     src_layer(ctx->layer_data_address()), dst_layer(dst), notifies(n) {}
   void connect(const WorkerInfo &dst_info) override {};
-  void send_data(size_t layer_index, const std::vector<IpcBlock> &data) override {
-    for(const auto& b: data) {
+  void register_data(std::vector<IpcBlock>& data, TPKind) override {
+    this->data_ = &data;
+  }
+  void send_data(size_t layer_index) override {
+    for(const auto& b: *this->data_) {
       auto src_layer_ptr = reinterpret_cast<const char *>(src_layer[layer_index]);
       auto src_ptr = src_layer_ptr + b.src_offset;
       auto dst_layer_ptr = reinterpret_cast<char *>(dst_layer[layer_index]);
@@ -41,7 +46,7 @@ class FakeChannel: public IChannel {
       notifies->push(req->req_id());
     }
   };
-  void flush() override {};
+  void flush(std::string&) override {};
   void close() override {};
 };
 

@@ -197,11 +197,14 @@ TEST(RDMAChannelTest, TestTransefer) {
     RequestInfo r("0", 0, "test_rdma", blocks, blocks);
     ReqSendTask t(&r, 0, 1, true);
     reqs.push_back(&t);
-    channel.send_data(0, {{0, 0, token_size}, {2 * token_size, 2 * token_size, token_size}});
-    channel.send_data(1, {{0, 0, token_size}, {2 * token_size, 2 * token_size, token_size}});
-    channel.flush();
+    std::vector<IpcBlock> data{{0, 0, token_size}, {2 * token_size, 2 * token_size, token_size}};
+    channel.register_data(data, TPKind::PEQD);
+    channel.send_data(0);
+    channel.send_data(1);
+    std::string out;
+    channel.flush(out);
     auto nf = CopySource<const ReqSendTask *>::from(reqs);
-    ((IChannel*)&channel)->send_notification(nf.get());
+    channel.send_notification(nf.get());
     channel.close();
     cudaFree(layer_0);
     cudaFree(layer_1);

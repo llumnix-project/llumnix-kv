@@ -177,16 +177,27 @@ void CudaIpcChannel::connect(const blade_llm::WorkerInfo &dst_info) {
   data_writer_.init(&ipc_handles);
   notify_writer_.connect(dst_info);
 }
-void CudaIpcChannel::send_data(size_t layer_index, const std::vector<IpcBlock> &data) {
-  data_writer_.write(layer_index, data);
+
+void CudaIpcChannel::register_data(std::vector<IpcBlock>& data, TPKind) {
+  auto& self = *this;
+  assert(self.data_ == nullptr);
+  self.data_ = &data;
 }
+
+void CudaIpcChannel::send_data(size_t layer_index) {
+  data_writer_.write(layer_index, *data_);
+}
+
+void CudaIpcChannel::flush(std::string&) {
+  this->data_ = nullptr;
+}
+
 void CudaIpcChannel::send_notification(const std::vector<const ReqSendTask*>& reqs) {
   for (const auto* req : reqs) {
     notify_writer_.write(req->req_id(), req->dst_blocks());
   }
 }
 
-void CudaIpcChannel::flush() { /* do nothing  */ }
 void CudaIpcChannel::close() {
   data_writer_.close();
   notify_writer_.close();

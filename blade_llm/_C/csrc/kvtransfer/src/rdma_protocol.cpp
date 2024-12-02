@@ -8,6 +8,7 @@
 #include "assert.h"
 #include <fstream>
 #include <mutex>
+#include <numeric>
 
 #ifdef ENABLE_TORCH
 #include <c10/core/Storage.h>
@@ -701,20 +702,135 @@ accl::barex::XChannel *RDMAChannel::ch() noexcept {
   return self.chs_[idx];
 }
 
-void RDMAChannel::send_data(size_t layer_idx, const std::vector<IpcBlock> &data) {
-  auto &self = *this;
-  self.do_init();
-  auto datasp = std::make_shared<std::vector<rw_memp_t>>();
-  for (const auto &[src_offset, dst_offset, len] : data) {
-    if (len <= 0) {
+
+// group 之后, input 呈现出:
+// <src_off_1, dst_off_0, len1>
+// <src_off_2, dst_off_0, len2>
+// 这里意味着 src_off_1, len1; src_off_2, len2 的内容要写入 dst_off_0
+// <src_off_3, dst_off_1, len3>
+// <src_off_4, dst_off_1, len4>
+// <src_off_5, dst_off_1, len5>
+// return min_size, max_size, total_size, cnt
+static std::tuple<size_t, size_t, size_t, size_t> group_by_dst(std::vector<IpcBlock>& input) {
+  assert(!input.empty());
+
+  std::sort(input.begin(), input.end(),
+    [](const IpcBlock& x, const IpcBlock& y) { return x.dst_offset < y.dst_offset; });
+
+  size_t min_size = UINT64_MAX;
+  size_t max_size = 0;
+  size_t total_size = 0;
+  size_t cnt = 0;
+
+  size_t prev_idx = 0;
+  size_t prev_end = input[0].length + input[0].dst_offset;
+  for (size_t idx = 1; idx < input.size(); ++idx) {
+    auto& blk = input[idx];
+    if (blk.dst_offset > prev_end) {
+      cnt += 1;
+      size_t blksize = prev_end - input[prev_idx].dst_offset;
+      min_size = std::min(blksize, min_size);
+      max_size = std::max(blksize, max_size);
+      total_size += blksize;
+
+      prev_idx = idx;
+      prev_end = input[idx].length + input[idx].dst_offset;
       continue;
     }
+
+    if (blk.dst_offset == prev_end) {
+      input[idx].dst_offset = input[prev_idx].dst_offset;
+      prev_end += input[idx].length;
+      continue;
+    }
+
+    abort();
+  }
+
+  cnt += 1;
+  size_t blksize = prev_end - input[prev_idx].dst_offset;
+  min_size = std::min(blksize, min_size);
+  max_size = std::max(blksize, max_size);
+  total_size += blksize;
+  return {min_size, max_size, total_size, cnt};
+}
+
+void RDMAChannel::register_data(std::vector<IpcBlock>& data, TPKind kind) {
+  auto& self = *this;
+  assert(!data.empty());
+
+  assert(self.data_ == nullptr);
+  self.data_ = &data;
+  self.kind_ = kind;
+
+#ifndef NDEBUG
+  size_t total_len_debug = std::accumulate(data.begin(), data.end(), 0, [] (size_t acc, const IpcBlock& item) {
+    return acc + item.length;
+  });
+#endif
+
+  self.origin_sb_num_ = data.size();
+  if (kind == TPKind::PGTD) {
+    self.merged_sb_num_ = data.size();
+    self.sb_size_max_ = data[0].length;
+    self.sb_size_min_ = data[0].length;
+    self.sb_size_total_ = data[0].length * data.size();
+    return ;
+  }
+
+  if (kind == TPKind::PEQD) {
+    auto const [min, max, total, cnt] = merge_interval(data);
+    self.merged_sb_num_ = cnt;
+    self.sb_size_min_ = min;
+    self.sb_size_max_ = max;
+    self.sb_size_total_ = total;
+    assert(total_len_debug == self.sb_size_total_);
+    assert(self.merged_sb_num_ <= self.origin_sb_num_);
+
+    auto new_end = std::remove_if(data.begin(), data.end(), [] (const IpcBlock& item) {
+      return item.length == 0;
+    });
+    data.erase(new_end, data.end());
+    assert(data.size() == cnt);
+    assert(!data.empty());
+    return ;
+  }
+
+  assert(kind == TPKind::PLTD);
+  auto const [min, max, total, cnt] = group_by_dst(data);
+  self.merged_sb_num_ = cnt;
+  self.sb_size_min_ = min;
+  self.sb_size_max_ = max;
+  self.sb_size_total_ = total;
+  assert(self.merged_sb_num_ > 0);
+  assert(self.merged_sb_num_ <= self.origin_sb_num_);
+  assert(total_len_debug == self.sb_size_total_);
+
+  return ;
+}
+
+void RDMAChannel::send_data(size_t layer_idx) {
+  auto &self = *this;
+  assert(layer_idx < self.dst_layer_num_);
+  assert(self.dst_layer_num_ == self.ctx_->layer_mr().size());
+  assert(self.dst_layer_num_ == self.dst_ptrs_.size());
+  assert(self.dst_layer_num_ == self.dst_rkeys_.size());
+  self.do_init();
+
+  if (self.kind_ == TPKind::PLTD) {
+    return self.send_data_pltd(layer_idx);
+  }
+
+  auto datasp = std::make_shared<std::vector<rw_memp_t>>();
+  const auto& data = *self.data_;
+  assert(!data.empty());
+  for (const auto &[src_offset, dst_offset, len] : data) {
+    assert(len > 0);
     assert(src_offset < self.ctx_->layer_blk_size);
     assert(len < self.ctx_->layer_blk_size);
     assert(src_offset + len <= self.ctx_->layer_blk_size);
     assert(dst_offset < self.dst_layer_blk_size_);
     assert(dst_offset + len <= self.dst_layer_blk_size_);
-    assert(layer_idx < self.dst_layer_num_);
 
     auto src_mr = self.ctx_->layer_mr()[layer_idx].mr();
     src_mr.buf += src_offset;
@@ -726,13 +842,122 @@ void RDMAChannel::send_data(size_t layer_idx, const std::vector<IpcBlock> &data)
     uint64_t raddr = reinterpret_cast<uint64_t>(rladdr + dst_offset);
     datasp->emplace_back(rw_memp_t{std::move(src_mr), raddr, rkey});
   }
-  if (datasp->empty()) {
-    return;
-  }
+  assert(!datasp->empty());
 
   auto fut = WriteBatch(self.ch(), std::move(datasp));
   self.write_futs_.emplace_back(std::move(fut));
   return;
+}
+
+
+[[nodiscard]] static std::future<void> WriteBySgList(XChannel* ch, uint64_t remote_addr, uint32_t rkey, std::shared_ptr<std::vector<memp_t>> prefills) {
+  auto pr = std::make_shared<std::promise<void>>();
+  auto fut = pr->get_future();
+  auto& datas = *prefills;
+
+  auto result = ch->WriteBySgList(datas,
+    remote_addr, rkey,
+    /* signal_peer */ false,
+    /* imm_data */ 0,
+    [prefills=std::move(prefills), pr=std::move(pr)] (Status s) {
+      // WriteBySgList 要求 prefills 直至 callback 中才能回收.
+      if (!s.IsOk()) {
+        auto ex = std::make_exception_ptr(std::runtime_error("Write ERR: " + s.ErrMsg()));
+        pr->set_exception(std::move(ex));
+        return;
+      }
+      pr->set_value();
+    });
+  if (result != BAREX_SUCCESS) {
+    auto ex = std::runtime_error("Write Submit Err: " + Status(result).ErrMsg());
+    return make_exp_future<void>(std::move(ex));
+  }
+
+  return fut;
+}
+
+void RDMAChannel::send_data_pltd(size_t layer_idx) {
+  auto& self = *this;
+  assert(self.kind_ == TPKind::PLTD);
+  assert(!self.chs_.empty());
+  assert(!self.data_->empty());
+  const auto& input = *self.data_;
+  uint64_t const rladdr = reinterpret_cast<uint64_t>(self.dst_ptrs_[layer_idx]);
+  auto const rkey = self.dst_rkeys_[layer_idx];
+
+#ifndef NDEBUG
+  uint64_t dst_len_debug = 0;
+#endif
+  uint64_t dst_offset = input[0].dst_offset;
+  auto prefills = std::make_shared<std::vector<memp_t>>();
+  assert(dst_offset < self.dst_layer_blk_size_);
+  {
+    const auto& blk = input[0];
+    auto src_mr = self.ctx_->layer_mr()[layer_idx].mr();
+    assert(blk.length > 0);
+    assert(blk.length < self.ctx_->layer_blk_size);
+    assert(blk.src_offset < self.ctx_->layer_blk_size);
+    assert(blk.src_offset + blk.length <= self.ctx_->layer_blk_size);
+    src_mr.buf += blk.src_offset;
+    src_mr.buf_len = blk.length;
+    prefills->emplace_back(std::move(src_mr));
+
+#ifndef NDEBUG
+    dst_len_debug += blk.length;
+#endif
+  }
+
+  for (size_t idx = 1; idx < input.size(); ++idx) {
+    const auto& blk = input[idx];
+    if (blk.dst_offset == dst_offset) {
+      auto src_mr = self.ctx_->layer_mr()[layer_idx].mr();
+      assert(blk.length > 0);
+      assert(blk.length < self.ctx_->layer_blk_size);
+      assert(blk.src_offset < self.ctx_->layer_blk_size);
+      assert(blk.src_offset + blk.length <= self.ctx_->layer_blk_size);
+      src_mr.buf += blk.src_offset;
+      src_mr.buf_len = blk.length;
+      prefills->emplace_back(std::move(src_mr));
+
+  #ifndef NDEBUG
+      dst_len_debug += blk.length;
+  #endif
+      continue;
+    }
+    assert(!prefills->empty());
+    assert(dst_len_debug > 0);
+    assert(dst_len_debug <= self.dst_layer_blk_size_);
+    assert(dst_offset + dst_len_debug <= self.dst_layer_blk_size_);
+    self.write_futs_.emplace_back(WriteBySgList(self.ch(), dst_offset + rladdr, rkey, std::move(prefills)));
+
+  #ifndef NDEBUG
+    dst_len_debug = 0;
+  #endif
+    dst_offset = blk.dst_offset;
+    prefills = std::make_shared<std::vector<memp_t>>();
+    assert(dst_offset < self.dst_layer_blk_size_);
+    {
+      auto src_mr = self.ctx_->layer_mr()[layer_idx].mr();
+      assert(blk.length > 0);
+      assert(blk.length < self.ctx_->layer_blk_size);
+      assert(blk.src_offset < self.ctx_->layer_blk_size);
+      assert(blk.src_offset + blk.length <= self.ctx_->layer_blk_size);
+      src_mr.buf += blk.src_offset;
+      src_mr.buf_len = blk.length;
+      prefills->emplace_back(std::move(src_mr));
+
+  #ifndef NDEBUG
+      dst_len_debug += blk.length;
+  #endif
+    }
+  }
+
+  assert(!prefills->empty());
+  assert(dst_len_debug > 0);
+  assert(dst_len_debug <= self.dst_layer_blk_size_);
+  assert(dst_offset + dst_len_debug <= self.dst_layer_blk_size_);
+  self.write_futs_.emplace_back(WriteBySgList(self.ch(), dst_offset + rladdr, rkey, std::move(prefills)));
+  return ;
 }
 
 void RDMAChannel::do_write(uint32_t layer_idx,
@@ -769,11 +994,20 @@ static void when_all_succeed(std::vector<std::future<void>> &futs) {
   return;
 }
 
-void RDMAChannel::flush() {
+void RDMAChannel::flush(std::string& outstr) {
   auto &self = *this;
-  std::vector<std::future<void>> futs;
-  std::swap(futs, self.write_futs_);
-  when_all_succeed(futs);
+  self.data_ = nullptr;
+
+  auto out = std::ostringstream();
+  out << "origin_sb_num=" << self.origin_sb_num_
+      << ",merged_sb_num=" << self.merged_sb_num_
+      << ",sb_size_min=" << self.sb_size_min_
+      << ",sb_size_max=" << self.sb_size_max_
+      << ",sb_size_total=" << self.sb_size_total_;
+  outstr = std::move(out).str();
+
+  when_all_succeed(self.write_futs_);
+  self.write_futs_.clear();
   return;
 }
 

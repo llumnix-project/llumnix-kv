@@ -4,6 +4,63 @@
 #include "protocol/rdma_protocol.h"
 
 namespace blade_llm {
+
+std::tuple<size_t, size_t, size_t, size_t> merge_interval(std::vector<IpcBlock> &input) {
+  size_t min_size = std::numeric_limits<size_t>::max();
+  size_t max_size = 0;
+  size_t total_size = 0;
+  size_t cnt = 0;
+  size_t prev_idx = 0;
+  std::sort(input.begin(), input.end(),
+            [](IpcBlock x, IpcBlock y) { return x.src_offset < y.src_offset; });
+  for (size_t idx = 1; idx < input.size(); ++idx) {
+    auto &pre_block = input[prev_idx];
+    assert(&pre_block.length == &(input[prev_idx].length));
+    auto &cur_block = input[idx];
+    assert(&cur_block.length == &(input[idx].length));
+
+    if (cur_block.src_offset > pre_block.src_offset + pre_block.length) {
+      // 不相邻.
+      min_size = std::min(min_size, pre_block.length);
+      max_size = std::max(max_size, pre_block.length);
+      total_size += pre_block.length;
+      cnt += 1;
+      prev_idx = idx;
+      continue;
+    }
+
+    if (cur_block.src_offset == pre_block.src_offset + pre_block.length) {
+      // 相邻
+      if (cur_block.dst_offset != pre_block.dst_offset + pre_block.length) {
+        // 但 dst 不相邻.
+        min_size = std::min(min_size, pre_block.length);
+        max_size = std::max(max_size, pre_block.length);
+        total_size += pre_block.length;
+        cnt += 1;
+        prev_idx = idx;
+        continue;
+      }
+
+      pre_block.length += cur_block.length;
+      cur_block.length = 0;
+      continue;
+    }
+    // 交错, 在 prefix cache 存在时可能存在这种情况, 目前 prefix cache 尚未开启.
+    abort();
+  }
+  if (prev_idx < input.size()) {
+    auto prev_len = input[prev_idx].length;
+    min_size = std::min(min_size, prev_len);
+    max_size = std::max(max_size, prev_len);
+    total_size += prev_len;
+    cnt += 1;
+  }
+  // 暂没必要..
+  // std::remove_if(input, [] len == 0)
+  return {min_size, max_size, total_size, cnt};
+}
+
+
 bool IpcBlock::operator==(const IpcBlock &other) const {
   return src_offset == other.src_offset &&
       dst_offset == other.dst_offset &&

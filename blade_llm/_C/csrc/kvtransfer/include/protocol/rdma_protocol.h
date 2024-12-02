@@ -167,19 +167,20 @@ class RDMAChannel : public IChannel, public noncopyable {
       src_worker_id_(worker_id),
       ctx_(ctx) {}
 
-  // init 在主线程调用, 尽量不要阻塞.
+  // connect 在主线程调用, 尽量不要阻塞.
   // write 在后台线程调用, 可以阻塞,
-  // 上层会确保 init happen-before write.
-  //
-  // 后续可以把 INotifyChannel, IDataChannel 合并. 这样一方面可以共用 barex channel. 另外一方面 write 可以
-  // 只需要发起并不需要等待实际写入结束, 由 notify_send_done 负责等待. 甚至这里 write 可以暂存请求在
-  // notify_send_done 时或者择机攒批发送.
+  // 上层会确保 connect happen-before write.
   void connect(const WorkerInfo &dst_info) override;
-  void send_data(size_t layer_index, const std::vector<IpcBlock> &data) override;
-  void flush() override;
+
+  void register_data(std::vector<IpcBlock>& data, TPKind kind) override;
+  void send_data(size_t layer_index) override;
+  void flush(std::string& out) override;
   void send_notification(const std::vector<const ReqSendTask*>& reqs) override;
+  using IChannel::send_notification;
 
  private:
+  void send_data_pltd(size_t layer_index);
+
   void do_write(uint32_t layer_idx,
                 size_t src_offset,
                 size_t dst_offset,
@@ -201,6 +202,14 @@ class RDMAChannel : public IChannel, public noncopyable {
   WorkerId src_worker_id_ = 0;
   int prev_ch_idx_ = 0;
 
+  std::vector<IpcBlock>* data_;
+  TPKind kind_ = TPKind::UNKNOWN;
+  // sb is send block~
+  size_t origin_sb_num_ = 0;
+  size_t merged_sb_num_ = 0;
+  size_t sb_size_min_ = 0;
+  size_t sb_size_max_ = 0;
+  size_t sb_size_total_ = 0;
   std::vector<std::future<void>> write_futs_;
   std::vector<std::future<void>> send_futs_;
 

@@ -88,14 +88,21 @@ class FakeChannel : public IChannel {
   uint32_t dst_worker_id;
   std::queue<Message> q;
   std::shared_ptr<std::atomic<int>> flush_cnt = std::make_shared<std::atomic<int>>(0);
+  std::vector<IpcBlock>* data_;
 
   FakeChannel() : q(), dst_inst_id("0"), dst_worker_id(INVALID_INST_WORKER_ID) {};
   void connect(const WorkerInfo &info) override {
     dst_inst_id = info.inst_id;
     dst_worker_id = info.worker_id;
   }
-  void send_data(size_t layer_idx, const std::vector<IpcBlock> &data) override {
-    for (const auto &[src_offset, dst_offset, length] : data) {
+
+  void register_data(std::vector<IpcBlock>& data, TPKind) override {
+    this->data_ = &data;
+    merge_interval(data);
+  }
+
+  void send_data(size_t layer_idx) override {
+    for (const auto &[src_offset, dst_offset, length] : *this->data_) {
       if (length > 0) {
         Message msg(dst_inst_id, dst_worker_id);
         msg.set_data(layer_idx, src_offset, dst_offset, length);
@@ -103,7 +110,7 @@ class FakeChannel : public IChannel {
       }
     }
   }
-  void flush() override {
+  void flush(std::string&) override {
     q.emplace(dst_inst_id, dst_worker_id);
     flush_cnt->fetch_add(1);
   }
@@ -122,12 +129,14 @@ class ProxyChannel : public IChannel {
   void connect(const WorkerInfo &dst_info) override {
     ch_->connect(dst_info);
   }
-  void send_data(size_t layer_idx, const std::vector<IpcBlock> &data) override {
-    LOG(INFO) << "send " << data.size() << " blocks";
-    ch_->send_data(layer_idx, data);
+  void register_data(std::vector<IpcBlock>& data, TPKind k) override {
+    ch_->register_data(data, k);
   }
-  void flush() override {
-    ch_->flush();
+  void send_data(size_t layer_idx) override {
+    ch_->send_data(layer_idx);
+  }
+  void flush(std::string& o) override {
+    ch_->flush(o);
   }
   void send_notification(const std::vector<const ReqSendTask*>& reqs) override {
     ch_->send_notification(reqs);
@@ -694,8 +703,9 @@ class MockChannel : public IChannel {
  public:
   MockChannel() = default;
   MOCK_METHOD(void, connect, (const WorkerInfo &dst_info), (override));
-  MOCK_METHOD(void, flush, (), (override));
-  MOCK_METHOD(void, send_data, (size_t layer_idx, (const std::vector<IpcBlock> &data)), (override));
+  MOCK_METHOD(void, register_data, ((std::vector<IpcBlock>& data), TPKind kind), (override));
+  MOCK_METHOD(void, flush, (std::string& out), (override));
+  MOCK_METHOD(void, send_data, (size_t layer_idx), (override));
   MOCK_METHOD(void, send_notification, (const std::vector<const ReqSendTask*>& reqs), (override));
 };
 
@@ -724,9 +734,10 @@ TEST(SendStubTest, UseMockChannel) {
   IpcBlock expect_data(0, 4 * bs, 8 * ts);
 
   MockChannel channel;
-  EXPECT_CALL(channel, send_data(Eq(0), ElementsAre(expect_data))).Times(1);
-  EXPECT_CALL(channel, send_data(Eq(1), ElementsAre(expect_data))).Times(1);
-  EXPECT_CALL(channel, flush()).Times(1);
+  EXPECT_CALL(channel, register_data(ElementsAre(expect_data), Eq(TPKind::PEQD))).Times(1);
+  EXPECT_CALL(channel, send_data(Eq(0))).Times(1);
+  EXPECT_CALL(channel, send_data(Eq(1))).Times(1);
+  EXPECT_CALL(channel, flush(_)).Times(1);
   EXPECT_CALL(channel, send_notification(_)).Times(0);
 
   auto tx = KvSendStub(dst_info, src_info, 0, num_layers, std::make_unique<ProxyChannel>(&channel));

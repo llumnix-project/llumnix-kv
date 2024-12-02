@@ -134,77 +134,26 @@ static void parse_block_send_p_lt_d(
   return ;
 }
 
-// src_offset, dst_offset, len
-// return min_size, max_size, total_size, cnt
-std::tuple<size_t, size_t, size_t, size_t> merge_interval(std::vector<IpcBlock> &input) {
-  size_t min_size = std::numeric_limits<size_t>::max();
-  size_t max_size = 0;
-  size_t total_size = 0;
-  size_t cnt = 0;
-  size_t prev_idx = 0;
-  std::sort(input.begin(), input.end(),
-            [](IpcBlock x, IpcBlock y) { return x.src_offset < y.src_offset; });
-  for (size_t idx = 1; idx < input.size(); ++idx) {
-    auto &pre_block = input[prev_idx];
-    assert(&pre_block.length == &(input[prev_idx].length));
-    auto &cur_block = input[idx];
-    assert(&cur_block.length == &(input[idx].length));
-
-    if (cur_block.src_offset > pre_block.src_offset + pre_block.length) {
-      // 不相邻.
-      min_size = std::min(min_size, pre_block.length);
-      max_size = std::max(max_size, pre_block.length);
-      total_size += pre_block.length;
-      cnt += 1;
-      prev_idx = idx;
-      continue;
-    }
-
-    if (cur_block.src_offset == pre_block.src_offset + pre_block.length) {
-      // 相邻
-      if (cur_block.dst_offset != pre_block.dst_offset + pre_block.length) {
-        // 但 dst 不相邻.
-        min_size = std::min(min_size, pre_block.length);
-        max_size = std::max(max_size, pre_block.length);
-        total_size += pre_block.length;
-        cnt += 1;
-        prev_idx = idx;
-        continue;
-      }
-
-      pre_block.length += cur_block.length;
-      cur_block.length = 0;
-      continue;
-    }
-    // 交错, 在 prefix cache 存在时可能存在这种情况, 目前 prefix cache 尚未开启.
-    abort();
-  }
-  if (prev_idx < input.size()) {
-    auto prev_len = input[prev_idx].length;
-    min_size = std::min(min_size, prev_len);
-    max_size = std::max(max_size, prev_len);
-    total_size += prev_len;
-    cnt += 1;
-  }
-  // 暂没必要..
-  // std::remove_if(input, [] len == 0)
-  return {min_size, max_size, total_size, cnt};
-}
-
 void KvSendStub::start_async() {
   auto const dst_id = dst_info_.inst_id;
   auto const dst_worker_id = dst_info_.worker_id;
+  std::string flush_out_buf;
   std::vector<IpcBlock> send_blocks;
   std::vector<const ReqSendTask *> finished_req;
+  TPKind tpkind = TPKind::UNKNOWN;
 
   decltype(parse_block_send_p_lt_d)* parse_block_send = nullptr;
   if (src_info_.tp_size == dst_info_.tp_size) {
     parse_block_send = parse_block_send_p_eq_d;
+    tpkind = TPKind::PEQD;
   } else if (src_info_.tp_size > dst_info_.tp_size) {
     parse_block_send = parse_block_send_p_gt_d;
+    tpkind = TPKind::PGTD;
   } else {
     parse_block_send = parse_block_send_p_lt_d;
+    tpkind = TPKind::PLTD;
   }
+  assert(tpkind != TPKind::UNKNOWN);
 
   for (;;) {
     BatchSendTask batch;
@@ -213,6 +162,7 @@ void KvSendStub::start_async() {
       assert(send_tasks_.is_closed());
       break;
     }
+    auto const step_idx = batch.step->step_idx;
 
 #ifndef NDEBUG
     // 用于提高 https://aone.alibaba-inc.com/v2/project/664220/req/60815172 复现概率.
@@ -220,10 +170,10 @@ void KvSendStub::start_async() {
 #endif
 
     TimeWatch start;  // iterator begin
-    uint64_t wait_time_us = 0;
     auto const queue_dur = start.start_ts() - batch.step->start_send_ts;
     auto const queue_us = std::chrono::duration_cast<std::chrono::microseconds>(queue_dur).count();
 
+    assert(flush_out_buf.empty());
     assert(finished_req.empty());
     assert(send_blocks.empty());
     assert(!batch.tasks.empty());
@@ -240,55 +190,54 @@ void KvSendStub::start_async() {
     }
     assert(!send_blocks.empty());
 
-    auto const step_idx = batch.step->step_idx;
-    auto const sb_num = send_blocks.size();
-    auto const [min, max, total, cnt] = merge_interval(send_blocks);
-
+    uint64_t wait_time_us = 0;
+    uint64_t elapse_us = 0;
+    uint64_t send_notify_us = 0;
     try {
+      ch_->register_data(send_blocks, tpkind);
       for (auto i = start_layer_; i < num_layers_; ++i) {
         TimeWatch wait_start;
         batch.step->wait_layer_ready(i);
         wait_time_us += wait_start.get_elapse_us();
 
         // NOTE: write 可能是异步的! write 返回并不意味着数据发送了!
-        ch_->send_data(i, send_blocks);
+        ch_->send_data(i);
       }
-      ch_->flush();
-      auto elapse_us = start.get_elapse_us();
+      ch_->flush(flush_out_buf);
+      elapse_us = start.get_elapse_us();
 
-      uint64_t send_notify_us = 0;
       if (!finished_req.empty()) {
         TimeWatch wait_start;
         ch_->send_notification(finished_req);
         send_notify_us = wait_start.get_elapse_us();
       }
-
-      for (auto task : finished_req) {
-        assert(task->reach_last_token);
-        LOG(INFO) << "KVT tx_stub. dst_id=" << dst_id << ",dst_worker_id=" << dst_worker_id
-                  << ",step_idx=" << step_idx << ",send finish reqid=" << task->req_id();
-        task->set_transfer_done();
-        // DO NOT ACCESS task! IT MAY BE FREED!
-        // Add clang tidy: USE-AFTER-MOVED to detect the bug.
-      }
-
-      LOG(INFO) << "KVT tx_stub. dst_id=" << dst_id << ",dst_worker_id=" << dst_worker_id
-                << ",step_idx=" << step_idx << ",finished_req_size=" << finished_req.size()
-                << ",blocks=" << sb_num << "->" << cnt << ",block_size(min/max/sum)="
-                << min << '/' << max << '/' << total
-                << ",send_non_overlay_us=" << elapse_us - wait_time_us
-                << ",wait_us=" << wait_time_us
-                << ",send_notify_us=" << send_notify_us
-                << ",queue_us=" << queue_us;
-
-      send_blocks.clear();
-      finished_req.clear();
     } catch (std::exception &e) {
       LOG(ERROR) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id
                  << "): fail to send data, caused by: " << e.what() << ";";
       state_.store(StubState::POISONED, std::memory_order_release);
       break;
     }
+
+    for (auto task : finished_req) {
+      assert(task->reach_last_token);
+      LOG(INFO) << "KVT tx_stub. dst_id=" << dst_id << ",dst_worker_id=" << dst_worker_id
+                << ",step_idx=" << step_idx << ",send finish reqid=" << task->req_id();
+      task->set_transfer_done();
+      // DO NOT ACCESS task! IT MAY BE FREED!
+      // Add clang tidy: USE-AFTER-MOVED to detect the bug.
+    }
+
+    LOG(INFO) << "KVT tx_stub. dst_id=" << dst_id << ",dst_worker_id=" << dst_worker_id
+              << ",step_idx=" << step_idx << ",finished_req_size=" << finished_req.size()
+              << "," << flush_out_buf
+              << ",send_non_overlay_us=" << elapse_us - wait_time_us
+              << ",wait_us=" << wait_time_us
+              << ",send_notify_us=" << send_notify_us
+              << ",queue_us=" << queue_us;
+
+    send_blocks.clear();
+    finished_req.clear();
+    flush_out_buf.clear();
   }
 
   auto state = state_.load(std::memory_order_relaxed);

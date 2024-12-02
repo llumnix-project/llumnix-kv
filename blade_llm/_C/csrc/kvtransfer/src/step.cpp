@@ -12,7 +12,7 @@ static std::ostream& operator<<(std::ostream& os, const StepMetrics& self) {
   };
 
   const auto send_stub_cnt = self.send_stub_cnt_.load(std::memory_order_relaxed);
-  os << std::setprecision(3) << "PythonExecTimeUs=" << US(self.python_exec_ns)
+  os << std::fixed << std::setprecision(3) << "PythonExecTimeUs=" << US(self.python_exec_ns)
      << ",WaitLayersQueueUs=" << US(self.wait_layers_queue_ns)
      << ",WaitLayersExecUs=" << US(self.wait_layers_exec_ns)
      << ",SendStubCnt=" << send_stub_cnt
@@ -90,7 +90,7 @@ void StepGuard::layer_ready_all() {
 StepGuard::~StepGuard() {
   // 其析构执行时, 意味着 python main thread/wait layer thread 都已经结束
   // 对 StepGuard 的引用, 是时候输出 metric 了.
-  LOG(INFO) << std::setprecision(3)
+  LOG(INFO) << std::fixed << std::setprecision(3)
             << "StepGuardMetric. StepIdx=" << this->step_id()
             << ",PythonExecUs=" << this->python_exec_ns / 1000.0
             << ",WaitLayerQueueUs=" << this->wait_layers_queue_ns / 1000.0

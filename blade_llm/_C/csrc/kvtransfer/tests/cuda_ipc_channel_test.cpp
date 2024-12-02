@@ -266,9 +266,12 @@ TEST(CudaIpcTest, TestTransfer) {
     LOG(INFO) << "test cuda server connected;";
     RequestInfo req_info("0", 0, "REQ-0001", {0, 1}, {0, 1});
     ReqSendTask req_task(&req_info, 0, 1, true);
-    channel->send_data(0, {{0, 0, 128}});
-    channel->send_data(1, {{0, 0, 128}});
-    channel->flush();
+    std::vector<IpcBlock> data{{0, 0, 128}};
+    channel->register_data(data, TPKind::PEQD);
+    channel->send_data(0);
+    channel->send_data(1);
+    std::string out;
+    channel->flush(out);
     auto iter = Source<const ReqSendTask>::from(&req_task, 1);
     channel->send_notification(iter.get());
     channel->close();

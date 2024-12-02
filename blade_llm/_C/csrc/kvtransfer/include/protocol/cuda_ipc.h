@@ -74,15 +74,19 @@ class CudaIpcChannel : public IChannel, public noncopyable {
       data_writer_(ctx),
       notify_writer_(inst_name, worker_id) {};
   void connect(const WorkerInfo &dst) override;
-  void send_data(size_t layer_index, const std::vector<IpcBlock> &data) override;
+
+  void register_data(std::vector<IpcBlock>& data, TPKind kind) override;
+  void send_data(size_t layer_index) override;
+  void flush(std::string& out) override;
   void send_notification(const std::vector<const ReqSendTask*>& reqs) override;
-  void flush() override;
+
   void close() override;
   ~CudaIpcChannel() override;
 
  private:
   CudaIpcWrite data_writer_;
   SocketWriter notify_writer_;
+  std::vector<IpcBlock>* data_ = nullptr;
 };
 
 class CudaTransferServer : public ITransferServer {
