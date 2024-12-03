@@ -225,13 +225,10 @@ size_t KvTransferClient::start_send() {
     usleep(10 * 1000);  // sleep 10ms
 #endif
 
-    auto start = TimeWatch();
+    step_guard->step()->wait_layers_start_ts = SteadyClock::now();
     step_guard->wait_layers();
-    step_guard->wait_layers_exec_ns = start.get_elapse_ns();
+    step_guard->step()->wait_layers_end_ts = SteadyClock::now();
 
-    auto wait_dur = start.start_ts() - step_guard->step()->start_send_ts;
-    auto wait_ns = std::chrono::nanoseconds(wait_dur).count();
-    step_guard->wait_layers_queue_ns = wait_ns;
   });
   assert(!last_step_guard_);
   last_step_guard_ = std::move(step_guard);
@@ -252,9 +249,8 @@ void KvTransferClient::flush_send(size_t step_id) {
     throw KVTransferException(ErrorKind::INVALID_OPERATION, "event record before step start;");
   }
   last_step_guard_->layer_ready_all();
+  last_step_guard_->step()->flush_send_ts = SteadyClock::now();
 
-  auto exec_ns = SteadyClock::now() - last_step_guard_->step()->start_send_ts;
-  last_step_guard_->python_exec_ns = std::chrono::nanoseconds(exec_ns).count();
   last_step_guard_.reset();
 }
 

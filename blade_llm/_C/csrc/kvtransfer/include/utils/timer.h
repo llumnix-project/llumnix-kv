@@ -3,6 +3,7 @@
 
 #pragma once
 #include <chrono>
+#include <cassert>
 
 namespace blade_llm {
 
@@ -22,6 +23,24 @@ class TimeWatch {
  private:
   Timepoint start;
 };
+
+static inline size_t elapse_us(Timepoint start, Timepoint end) {
+  if (start >= end) {
+    return 0;
+  }
+  auto dur = end - start;
+  auto dur_us = std::chrono::duration_cast<std::chrono::microseconds>(dur);
+  return dur_us.count();
+}
+
+static inline size_t elapse_ns(Timepoint start, Timepoint end) {
+  if (start >= end) {
+    return 0;
+  }
+  auto dur = end - start;
+  auto dur_ns = std::chrono::nanoseconds(dur);
+  return dur_ns.count();
+}
 
 static auto get_unix_timestamp() {
   auto now = std::chrono::system_clock::now();

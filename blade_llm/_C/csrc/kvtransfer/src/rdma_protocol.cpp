@@ -6,6 +6,7 @@
 #include "thrid_party/logging.h"
 #include "naming.h"
 #include "assert.h"
+#include "utils/timer.h"
 #include <fstream>
 #include <mutex>
 #include <numeric>
@@ -669,27 +670,30 @@ void RDMAChannel::do_init() {
   return fut;
 }
 
-[[nodiscard]] static std::future<void> WriteBatch(XChannel *ch, std::shared_ptr<std::vector<rw_memp_t>> datasp) {
+// return send_us
+[[nodiscard]] static std::future<uint64_t> WriteBatch(XChannel *ch, std::shared_ptr<std::vector<rw_memp_t>> datasp) {
   // std::promise<void> pr;
-  auto pr = std::make_shared<std::promise<void>>();
+  auto pr = std::make_shared<std::promise<uint64_t>>();
   auto fut = pr->get_future();
   auto &datas = *datasp;
 
+  const auto write_start_ts = SteadyClock::now();
   auto result = ch->WriteBatch(datas,
-                               [pr = std::move(pr), d = std::move(datasp)](Status s) mutable {
+                               [pr = std::move(pr), d = std::move(datasp), write_start_ts](Status s) mutable {
                                  // WriteBatch 要求 datasp 直至 callback 中才能回收.
                                  if (!s.IsOk()) {
                                    auto ex = std::make_exception_ptr(std::runtime_error("Write ERR: " + s.ErrMsg()));
                                    pr->set_exception(std::move(ex));
                                    return;
                                  }
-                                 pr->set_value();
+                                 auto const send_us = elapse_us(write_start_ts, SteadyClock::now());
+                                 pr->set_value(send_us);
                                }
   );
 
   if (result != BAREX_SUCCESS) {
     auto ex = std::runtime_error("Write Submit Err: " + Status(result).ErrMsg());
-    return make_exp_future<void>(std::move(ex));
+    return make_exp_future<uint64_t>(std::move(ex));
   }
 
   return fut;
@@ -850,27 +854,31 @@ void RDMAChannel::send_data(size_t layer_idx) {
 }
 
 
-[[nodiscard]] static std::future<void> WriteBySgList(XChannel* ch, uint64_t remote_addr, uint32_t rkey, std::shared_ptr<std::vector<memp_t>> prefills) {
-  auto pr = std::make_shared<std::promise<void>>();
+// return send_us
+[[nodiscard]] static std::future<uint64_t> WriteBySgList(XChannel* ch, uint64_t remote_addr, uint32_t rkey, std::shared_ptr<std::vector<memp_t>> prefills) {
+  auto pr = std::make_shared<std::promise<uint64_t>>();
   auto fut = pr->get_future();
   auto& datas = *prefills;
 
+  const auto start_ts = SteadyClock::now();
   auto result = ch->WriteBySgList(datas,
     remote_addr, rkey,
     /* signal_peer */ false,
     /* imm_data */ 0,
-    [prefills=std::move(prefills), pr=std::move(pr)] (Status s) {
+    [prefills=std::move(prefills), pr=std::move(pr), start_ts] (Status s) {
       // WriteBySgList 要求 prefills 直至 callback 中才能回收.
       if (!s.IsOk()) {
         auto ex = std::make_exception_ptr(std::runtime_error("Write ERR: " + s.ErrMsg()));
         pr->set_exception(std::move(ex));
         return;
       }
-      pr->set_value();
+      auto send_us = elapse_us(start_ts, SteadyClock::now());
+      pr->set_value(send_us);
     });
+
   if (result != BAREX_SUCCESS) {
     auto ex = std::runtime_error("Write Submit Err: " + Status(result).ErrMsg());
-    return make_exp_future<void>(std::move(ex));
+    return make_exp_future<uint64_t>(std::move(ex));
   }
 
   return fut;
@@ -998,16 +1006,21 @@ void RDMAChannel::flush(std::string& outstr) {
   auto &self = *this;
   self.data_ = nullptr;
 
+  uint64_t send_us = 0;
+  for (auto& fut : self.write_futs_) {
+    send_us += fut.get();
+  }
+  self.write_futs_.clear();
+
   auto out = std::ostringstream();
-  out << "origin_sb_num=" << self.origin_sb_num_
-      << ",merged_sb_num=" << self.merged_sb_num_
-      << ",sb_size_min=" << self.sb_size_min_
-      << ",sb_size_max=" << self.sb_size_max_
-      << ",sb_size_total=" << self.sb_size_total_;
+  out << "OriginSbNum=" << self.origin_sb_num_
+      << ",MergedSbNum=" << self.merged_sb_num_
+      << ",SbSizeMin=" << self.sb_size_min_
+      << ",SbSizeMax=" << self.sb_size_max_
+      << ",SbSizeTotal=" << self.sb_size_total_
+      << ",SendUs=" << send_us;
   outstr = std::move(out).str();
 
-  when_all_succeed(self.write_futs_);
-  self.write_futs_.clear();
   return;
 }
 

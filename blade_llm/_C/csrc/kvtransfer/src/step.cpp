@@ -37,12 +37,18 @@ static std::ostream& operator<<(std::ostream& os, const StepMetrics& self) {
   return os;
 }
 
-#if 0
 Step::~Step() noexcept {
   // 当 step 析构时, 意味着 step 所有相关活动都结束了, 此时适合输出 metric.
-  LOG(INFO) << "StepMetric:StepIdx=" << this->step_idx << ',' << this->metric;
+  auto& self = *this;
+  const auto last_send_ts = self.last_send_finish_ts();
+  LOG(INFO) << std::fixed << std::setprecision(3)
+            << "StepMetrics. StepIdx=" << self.step_idx
+            << ",PythonExecUs=" << elapse_us(self.start_send_ts, self.flush_send_ts)
+            << ",WaitLayerQueueUs=" << elapse_us(self.start_send_ts, self.wait_layers_start_ts)
+            << ",WaitLayerExecUs=" << elapse_us(self.wait_layers_start_ts, self.wait_layers_end_ts)
+            << ",SendNonoverlapUs=" << elapse_us(self.flush_send_ts, last_send_ts)
+            << ",LastSendFlushTs=" << last_send_ts.time_since_epoch().count();  // send stub id
 }
-#endif
 
 void Step::wait_layer_ready(uint32_t layer_i) {
   data_signal_.wait(layer_i);
@@ -87,14 +93,5 @@ void StepGuard::layer_ready_all() {
   assert(val == num_layers);
 }
 
-StepGuard::~StepGuard() {
-  // 其析构执行时, 意味着 python main thread/wait layer thread 都已经结束
-  // 对 StepGuard 的引用, 是时候输出 metric 了.
-  LOG(INFO) << std::fixed << std::setprecision(3)
-            << "StepGuardMetric. StepIdx=" << this->step_id()
-            << ",PythonExecUs=" << this->python_exec_ns / 1000.0
-            << ",WaitLayerQueueUs=" << this->wait_layers_queue_ns / 1000.0
-            << ",WaitLayerExecUs=" << this->wait_layers_exec_ns / 1000.0;
-}
 
 }

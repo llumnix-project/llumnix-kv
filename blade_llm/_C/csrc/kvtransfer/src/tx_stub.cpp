@@ -169,9 +169,8 @@ void KvSendStub::start_async() {
     usleep(300 * 1000);  // sleep 300ms
 #endif
 
-    TimeWatch start;  // iterator begin
-    auto const queue_dur = start.start_ts() - batch.step->start_send_ts;
-    auto const queue_us = std::chrono::duration_cast<std::chrono::microseconds>(queue_dur).count();
+    auto const iter_start_ts = SteadyClock::now();  // iterator begin;
+    auto const queue_us = elapse_us(batch.step->start_send_ts, iter_start_ts);
 
     assert(flush_out_buf.empty());
     assert(finished_req.empty());
@@ -191,8 +190,9 @@ void KvSendStub::start_async() {
     assert(!send_blocks.empty());
 
     uint64_t wait_time_us = 0;
-    uint64_t elapse_us = 0;
+    uint64_t wait_and_send_us = 0;
     uint64_t send_notify_us = 0;
+    Timepoint send_finish_ts;
     try {
       ch_->register_data(send_blocks, tpkind);
       for (auto i = start_layer_; i < num_layers_; ++i) {
@@ -204,12 +204,15 @@ void KvSendStub::start_async() {
         ch_->send_data(i);
       }
       ch_->flush(flush_out_buf);
-      elapse_us = start.get_elapse_us();
+      send_finish_ts = SteadyClock::now();
+      wait_and_send_us = elapse_us(iter_start_ts, send_finish_ts);
 
       if (!finished_req.empty()) {
-        TimeWatch wait_start;
         ch_->send_notification(finished_req);
-        send_notify_us = wait_start.get_elapse_us();
+
+        auto send_notify_end_ts = SteadyClock::now();
+        send_notify_us = elapse_us(send_finish_ts, send_notify_end_ts);
+        send_finish_ts = send_notify_end_ts;
       }
     } catch (std::exception &e) {
       LOG(ERROR) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id
@@ -217,6 +220,7 @@ void KvSendStub::start_async() {
       state_.store(StubState::POISONED, std::memory_order_release);
       break;
     }
+    assert(send_finish_ts != Timepoint());
 
     for (auto task : finished_req) {
       assert(task->reach_last_token);
@@ -227,13 +231,15 @@ void KvSendStub::start_async() {
       // Add clang tidy: USE-AFTER-MOVED to detect the bug.
     }
 
-    LOG(INFO) << "KVT tx_stub. dst_id=" << dst_id << ",dst_worker_id=" << dst_worker_id
-              << ",step_idx=" << step_idx << ",finished_req_size=" << finished_req.size()
+    batch.step->update_last_send_finish_ts(send_finish_ts);
+    LOG(INFO) << "SendStubMetrics. DstId=" << dst_id << ",DstWorkerId=" << dst_worker_id
+              << ",StepIdx=" << step_idx << ",FinishedReqSize=" << finished_req.size()
               << "," << flush_out_buf
-              << ",send_non_overlay_us=" << elapse_us - wait_time_us
-              << ",wait_us=" << wait_time_us
-              << ",send_notify_us=" << send_notify_us
-              << ",queue_us=" << queue_us;
+              << ",QueueUs=" << queue_us
+              << ",WaitUs=" << wait_time_us
+              << ",WaitAndSendUs=" << wait_and_send_us
+              << ",SendNotifyUs=" << send_notify_us
+              << ",SendFinishTs=" << send_finish_ts.time_since_epoch().count();  //  send stub id
 
     send_blocks.clear();
     finished_req.clear();

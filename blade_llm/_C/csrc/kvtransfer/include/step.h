@@ -98,8 +98,28 @@ class Step {
  public:
   const size_t step_idx;
   const Timepoint start_send_ts = SteadyClock::now();
+  // write by python main thread
+  Timepoint flush_send_ts;
+  // write by wait layers thread.
+  Timepoint wait_layers_start_ts;
+  Timepoint wait_layers_end_ts;
+ private:
+  // write by multi send stub thread.
+  std::atomic<Timepoint> last_send_finish_ts_;
+ private:
+  static_assert(std::atomic<Timepoint>::is_always_lock_free);
  public:
   explicit Step(size_t i) : step_idx(i) {}
+  ~Step();
+
+  Timepoint last_send_finish_ts() const noexcept {
+    return this->last_send_finish_ts_.load(std::memory_order_relaxed);
+  }
+
+  void update_last_send_finish_ts(Timepoint val) noexcept {
+    atomic_fetch_max_explicit(&this->last_send_finish_ts_, val, std::memory_order_relaxed);
+  }
+
   void wait_layer_ready(uint32_t layer_i);
   uint32_t notify_layer_ready(uint32_t layer_i);
  private:
@@ -109,11 +129,6 @@ class Step {
 class StepGuard {
  public:
   const uint32_t num_layers;
-  // write by python main thread
-  uint64_t python_exec_ns = 0;
-  // write by wait layers thread.
-  uint64_t wait_layers_queue_ns = 0;
-  uint64_t wait_layers_exec_ns = 0;
  public:
   StepGuard(uint32_t layers, ICUDABarrier*barrier, std::shared_ptr<Step> step) :
       num_layers(layers),
@@ -135,8 +150,6 @@ class StepGuard {
   void after_record_one();
   void after_record_all();
   void layer_ready_all();
-
-  ~StepGuard();
  private:
   std::shared_ptr<Step> step_;
   SyncSemaphore record_signal_;

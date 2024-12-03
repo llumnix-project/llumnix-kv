@@ -210,7 +210,8 @@ class RDMAChannel : public IChannel, public noncopyable {
   size_t sb_size_min_ = 0;
   size_t sb_size_max_ = 0;
   size_t sb_size_total_ = 0;
-  std::vector<std::future<void>> write_futs_;
+  // write_us
+  std::vector<std::future<uint64_t>> write_futs_;
   std::vector<std::future<void>> send_futs_;
 
   // init by do_init
