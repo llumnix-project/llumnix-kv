@@ -105,7 +105,8 @@ class Step {
   Timepoint wait_layers_end_ts;
  private:
   // write by multi send stub thread.
-  std::atomic<Timepoint> last_send_finish_ts_;
+  // std::atomic<Timepoint> last_send_finish_ts_; 在 g++9 上编译报错.
+  std::atomic<Timepoint> last_send_finish_ts_{Timepoint::min()};
  private:
   static_assert(std::atomic<Timepoint>::is_always_lock_free);
  public:
