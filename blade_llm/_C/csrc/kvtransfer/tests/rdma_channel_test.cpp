@@ -88,7 +88,7 @@ TEST(RDMAChannelTest, TestSerdeReqNofitfication) {
 
 
 TEST(RDMAChannelTest, TestTransefer) {
-  auto test_rdma_ctx = RDMAProtoContext::client_context("test", 1);
+  auto test_rdma_ctx = RDMAProtoContext::client_context("test");
   if (!test_rdma_ctx->check_support()) {
     LOG(INFO) << "rdma not support on this node;";
     return;
@@ -176,7 +176,7 @@ TEST(RDMAChannelTest, TestTransefer) {
     Context ctx("1", 0);
     ctx.set_layer_data_address(0, layer_addrs);
     ctx.set_block_params(block_size, token_size, 4);
-    auto proto_ctx = RDMAProtoContext::client_context("KVTClient", 4);
+    auto proto_ctx = RDMAProtoContext::client_context("KVTClient");
     auto proto = proto_ctx->protocol();
     ctx.register_protocol(std::move(proto_ctx));
     auto rdma_ctx = ctx.get_protocol_ctx<RDMAProtoContext>(proto);

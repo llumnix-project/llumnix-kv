@@ -131,8 +131,6 @@ struct BarexCtx : public noncopyable {
   std::unique_ptr<accl::barex::XContext> xctx_;
 
   std::vector<BarexMRGuard> layer_mr_;
-  std::atomic<bool> stopped_{false};
-  std::optional<std::thread> ctx_loop_thd_;
 };
 
 struct CliBarexCtx : public BarexCtx {
@@ -248,22 +246,17 @@ class CliCtxCallback : public accl::barex::XChannelCallback {
 class RDMAProtoContext : public IProtocolContext {
  public:
   const std::string name_prefix;
-  const int num_threads;
   const bool is_server;
 
   static std::unique_ptr<RDMAProtoContext> server_context(std::string &&name,
-                                                          int num_threads,
                                                           std::unique_ptr<accl::barex::XChannelCallback> &&);
 
-  static std::unique_ptr<RDMAProtoContext> client_context(std::string &&name,
-                                                          int num_threads);
+  static std::unique_ptr<RDMAProtoContext> client_context(std::string &&name);
 
   RDMAProtoContext(std::string &&name,
-                   int num_threads,
                    bool is_server,
                    std::unique_ptr<accl::barex::XChannelCallback> &&cb) :
       name_prefix(std::move(name)),
-      num_threads(num_threads),
       is_server(is_server),
       callback_(std::move(cb)) {}
 

@@ -215,8 +215,8 @@ void KvSendStub::start_async() {
         send_finish_ts = send_notify_end_ts;
       }
     } catch (std::exception &e) {
-      LOG(ERROR) << "KVT tx_stub(" << dst_id << ":" << dst_worker_id
-                 << "): fail to send data, caused by: " << e.what() << ";";
+      LOG(ERROR) << "KVT tx_stub fail to send data. dst_id=" << dst_id << ",dst_worker_id=" << dst_worker_id
+                << ",step_idx=" << step_idx << ",ex=" << e.what();
       state_.store(StubState::POISONED, std::memory_order_release);
       break;
     }

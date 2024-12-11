@@ -127,6 +127,52 @@ bool decode_notification(const char *in_buf,
 }
 
 #ifdef ENABLE_RDMA
+
+static int env2posint(const char* env, int def) {
+  assert(def > 0);
+  const char *valstr = getenv(env);
+  if (valstr == nullptr) {
+    return def;
+  }
+  int ret = atoi(valstr);
+  if (ret <= 0) {
+    return def;
+  }
+  return ret;
+}
+
+static int env_send_parallel() {
+  static constexpr int DEFVAL = 1;
+  static int val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_RDMA_SP", DEFVAL);
+  });
+  return val;
+}
+
+static int env_ctx_tpsize() {
+  static constexpr int DEFVAL = 4;
+  static int val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_CTX_TPSIZE", DEFVAL);
+  });
+  return val;
+}
+
+
+static int env_conn_tpsize() {
+  static constexpr int DEFVAL = 2;
+  static int val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_CONN_TPSIZE", DEFVAL);
+  });
+  return val;
+}
+
+
 void XContextDeleter::operator()(accl::barex::XContext *ctx) {
   ctx->Shutdown();
   ctx->WaitStop();
@@ -391,14 +437,12 @@ BarexCtx::BarexCtx(std::string mp_name,
   RTCHECK(result == accl::barex::BAREX_SUCCESS);
   self.xctx_.reset(context);
 
-  self.ctx_loop_thd_.emplace([context, this]() {
-    BarexCtxMain(context, &this->stopped_);
-  });
+  context->Start();
 }
 
 BarexCtx::~BarexCtx() {
-  this->stopped_.store(true);
-  this->ctx_loop_thd_->join();
+  this->xctx_->Shutdown();
+  this->xctx_->WaitStop();
 }
 
 CliBarexCtx::CliBarexCtx(std::string mp_name,
@@ -409,9 +453,7 @@ CliBarexCtx::CliBarexCtx(std::string mp_name,
     BarexCtx(std::move(mp_name), std::move(tp_name), tpcnt, ctx, std::move(ctxcb)),
     layer_blk_size(ctx->layer_num_blocks() * ctx->block_size()) {
   XConnector *connector = nullptr;
-  // 处理建联/断链的线程个数, 2 来自 barex write-client example~
-  constexpr int CONN_THD_CNT = 2;
-  auto result = XConnector::NewInstance(connector, CONN_THD_CNT, TIMER_3S, {this->xctx()});
+  auto result = XConnector::NewInstance(connector, env_conn_tpsize(), TIMER_3S, {this->xctx()});
   RTCHECK(result == accl::barex::BAREX_SUCCESS);
   this->connector_.reset(connector);
   return;
@@ -497,7 +539,7 @@ void RDMAServer::start_server(ITransferService *service, Context *ctx) {
   if (service == nullptr) {
     throw std::runtime_error("KvTransferService should not be null;");
   }
-  auto rdma_ctx = RDMAProtoContext::server_context("KVTServer", 4, std::make_unique<CtxCallback>(service));
+  auto rdma_ctx = RDMAProtoContext::server_context("KVTServer", std::make_unique<CtxCallback>(service));
   if (!rdma_ctx->check_support()) {
     throw std::runtime_error("can't start RDMA transfer server as RDMA protocol not support;");
   }
@@ -538,14 +580,12 @@ void RDMAServer::start_server(ITransferService *service, Context *ctx) {
   ss << info.ip << ":" << info.port;
   winfo->addr = ss.str();
 
-  // 处理建联/断链的线程个数, 2 来自 barex write-client example~
-  constexpr int LISTEN_THD_CNT = 2;
   XListener *listener = nullptr;
   auto xctx = barex_ctx->xctx();
   if (xctx == nullptr) {
     LOG(ERROR) << "xctx is nullptr";
   }
-  auto result = XListener::NewInstance(listener, LISTEN_THD_CNT, info.port, TIMER_3S, {xctx});
+  auto result = XListener::NewInstance(listener, env_conn_tpsize(), info.port, TIMER_3S, {xctx});
   RTCHECK(result == accl::barex::BAREX_SUCCESS);
   self.listener_.reset(listener);
   result = self.listener_->Listen();
@@ -608,24 +648,12 @@ static std::future<T> make_exp_future(E ex) {
   return fut;
 }
 
-static int get_send_parallel() {
-  const char *valstr = getenv("BLLM_KVTRANS_RDMA_SP");
-  if (valstr == nullptr) {
-    return 1;
-  }
-  int ret = atoi(valstr);
-  if (ret == 0) {
-    return 1;
-  }
-  return ret;
-}
-
 void RDMAChannel::do_init() {
   auto &self = *this;
   if (!self.chs_.empty()) {
     return;
   }
-  const int sp = get_send_parallel();
+  const int sp = env_send_parallel();
   assert(sp > 0);
 
   self.chs_.reserve(sp);
@@ -1101,19 +1129,27 @@ bool RDMAProtoContext::check_support() {
 }
 void RDMAProtoContext::init(Context *ctx) {
   if (is_server) {
-    barex_ctx_ = std::make_unique<BarexCtx>(name_prefix + "mp", name_prefix + "tp", 4, ctx, std::move(callback_));
+    barex_ctx_ = std::make_unique<BarexCtx>(
+      name_prefix + "mp",
+      name_prefix + "tp",
+      env_ctx_tpsize(),
+      ctx,
+      std::move(callback_));
   } else {
-    cli_barex_ctx_ =
-        std::make_unique<CliBarexCtx>(name_prefix + "mp", name_prefix + "tp", 4, ctx, std::move(callback_));
+    cli_barex_ctx_ = std::make_unique<CliBarexCtx>(
+      name_prefix + "mp",
+      name_prefix + "tp",
+      env_ctx_tpsize(),
+      ctx,
+      std::move(callback_));
   }
 }
 std::unique_ptr<RDMAProtoContext> RDMAProtoContext::server_context(std::string &&name,
-                                                                   int num_threads,
                                                                    std::unique_ptr<accl::barex::XChannelCallback> &&bk) {
-  return std::make_unique<RDMAProtoContext>(std::move(name), num_threads, true, std::move(bk));
+  return std::make_unique<RDMAProtoContext>(std::move(name), true, std::move(bk));
 }
-std::unique_ptr<RDMAProtoContext> RDMAProtoContext::client_context(std::string &&name, int num_threads) {
-  return std::make_unique<RDMAProtoContext>(std::move(name), num_threads, false, std::make_unique<CliCtxCallback>());
+std::unique_ptr<RDMAProtoContext> RDMAProtoContext::client_context(std::string &&name) {
+  return std::make_unique<RDMAProtoContext>(std::move(name), false, std::make_unique<CliCtxCallback>());
 }
 
 #ifdef ENABLE_TORCH

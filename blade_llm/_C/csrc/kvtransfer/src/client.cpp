@@ -35,7 +35,7 @@ std::unique_ptr<KvTransferClient> KvTransferClient::create(std::unique_ptr<Conte
           break;
         case TransferProtocol::RDMA_DIRECT:
 #ifdef ENABLE_RDMA
-          proto_ctx = RDMAProtoContext::client_context("KVTClient", 4);
+          proto_ctx = RDMAProtoContext::client_context("KVTClient");
 #else
           throw std::runtime_error("RDMA protocol is not enabled in this lib;");
 #endif
@@ -50,7 +50,7 @@ std::unique_ptr<KvTransferClient> KvTransferClient::create(std::unique_ptr<Conte
       ctx->register_protocol(std::move(cuda_ctx));
     }
 #ifdef ENABLE_RDMA
-    auto rdma_ctx = RDMAProtoContext::client_context("KVTClient", 4);
+    auto rdma_ctx = RDMAProtoContext::client_context("KVTClient");
     if (rdma_ctx->check_support()) {
       ctx->register_protocol(std::move(rdma_ctx));
     }
