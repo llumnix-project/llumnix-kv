@@ -8,6 +8,7 @@
 #include "assert.h"
 #include "utils/timer.h"
 #include <fstream>
+#include <iomanip>
 #include <mutex>
 #include <numeric>
 
@@ -1034,19 +1035,37 @@ void RDMAChannel::flush(std::string& outstr) {
   auto &self = *this;
   self.data_ = nullptr;
 
-  uint64_t send_us = 0;
-  for (auto& fut : self.write_futs_) {
-    send_us += fut.get();
-  }
-  self.write_futs_.clear();
-
+  const auto inflyn = self.write_futs_.size();
   auto out = std::ostringstream();
-  out << "OriginSbNum=" << self.origin_sb_num_
+  out << std::fixed << std::setprecision(3)
+      << "OriginSbNum=" << self.origin_sb_num_
       << ",MergedSbNum=" << self.merged_sb_num_
       << ",SbSizeMin=" << self.sb_size_min_
       << ",SbSizeMax=" << self.sb_size_max_
       << ",SbSizeTotal=" << self.sb_size_total_
-      << ",SendUs=" << send_us;
+      << ",InflyWrite=" << inflyn;
+
+  uint64_t send_us_min = UINT64_MAX;
+  uint64_t send_us_max = 0;
+  uint64_t send_us_total = 0;
+  for (auto& fut : self.write_futs_) {
+    uint64_t send_us = 0;
+    try {
+      send_us = fut.get();
+    } catch (...) {
+      outstr = std::move(out).str();
+      throw;
+    }
+
+    send_us_min = std::min(send_us_min, send_us);
+    send_us_max = std::max(send_us_max, send_us);
+    send_us_total += send_us;
+  }
+  self.write_futs_.clear();
+
+  out << ",SendUsMin=" << send_us_min
+      << ",SendUsMax=" << send_us_max
+      << ",SendUsAvg=" << send_us_total / float(inflyn);
   outstr = std::move(out).str();
 
   return;
