@@ -48,7 +48,11 @@ class KvRecvStub : public noncopyable {
   KvRecvStub(const InstanceId& inst_id, WorkerId worker_id) :
       src_inst_id(inst_id),
       src_worker_id(worker_id) {};
-  KvRecvStub(KvRecvStub &&other) noexcept;
+
+  KvRecvStub(const KvRecvStub&) = delete;
+  KvRecvStub(KvRecvStub &&other) = delete;
+
+  // thread safe
   void on_recv(const RequestId&, std::vector<uint32_t> &&block_ids);
   bool check_recv_done(const RequestId&, const std::vector<uint32_t> &block_ids);
   void earse(const RequestId&);

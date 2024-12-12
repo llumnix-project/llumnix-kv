@@ -24,10 +24,13 @@ class KvTransferService : public ITransferService {
   Context *get_context() { return ctx_.get(); };
  private:
   KvRecvStub &get_or_create_conn(const InstanceId&, WorkerId);
+  // may return nullptr
+  KvRecvStub* try_get_conn(const InstanceId&, WorkerId);
+
   std::unique_ptr<Context> ctx_;
   std::unordered_map<RequestId, std::vector<ReqRecvTask>> reqs_;
   std::shared_mutex conn_m_;
-  std::unordered_map<InstanceId , std::vector<std::optional<KvRecvStub>>> recv_conns_;
+  std::unordered_map<InstanceId , std::vector<std::unique_ptr<KvRecvStub>>> recv_conns_;
 };
 }
 #endif //KVTRANSFER_INCLUDE_SERVICE_H_
