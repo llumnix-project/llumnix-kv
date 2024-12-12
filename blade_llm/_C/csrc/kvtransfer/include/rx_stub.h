@@ -17,17 +17,17 @@ class ReqRecvTask : public noncopyable {
   const InstanceId src_inst_id;
   const WorkerId src_worker_id;
 
-  ReqRecvTask(const InstanceId& src_inst_id, WorkerId src_worker_id, const RequestId &req_id) :
-      req_id(req_id),
-      src_inst_id(src_inst_id),
-      src_worker_id(src_worker_id) {};
-  ReqRecvTask(const InstanceId& src_inst_id,
-              WorkerId src_worker_id,
-              const RequestId &req_id,
+  ReqRecvTask(const InstanceId& src_inst_id_, WorkerId src_worker_id_, const RequestId &req_id_) :
+      req_id(req_id_),
+      src_inst_id(src_inst_id_),
+      src_worker_id(src_worker_id_) {};
+  ReqRecvTask(const InstanceId& src_inst_id_,
+              WorkerId src_worker_id_,
+              const RequestId &req_id_,
               std::vector<uint32_t> &&blocks) :
-      req_id(req_id),
-      src_inst_id(src_inst_id),
-      src_worker_id(src_worker_id),
+      req_id(req_id_),
+      src_inst_id(src_inst_id_),
+      src_worker_id(src_worker_id_),
       dst_blocks_(std::move(blocks)) {};
   ReqRecvTask(ReqRecvTask &&other) :
       req_id(other.req_id),

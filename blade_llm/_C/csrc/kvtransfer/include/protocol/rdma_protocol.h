@@ -189,18 +189,18 @@ class RDMAChannel : public IChannel, public noncopyable {
 
   accl::barex::XChannel *ch() noexcept;
  private:
+  InstanceId const src_inst_id_;
+  WorkerId const src_worker_id_ = 0;
+  CliBarexCtx *const ctx_;  // owner: KvTransferClient
   std::string ip_;
   int port_{0};
-  CliBarexCtx *const ctx_;  // owner: KvTransferClient
   std::vector<void *> dst_ptrs_;
   std::vector<uint32_t> dst_rkeys_;
   size_t dst_layer_blk_size_{0};
   uint32_t dst_layer_num_{0};
-  InstanceId src_inst_id_;
-  WorkerId src_worker_id_ = 0;
   int prev_ch_idx_ = 0;
 
-  std::vector<IpcBlock>* data_;
+  std::vector<IpcBlock>* data_ = nullptr;
   TPKind kind_ = TPKind::UNKNOWN;
   // sb is send block~
   size_t origin_sb_num_ = 0;
@@ -254,10 +254,10 @@ class RDMAProtoContext : public IProtocolContext {
   static std::unique_ptr<RDMAProtoContext> client_context(std::string &&name);
 
   RDMAProtoContext(std::string &&name,
-                   bool is_server,
+                   bool is_server_,
                    std::unique_ptr<accl::barex::XChannelCallback> &&cb) :
       name_prefix(std::move(name)),
-      is_server(is_server),
+      is_server(is_server_),
       callback_(std::move(cb)) {}
 
   bool check_support() override;

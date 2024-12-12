@@ -310,7 +310,7 @@ static XDevice* choose_nic(const std::vector<XDevice *> &nic_devs, int gpu_dev) 
 
   // https://project.aone.alibaba-inc.com/v2/project/664220/req/61087840
   // 如 aone 所示, XPU 要求必须亲和网卡, 这里 kvtransfer 可能无法发送数据.
-  auto* dev = gpu_dev >= nic_devs.size() ? nic_devs[0] : nic_devs[gpu_dev];
+  auto* dev = uint32_t(gpu_dev) >= nic_devs.size() ? nic_devs[0] : nic_devs[gpu_dev];
   LOG(WARNING) << "choose_nic fallback, may not work on XPU. gpu_dev=" << gpu_dev
                << ", dev=" << dev->GetName();
   return dev;
@@ -558,7 +558,7 @@ void RDMAServer::start_server(ITransferService *service, Context *ctx) {
   std::vector<void *> ptrs(layer_ptr.size());
   std::vector<uint32_t> rkeys(layer_ptr.size());
 
-  for (int idx = 0; idx < layer_ptr.size(); ++idx) {
+  for (size_t idx = 0; idx < layer_ptr.size(); ++idx) {
     auto &out = barex_ctx->layer_mr()[idx].mr();
     auto layer_blk_p = reinterpret_cast<void *>(layer_ptr[idx]);
     ptrs[idx] = layer_blk_p;
@@ -1080,7 +1080,12 @@ void RDMAChannel::flush(std::string& outstr) {
   auto bufptr = sdata.buf;
   auto bufdev = sdata.d_type;
 
-  auto result = ch->Send(std::move(sdata), /* auto_release */ true, {0},
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+  struct x_msg_header header = {0};
+#pragma GCC diagnostic pop
+
+  auto result = ch->Send(std::move(sdata), /* auto_release */ true, header,
                          [pr = std::move(pr), bufptr, bufdev, ch](Status s) mutable {
                            if (!s.IsOk()) {
                              // send 失败时, auto_release 不会 release.

@@ -13,8 +13,8 @@ namespace blade_llm {
 KvTransferClient::KvTransferClient(std::unique_ptr<Context> &&ctx,
                                    std::unique_ptr<ISendStubFactory> &&factory) :
     ctx_(std::move(ctx)),
-    single_thd_(4),
-    stub_factory_(std::move(factory)) {}
+    stub_factory_(std::move(factory)),
+    single_thd_(4) {}
 
 std::unique_ptr<KvTransferClient> KvTransferClient::create(std::unique_ptr<Context> &&ctx,
                                                            const std::vector<TransferProtocol> &protocols,

@@ -15,14 +15,14 @@ struct ReqNotification {
 
   ReqNotification() = default;
 
-  ReqNotification(const InstanceId& src_inst_id,
-                  uint32_t src_worker_id,
-                  const std::string &req_id,
-                  std::vector<uint32_t> &&dst_block_ids) :
-      src_inst_id(src_inst_id),
-      src_worker_id(src_worker_id),
-      req_id(req_id),
-      dst_block_ids(std::move(dst_block_ids)) {};
+  ReqNotification(const InstanceId& src_inst_id_,
+                  uint32_t src_worker_id_,
+                  const std::string &req_id_,
+                  std::vector<uint32_t> &&dst_block_ids_) :
+      src_inst_id(src_inst_id_),
+      src_worker_id(src_worker_id_),
+      req_id(req_id_),
+      dst_block_ids(std::move(dst_block_ids_)) {};
 
   ReqNotification(ReqNotification &&other) noexcept:
       src_inst_id(std::move(other.src_inst_id)),
@@ -132,24 +132,24 @@ TEST(RDMAChannelTest, TestTransefer) {
 
     char *host_buf = new char[token_size * 3];
     cuda_d2h_mem_copy(host_buf, layer_0, token_size * 3);
-    for (auto i = 0; i < token_size; i++) {
+    for (size_t i = 0; i < token_size; i++) {
       EXPECT_EQ(host_buf[i], 7);
     }
-    for (auto i = token_size; i < 2 * token_size; ++i) {
+    for (size_t i = token_size; i < 2 * token_size; ++i) {
       EXPECT_EQ(host_buf[i], 0);
     }
-    for (auto i = 2 * token_size; i < 3 * token_size; ++i) {
+    for (size_t i = 2 * token_size; i < 3 * token_size; ++i) {
       EXPECT_EQ(host_buf[i], 7);
     }
 
     cuda_d2h_mem_copy(host_buf, layer_1, token_size * 3);
-    for (auto i = 0; i < token_size; i++) {
+    for (size_t i = 0; i < token_size; i++) {
       EXPECT_EQ(host_buf[i], 8);
     }
-    for (auto i = token_size; i < 2 * token_size; ++i) {
+    for (size_t i = token_size; i < 2 * token_size; ++i) {
       EXPECT_EQ(host_buf[i], 0);
     }
-    for (auto i = 2 * token_size; i < 3 * token_size; ++i) {
+    for (size_t i = 2 * token_size; i < 3 * token_size; ++i) {
       EXPECT_EQ(host_buf[i], 8);
     }
     LOG(INFO) << "rdma server: all test pass, do clean ...";

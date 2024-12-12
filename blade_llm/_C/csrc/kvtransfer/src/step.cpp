@@ -63,7 +63,7 @@ void StepGuard::wait_layers() {
     assert(val == num_layers);
     return ;
   }
-  for(auto layer_i = 0; layer_i < num_layers; layer_i ++ ) {
+  for(uint32_t layer_i = 0; layer_i < num_layers; layer_i ++ ) {
     record_signal_.wait(layer_i);
     cu_barrier_->wait(layer_i);
     const auto next_layer = layer_i + 1;

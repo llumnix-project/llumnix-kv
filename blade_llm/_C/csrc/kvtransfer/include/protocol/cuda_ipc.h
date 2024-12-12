@@ -12,7 +12,7 @@ namespace blade_llm {
 
 class CudaIpcContext : public IProtocolContext {
  public:
-  explicit CudaIpcContext(int device, bool is_server = false) : device_id_(device), is_server_(is_server) {}
+  explicit CudaIpcContext(int device, bool is_server = false) : is_server_(is_server), device_id_(device) {}
   void init(Context *) override;
   bool check_support() override;
   [[nodiscard]] const TransferProtocol &protocol() const override;
@@ -30,7 +30,7 @@ class CudaIpcContext : public IProtocolContext {
 
 class CudaIpcWrite : public noncopyable {
  public:
-  explicit CudaIpcWrite(CudaIpcContext *ctx) : ctx_(ctx), is_connected_(false) {
+  explicit CudaIpcWrite(CudaIpcContext *ctx) : is_connected_(false), ctx_(ctx) {
     if (ctx_ == nullptr) {
       throw std::runtime_error("cuda context not registered;");
     }

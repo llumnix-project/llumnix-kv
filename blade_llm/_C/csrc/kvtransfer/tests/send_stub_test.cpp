@@ -90,7 +90,7 @@ class FakeChannel : public IChannel {
   std::shared_ptr<std::atomic<int>> flush_cnt = std::make_shared<std::atomic<int>>(0);
   std::vector<IpcBlock>* data_;
 
-  FakeChannel() : q(), dst_inst_id("0"), dst_worker_id(INVALID_INST_WORKER_ID) {};
+  FakeChannel() : dst_inst_id("0"), dst_worker_id(INVALID_INST_WORKER_ID), q() {};
   void connect(const WorkerInfo &info) override {
     dst_inst_id = info.inst_id;
     dst_worker_id = info.worker_id;

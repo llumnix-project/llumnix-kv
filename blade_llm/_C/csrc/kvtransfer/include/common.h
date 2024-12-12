@@ -42,6 +42,7 @@ typedef uint32_t WorkerId;
 typedef std::string RequestId;
 
 struct WorkerInfo {
+  InstanceId inst_id;
   WorkerId worker_id;
   uint32_t tp_size;
   uint32_t worker_tp_rank;
@@ -50,7 +51,6 @@ struct WorkerInfo {
   uint32_t layer_num_blocks{1};
   uint32_t num_layers{1};
   uint8_t transfer_protocols{0};
-  InstanceId inst_id;
   std::string addr;
   std::vector<uint8_t> other_info;
 
@@ -69,23 +69,23 @@ struct WorkerInfo {
       block_size(16 * KB),
       token_size(KB) {};
 
-  WorkerInfo(InstanceId&& inst_id,
-             WorkerId worker_id,
-             uint32_t tp_size,
-             uint32_t worker_tp_rank,
-             uint32_t block_size,
-             uint32_t token_size,
-             uint32_t layer_num_blocks,
-             uint32_t num_layers,
+  WorkerInfo(InstanceId&& inst_id_,
+             WorkerId worker_id_,
+             uint32_t tp_size_,
+             uint32_t worker_tp_rank_,
+             uint32_t block_size_,
+             uint32_t token_size_,
+             uint32_t layer_num_blocks_,
+             uint32_t num_layers_,
              uint32_t protocols) :
-      inst_id(std::move(inst_id)),
-      worker_id(worker_id),
-      tp_size(tp_size),
-      worker_tp_rank(worker_tp_rank),
-      block_size(block_size),
-      token_size(token_size),
-      layer_num_blocks(layer_num_blocks),
-      num_layers(num_layers),
+      inst_id(std::move(inst_id_)),
+      worker_id(worker_id_),
+      tp_size(tp_size_),
+      worker_tp_rank(worker_tp_rank_),
+      block_size(block_size_),
+      token_size(token_size_),
+      layer_num_blocks(layer_num_blocks_),
+      num_layers(num_layers_),
       transfer_protocols(protocols) {};
 
   static WorkerInfo from_bytes(const unsigned char *src, size_t length);

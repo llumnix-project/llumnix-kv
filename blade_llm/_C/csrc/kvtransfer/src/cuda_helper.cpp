@@ -74,7 +74,7 @@ void cuda_create_ipc_handles(const uint64_t *addrs, size_t num_addr, cudaIpcHand
     throw std::runtime_error("fail to create ipc handles, too many handles;");
   }
   memset(target, 0, sizeof(cudaIpcHandles));
-  for (auto i = 0; i < num_addr; i++) {
+  for (size_t i = 0; i < num_addr; i++) {
     void *ptr = reinterpret_cast<void *>((uintptr_t) addrs[i]);
     auto ret = cudaIpcGetMemHandle((cudaIpcMemHandle_t *) &target->ipc_handles[i], ptr);
     if (ret != cudaSuccess) {
@@ -94,7 +94,7 @@ void cuda_open_ipc_handle(const cudaIpcHandles *src, size_t num_handles, void **
     LOG(ERROR) << "too many ipc handles to open, max support" << MAX_ARRAY_LEN;
     throw std::runtime_error("fail to open ipc handles, too many handles;");
   }
-  for (auto i = 0; i < num_handles; i++) {
+  for (size_t i = 0; i < num_handles; i++) {
     checkCudaErrors(
         cudaIpcOpenMemHandle(&target[i], src->ipc_handles[i], cudaIpcMemLazyEnablePeerAccess));
   }

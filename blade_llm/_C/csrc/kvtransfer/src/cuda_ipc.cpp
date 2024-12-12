@@ -48,7 +48,7 @@ bool read_handshake(int fd, InstanceId& name, WorkerId& id) {
   }
   name.resize(name_len);
   ret = read_sock(fd, name.data(), name_len);
-  if (ret < 0 || ret != name_len) {
+  if (ret < 0 || ret != int(name_len)) {
     LOG(ERROR) << "unexpected eof of socket;";
     return false;
   }
@@ -92,14 +92,14 @@ bool read_req(int fd, RequestId& req_id, std::vector<uint32_t> & blocks) {
   }
   req_id.resize(req_len);
   ret = read_sock(fd, req_id.data(), req_len);
-  if (ret < 0 || ret != req_len) {
+  if (ret < 0 || ret != int(req_len)) {
     LOG(ERROR) << "unexpected eof of socket;";
     return false;
   }
   uint32_t num_blocks = head & 0xffffffff;
   blocks.resize(num_blocks);
   ret = read_sock(fd, (char *) blocks.data(), num_blocks * sizeof(uint32_t));
-  if (ret < 0 || ret != num_blocks * sizeof(uint32_t)) {
+  if (ret < 0 || uint32_t(ret) != num_blocks * sizeof(uint32_t)) {
     LOG(ERROR) << "unexpected eof of socket;";
     return false;
   }
@@ -295,7 +295,7 @@ CudaTransferServer::~CudaTransferServer() {
 void CudaIpcContext::init(Context *ctx) {
   auto &layer_addrs = ctx->layer_data_address();
   src_layer_ptrs_.resize(layer_addrs.size());
-  for (auto i = 0; i < layer_addrs.size(); ++i) {
+  for (size_t i = 0; i < layer_addrs.size(); ++i) {
     src_layer_ptrs_[i] = reinterpret_cast<const void *>(layer_addrs[i]);
   }
   cuda_create_ipc_handles(layer_addrs.data(), layer_addrs.size(), &ipc_handles_);

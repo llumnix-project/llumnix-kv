@@ -16,9 +16,11 @@ void FileSysNaming::connect(const Schema &schema, const std::string &path) {
     if (!std::filesystem::exists(instance_path_)) {
       std::filesystem::create_directory(instance_path_);
       auto time_file = instance_path_ / "_timestamp_";
-      std::ofstream report(time_file, std::ios::out);
-      report << get_unix_timestamp() << std::endl;
-      report.close();
+      {
+        std::ofstream report(time_file, std::ios::out);
+        report << get_unix_timestamp() << std::endl;
+        report.close();
+      }
       periodic_task_ = std::thread([time_file, this]() {
         while (!this->stop_.load(std::memory_order_relaxed)) {
           std::this_thread::sleep_for(std::chrono::seconds(3));

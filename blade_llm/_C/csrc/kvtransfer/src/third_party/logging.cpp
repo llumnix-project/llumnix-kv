@@ -50,7 +50,7 @@ struct StringData {
   };
 
   StringData() = default;
-  StringData(const char *data, size_t size) : data(data), size(size) {}
+  StringData(const char *data_, size_t size_) : data(data_), size(size_) {}
 
   bool operator==(const StringData &rhs) const {
     return size == rhs.size && memcmp(data, rhs.data, size) == 0;

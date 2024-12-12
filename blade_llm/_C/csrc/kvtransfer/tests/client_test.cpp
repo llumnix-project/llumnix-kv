@@ -46,7 +46,7 @@ MATCHER_P(batchCheck, expect_req_info, "unexpected batch") {
   EXPECT_EQ(tasks.size(), expect.size());
   std::stable_sort(tasks.begin(), tasks.end(),
             [](const ReqSendTask *a, const ReqSendTask *b) { return a->req_id() < b->req_id(); });
-  for (auto i = 0; i < expect.size(); ++i) {
+  for (size_t i = 0; i < expect.size(); ++i) {
     const ReqSendTask *a = tasks[i];
     const ReqSendTask *b = &expect[i];
     EXPECT_EQ(a->req_id(), b->req_id());
@@ -112,7 +112,7 @@ class FakeStubFactory : public ISendStubFactory {
   FakeStubFactory() = default;
   SendStub create_stub(const InstanceId &dst_inst, WorkerId dst_worker, uint32_t, uint32_t,
                        std::optional<TransferProtocol> p) override {
-    for (auto i = 0; i < stubs.size(); ++i) {
+    for (size_t i = 0; i < stubs.size(); ++i) {
       if (stubs[i] != nullptr) {
         if (stubs[i]->dst_inst == dst_inst && stubs[i]->dst_worker == dst_worker) {
           return std::move(stubs[i]);
