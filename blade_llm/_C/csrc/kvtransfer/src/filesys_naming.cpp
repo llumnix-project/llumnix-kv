@@ -5,7 +5,10 @@
 #include <fstream>
 #include <cstdio>
 #include <thread>
-
+#include <unistd.h>
+#include <stdlib.h>
+#include <string.h>
+#include "envcfg.h"
 
 namespace blade_llm {
 
@@ -15,18 +18,12 @@ void FileSysNaming::connect(const Schema &schema, const std::string &path) {
     instance_path_ = naming_path_ / inst_id;
     if (!std::filesystem::exists(instance_path_)) {
       std::filesystem::create_directory(instance_path_);
-      auto time_file = instance_path_ / "_timestamp_";
-      {
-        std::ofstream report(time_file, std::ios::out);
-        report << get_unix_timestamp() << std::endl;
-        report.close();
-      }
-      periodic_task_ = std::thread([time_file, this]() {
+      write_file("_timestamp_", std::to_string(get_unix_timestamp()));
+      periodic_task_ = std::thread([this]() {
         while (!this->stop_.load(std::memory_order_relaxed)) {
-          std::this_thread::sleep_for(std::chrono::seconds(3));
-          std::ofstream report(time_file, std::ios::out | std::ios::trunc);
-          report << get_unix_timestamp() << std::endl;
-          report.close();
+          auto sleep_dur = std::chrono::seconds(env_fsnaming_keepalive_interval_s());
+          std::this_thread::sleep_for(sleep_dur);
+          write_file("_timestamp_", std::to_string(get_unix_timestamp()));
         }
       });
     }
@@ -82,7 +79,9 @@ const std::vector<std::string> & FileSysNaming::list() {
           if (opt.has_value()) {
             try {
               auto last_report = std::stol(opt.value());
-              if (last_report >= now || now - last_report < 6) {
+              const auto tolerate_s = env_fsnaming_tolerate_interval_s();
+              bool good_d = last_report >= now || now - last_report < tolerate_s;
+              if (good_d) {
                 list_cache_.push_back(inst_name);
               }
             } catch (const std::exception & e) {
@@ -98,20 +97,47 @@ const std::vector<std::string> & FileSysNaming::list() {
 }
 
 void FileSysNaming::write_file(const std::string &path, const std::string &content) {
-  auto full_path = instance_path_ / path;
-  auto mode = std::ios::out;
-  if (std::filesystem::exists(full_path)) {
-    mode |= std::ios::trunc;
+  std::string full_path = instance_path_ / path;
+
+  // 先写入临时文件, 之后通过 rename 原子性机制确保其他进程不会看到 full_path 中间状态.
+  // 目前在 XPU EAS 环境中观测到, prefill 读取 D _timestamp_ 文件时, 读取到空.
+  // pre-cxx11 abi 下 std::string .data() 返回的指针有效性存疑, 这里使用 vector 更安全.
+  auto temp_path = std::vector<char>(full_path.begin(), full_path.end());
+  // .tmpXXXXXX
+  temp_path.emplace_back('.');
+  temp_path.emplace_back('t');
+  temp_path.emplace_back('m');
+  temp_path.emplace_back('p');
+  temp_path.emplace_back('X');
+  temp_path.emplace_back('X');
+  temp_path.emplace_back('X');
+  temp_path.emplace_back('X');
+  temp_path.emplace_back('X');
+  temp_path.emplace_back('X');
+  temp_path.emplace_back('\0');
+  int fd = mkstemp(temp_path.data());
+  if (fd == -1) {
+    throw std::runtime_error("FileSysNaming.write_file: mkstemp failed. err=" + std::string(strerror(errno)));
   }
-  std::ofstream out(full_path, mode);
-  if (out.is_open()) {
-    out << content << std::endl;
-    out.flush();
-    out.close();
-    LOG(INFO) << "KVT file naming: store key:[" << full_path << ", " << content << "];";
-  } else {
-    throw std::runtime_error("failed to open file: " + full_path.string());
+  ::close(fd);
+
+  auto tmp_out = std::ofstream(temp_path.data());
+  if (!tmp_out.is_open()) {
+    auto errmsg = std::string("FileSysNaming.write_file: open temp failed. path=");
+    errmsg += temp_path.data();
+    throw std::runtime_error(errmsg);
   }
+  tmp_out << content << std::endl;
+  tmp_out.flush();
+  tmp_out.close();
+
+  int sysret = rename(temp_path.data(), full_path.c_str());
+  if (sysret != 0) {
+    throw std::runtime_error("FileSysNaming.write_file: rename failed. err=" + std::string(strerror(errno)));
+  }
+
+  LOG(INFO) << "KVT file naming: store key:[" << full_path << ", " << content << "];";
+  return ;
 }
 void FileSysNaming::create_dir(const std::string &path) {
   std::filesystem::create_directory(path);
