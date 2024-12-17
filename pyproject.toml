@@ -7,6 +7,7 @@ exclude = [
   'blade_llm/third_party/**',
   '.git/',
   './blade_llm/evals/opencompass_extension/bladellm_config.py',
+  'benchmark/**',
   './blade_llm/evals/run_opencompass.py',
   './blade_llm/module/triton/*.py',
   # TODO(xiafei.qiuxf): exclude triton code from checking, reopening soon.
@@ -37,6 +38,7 @@ ignore = [
   'PLR0915', # Too many statements
   'PLR5501',
 ]
+logger-objects = ["loguru.logger"]
 
 [tool.ruff.lint.per-file-ignores]
 '__init__.py' = [
