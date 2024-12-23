@@ -62,3 +62,10 @@ max-complexity = 10
 [tool.ruff.format]
 quote-style = 'preserve'
 docstring-code-format = true
+
+# Use pylint for missing rules in ruff.
+# And still excluding pylint from pre-commit due to it's speed.
+[tool.pylint.'MESSAGES CONTROL']
+disable = 'R,C,W,E,I'
+enable = 'E1120'
+jobs = 8
