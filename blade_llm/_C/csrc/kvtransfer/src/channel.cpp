@@ -94,4 +94,37 @@ std::unique_ptr<IChannel> create_channel(Context *ctx, const TransferProtocol &p
     default:throw std::runtime_error("Unknown transport protocol;");
   }
 }
+
+Channel ChannelFactory::create(const WorkerInfo& info) {
+  SupportTransferProtocols target_supports(info.transfer_protocols);
+  const auto& proto_opt = this->proto_;
+  if (proto_opt.has_value()) {
+    auto &proto = proto_opt.value();
+    if (!target_supports.is_support(proto)) {
+      throw std::runtime_error("target worker not support protocol: " + proto.to_string());
+    }
+    auto ch = create_channel(this->ctx_, proto);
+    ch->connect(info);
+    return ch;
+  }
+
+  auto protos = target_supports.as_vector();
+  // TODO : set priority for each protocol;
+  for (const auto &p : protos) {
+    try {
+      auto ch = create_channel(ctx_, p);
+      ch->connect(info);
+      LOG(INFO) << "KVT: connect target worker. dst=" << info.inst_id
+                << ",dst_id=" << info.worker_id
+                << ",use_proto=" << p.to_string();
+      return ch;
+    } catch (std::exception &e) {
+      LOG(WARNING) << "KVT: connect target worker failed. dst=" << info.inst_id
+                   << ",dst_id=" << info.worker_id
+                   << ",use_proto=" << p.to_string()
+                   << ",ex=" << e.what();
+    }
+  }
+  throw std::runtime_error("target worker not support protocol");
+}
 }

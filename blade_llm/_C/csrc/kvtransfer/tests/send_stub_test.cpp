@@ -145,6 +145,17 @@ class ProxyChannel : public IChannel {
   IChannel *ch_;
 };
 
+
+class FakeChannelFactory : public IChannelFactory {
+  IChannel* ch_;
+public:
+  FakeChannelFactory(IChannel* ch) : ch_(ch) {}
+
+  Channel create(const WorkerInfo& dst_info) override {
+    return std::make_unique<ProxyChannel>(ch_);
+  }
+};
+
 template <typename T>
 static std::vector<T> queue2vec(std::queue<T>& input) {
   auto output = std::vector<T>();
@@ -180,7 +191,8 @@ static void test_parse_block_generate(int p_rank, int d_rank) {
   fbc->connect(d_info);
   auto& fbcq = fbc->q;
   auto flush_cnt = fbc->flush_cnt;
-  auto tx = KvSendStub(d_info, p_info, 0, num_layers, std::move(fbc));
+  auto tx = KvSendStub(d_info, p_info, 0, num_layers,
+                       std::make_unique<FakeChannelFactory>(fbc.get()));
   tx.start();
   EXPECT_EQ(tx.check_state(), StubState::WORKING);
 
@@ -199,7 +211,7 @@ static void test_parse_block_generate(int p_rank, int d_rank) {
     while (flush_cnt->load() < 1) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    EXPECT_FALSE(req0.is_all_transferred());
+    EXPECT_FALSE(req0.state() == ReqState::OK);
 
     auto actual_q = queue2vec(fbcq);
     auto expect_q = std::vector<Message>();
@@ -383,7 +395,7 @@ static void dgtp_test_parse_block_generate(int p_rank, int d_rank) {
   fbc->connect(d_info);
   auto& fbcq = fbc->q;
   auto flush_cnt = fbc->flush_cnt;
-  auto tx = KvSendStub(d_info, p_info, 0, num_layers, std::move(fbc));
+  auto tx = KvSendStub(d_info, p_info, 0, num_layers, std::make_unique<FakeChannelFactory>(fbc.get()));
   tx.start();
   EXPECT_EQ(tx.check_state(), StubState::WORKING);
 
@@ -402,7 +414,7 @@ static void dgtp_test_parse_block_generate(int p_rank, int d_rank) {
     while (flush_cnt->load() < 1) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    EXPECT_FALSE(req0.is_all_transferred());
+    EXPECT_FALSE(req0.state() == ReqState::OK);
 
     auto actual_q = queue2vec(fbcq);
     auto expect_q = std::vector<Message>();
@@ -580,7 +592,7 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
   ctx.set_block_params(bs, ts, 8);
   ctx.set_layer_data_address(0, {0, 8 * bs});
   uint32_t num_layers = 2;
-  auto tx = KvSendStub(dst_info, src_info, 0, num_layers, std::make_unique<ProxyChannel>(fbc.get()));
+  auto tx = KvSendStub(dst_info, src_info, 0, num_layers, std::make_unique<FakeChannelFactory>(fbc.get()));
   tx.start();
   EXPECT_EQ(tx.check_state(), StubState::WORKING);
   {
@@ -598,7 +610,7 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
     while (flush_cnt->load() < 1) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    EXPECT_FALSE(req0.is_all_transferred());
+    EXPECT_FALSE(req0.state() == ReqState::OK);
     EXPECT_EQ(q->size(), 3);
     uint32_t layer = 0;
     while (layer < 2) {
@@ -632,7 +644,7 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
     while (flush_cnt->load() < 2) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    EXPECT_FALSE(req1.is_all_transferred());
+    EXPECT_FALSE(req1.state() == ReqState::OK);
     EXPECT_EQ(q->size(), 3); // because req1 has 17 tokens need two continuous blocks, can be merged;
     {
       auto b1 = q->front();
@@ -670,7 +682,7 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
-    EXPECT_TRUE(req3.is_all_transferred());
+    EXPECT_TRUE(req3.state() == ReqState::OK);
     EXPECT_EQ(q->size(), 4);
     {
       auto b1 = q->front();
@@ -740,11 +752,13 @@ TEST(SendStubTest, UseMockChannel) {
   EXPECT_CALL(channel, flush(_)).Times(1);
   EXPECT_CALL(channel, send_notification(_)).Times(0);
 
-  auto tx = KvSendStub(dst_info, src_info, 0, num_layers, std::make_unique<ProxyChannel>(&channel));
-  tx.start();
-  tx.send_batch(std::move(task));
-  step_0->notify_layer_ready(num_layers);
-  usleep(3 * 1000 * 1000);  // 3s
+  {
+    auto tx = KvSendStub(dst_info, src_info, 0, num_layers, std::make_unique<FakeChannelFactory>(&channel));
+    tx.start();
+    tx.send_batch(std::move(task));
+    step_0->notify_layer_ready(num_layers);
+    usleep(3 * 1000 * 1000);  // 3s
+  }
 }
 
 std::tuple<size_t, size_t, size_t, size_t> merge_interval(std::vector<IpcBlock> &input);
@@ -801,6 +815,183 @@ TEST(SendStubTest, MergeIntervalTest) {
     EXPECT_EQ(total_size, 5);
     EXPECT_EQ(data, edata);
     EXPECT_EQ(cnt, 2);
+  }
+}
+
+
+class ProxyChannelFactory : public IChannelFactory {
+  IChannelFactory* factory_;
+public:
+  ProxyChannelFactory(IChannelFactory* f): factory_(f) {}
+
+  Channel create(const WorkerInfo& dst_info) override {
+    return factory_->create(dst_info);
+  }
+};
+
+static constexpr uint32_t bs = 16 * KB;
+static constexpr uint32_t ts = KB;
+
+
+// FaultTolerantTestChannel
+class FTTC : public IChannel {
+  int ch_id_ = 0;
+  bool* dead_ = nullptr;
+  bool* register_data_called_ = nullptr;
+  bool* send_data_called_ = nullptr;
+  bool* flush_called_ = nullptr;
+  bool* send_notification_called_ = nullptr;
+public:
+  FTTC(int ch_id, bool* dead, bool* register_data_called, bool* send_data_called, bool* flush_called, bool* send_notification_called):
+    ch_id_(ch_id),
+    dead_(dead),
+    register_data_called_(register_data_called),
+    send_data_called_(send_data_called),
+    flush_called_(flush_called),
+    send_notification_called_(send_notification_called) {}
+
+  ~FTTC() {
+    *dead_ = true;
+  }
+
+  void connect(const WorkerInfo &dst_info) {}
+  void register_data(std::vector<IpcBlock>& data, TPKind kind) override {
+    *register_data_called_ = true;
+    if (ch_id_ == 0) {
+    } else if (ch_id_ == 1) {
+      IpcBlock expect_data(0, 4 * bs, 8 * ts);
+      std::vector<IpcBlock> expect_datas;
+      expect_datas.emplace_back(expect_data);
+      EXPECT_EQ(data, expect_datas);
+    } else {
+      EXPECT_TRUE(false);
+    }
+  }
+
+  void send_data(size_t layer_index) override {
+    *send_data_called_ = true;
+    if (ch_id_ == 0) {
+      if (layer_index == 1) {
+        throw std::runtime_error("biubiu");
+      }
+    } else if (ch_id_ == 1) {
+    } else {
+      EXPECT_TRUE(false);
+    }
+  }
+
+  void flush(std::string& out) override {
+    *flush_called_ = true;
+  }
+
+  void send_notification(const std::vector<const ReqSendTask*>& reqs) override {
+    *send_notification_called_ = true;
+    EXPECT_EQ(ch_id_, 1);
+    EXPECT_EQ(reqs.size(), 1);
+    EXPECT_EQ(reqs[0]->req_id(), "3");
+  }
+};
+
+// FaultTolerantTestChannelFactory
+struct FTTCF: public IChannelFactory {
+  int ch_id_ = 0;
+  bool dead_ch_[2] = {false, false};
+  bool register_data_called_[2] = {false, false};
+  bool send_data_called_[2] = {false, false};
+  bool flush_called_[2] = {false, false};
+  bool send_notification_called_[2] = {false, false};
+public:
+  FTTCF() {}
+
+  Channel create(const WorkerInfo& dst_info) override {
+    auto ch_id = ch_id_++;
+    EXPECT_TRUE(ch_id == 0 || ch_id == 1);
+    return std::make_unique<FTTC>(ch_id,
+      &dead_ch_[ch_id],
+      &register_data_called_[ch_id],
+      &send_data_called_[ch_id],
+      &flush_called_[ch_id],
+      &send_notification_called_[ch_id]);
+  }
+};
+
+
+TEST(SendStubTest, FaultTolerantTest) {
+  WorkerInfo src_info("0", 0);
+  src_info.block_size = bs;
+  src_info.token_size = ts;
+
+  WorkerInfo dst_info("1", 0);
+  dst_info.block_size = bs;
+  dst_info.token_size = ts;
+
+  Context ctx("0", 1);
+  ctx.set_block_params(bs, ts, 8);
+  ctx.set_layer_data_address(0, {0, 8 * bs});
+  uint32_t num_layers = 2;
+
+  FTTCF fttcf;
+  auto tx = std::make_unique<KvSendStub>(dst_info, src_info, 0, num_layers, std::make_unique<ProxyChannelFactory>(&fttcf));
+  tx->start();
+
+  RequestInfo req1("1", 0, "1", {10, 11, 12}, {14, 15, 16});
+  RequestInfo req2("1", 0, "2", {17, 18, 19}, {20, 21, 22});
+  RequestInfo req3("1", 0, "3", {0, 1, 2}, {4, 5, 6});
+  {
+    auto step_0 = std::make_shared<Step>(0);
+    BatchSendTask task(step_0);
+    task.tasks.emplace_back(&req1, 0, 8, true);
+    task.tasks.emplace_back(&req2, 0, 8, false);
+    tx->send_batch(std::move(task));
+    step_0->notify_layer_ready(num_layers);
+
+    while (req1.state() == ReqState::INPROCESS) {
+      usleep(10 * 1000);
+    }
+    while (req2.state() == ReqState::INPROCESS) {
+      usleep(10 * 1000);
+    }
+    EXPECT_EQ(req1.state(), ReqState::FAILED);
+    EXPECT_EQ(req2.state(), ReqState::FAILED);
+    while (!fttcf.dead_ch_[0]) {
+      usleep(10 * 1000);
+    }
+    EXPECT_TRUE(fttcf.register_data_called_[0]);
+    EXPECT_TRUE(fttcf.send_data_called_[0]);
+    EXPECT_FALSE(fttcf.flush_called_[0]);
+    EXPECT_FALSE(fttcf.send_notification_called_[0]);
+
+    auto step_1 = std::make_shared<Step>(1);
+    BatchSendTask task1(step_1);
+    task1.tasks.emplace_back(&req1, 0, 8, true);
+    task1.tasks.emplace_back(&req2, 0, 8, false);
+    tx->send_batch(std::move(task1));
+  }
+
+  {
+    auto step_2 = std::make_shared<Step>(2);
+    BatchSendTask task2(step_2);
+    task2.tasks.emplace_back(&req2, 8, 16, true);
+    task2.tasks.emplace_back(&req3, 0, 8, true);
+    tx->send_batch(std::move(task2));
+    step_2->notify_layer_ready(num_layers);
+
+    while (req3.state() == ReqState::INPROCESS) {
+      usleep(10 * 1000);
+    }
+    EXPECT_EQ(req1.state(), ReqState::FAILED);
+    EXPECT_EQ(req2.state(), ReqState::FAILED);
+    EXPECT_EQ(req3.state(), ReqState::OK);
+    EXPECT_TRUE(fttcf.register_data_called_[1]);
+    EXPECT_TRUE(fttcf.send_data_called_[1]);
+    EXPECT_TRUE(fttcf.flush_called_[1]);
+    EXPECT_TRUE(fttcf.send_notification_called_[1]);
+    EXPECT_FALSE(fttcf.dead_ch_[1]);
+  }
+  tx->stop();
+  tx.reset();
+  while (!fttcf.dead_ch_[1]) {
+    usleep(10 * 1000);
   }
 }
 }

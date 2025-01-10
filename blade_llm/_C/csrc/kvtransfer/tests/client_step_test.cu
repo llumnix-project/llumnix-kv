@@ -50,6 +50,19 @@ class FakeChannel: public IChannel {
   void close() override {};
 };
 
+class FakeChannelFactory : public IChannelFactory {
+  Context* const ctx_;
+  std::vector<uint64_t> dst_layer_;
+  std::queue<blade_llm::RequestId>* notifies_;
+public:
+  FakeChannelFactory(Context *ctx, std::vector<uint64_t> dst, std::queue<blade_llm::RequestId>* n):
+    ctx_(ctx), dst_layer_(std::move(dst)), notifies_(n) {}
+
+  Channel create(const WorkerInfo&) override {
+    return std::make_unique<FakeChannel>(ctx_, dst_layer_, notifies_);
+  }
+};
+
 class FakeSendStubFactory : public ISendStubFactory {
  public:
   const std::vector<uint64_t> dst_layer;
@@ -61,13 +74,13 @@ class FakeSendStubFactory : public ISendStubFactory {
   SendStub create_stub(const InstanceId& i, WorkerId w, uint32_t start_layer, uint32_t num_layers,
                        std::optional<TransferProtocol> p) override {
     LOG(INFO) << "Create SendStub";
-    auto channel = std::make_unique<FakeChannel>(ctx, dst_layer, notifies);
+    auto cf = std::make_unique<FakeChannelFactory>(ctx, dst_layer, notifies);
     WorkerInfo dst_info(i, w);
     dst_info.tp_size = 1;
     dst_info.worker_tp_rank = 0;
     dst_info.block_size =  16 * KB;
     dst_info.token_size = KB;
-    return std::make_unique<KvSendStub>(dst_info, ctx->worker_info(), start_layer, num_layers, std::move(channel));
+    return std::make_unique<KvSendStub>(dst_info, ctx->worker_info(), start_layer, num_layers, std::move(cf));
   }
 };
 
@@ -168,7 +181,7 @@ TEST(KVTransferClientTest, TestKernelSyncAndDataTransfer) {
     }
   }
   auto done_ret = client.check_transfer_done(TEST_REQ_ID);
-  EXPECT_TRUE(done_ret);
+  EXPECT_TRUE(done_ret == ReqState::OK);
 
   client.remove_target("0", 0);
   LOG(INFO) << "finish";

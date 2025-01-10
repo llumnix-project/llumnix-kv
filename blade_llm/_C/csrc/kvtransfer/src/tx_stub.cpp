@@ -2,7 +2,9 @@
 #include "utils/timer.h"
 #include "thrid_party/logging.h"
 #include "channel.h"
+#include "envcfg.h"
 #include <unistd.h>
+#include <random>
 
 namespace blade_llm {
 
@@ -134,15 +136,181 @@ static void parse_block_send_p_lt_d(
   return ;
 }
 
-void KvSendStub::start_async() {
-  auto const dst_id = dst_info_.inst_id;
-  auto const dst_worker_id = dst_info_.worker_id;
+using ParseBlockFunc = decltype(parse_block_send_p_lt_d);
+
+struct KvSendStub::TaskContext {
+  KvSendStub* const stub = nullptr;
+  TPKind const tpkind = TPKind::UNKNOWN;
+  ParseBlockFunc* const parse_block = nullptr;
+
+  // runtime state
   std::string flush_out_buf;
   std::vector<IpcBlock> send_blocks;
   std::vector<const ReqSendTask *> finished_req;
-  TPKind tpkind = TPKind::UNKNOWN;
+  Channel ch;
+  uint64_t wait_time_us = 0;
+  uint64_t wait_and_send_us = 0;
+  uint64_t send_notify_us = 0;
+  Timepoint iter_start_ts;
+  Timepoint send_finish_ts;
 
-  decltype(parse_block_send_p_lt_d)* parse_block_send = nullptr;
+private:
+#ifdef NDEBUG
+  void fault_inject() {}
+#else
+  static constexpr uint64_t SCALE = 100000;
+  std::mt19937_64 rng_;
+  std::uniform_int_distribution<uint64_t> dst_{0, 100 * SCALE - 1};
+
+  void fault_inject() {
+    auto& self = *this;
+    uint64_t rate = (env_debug_tx_failrate() - 1) * SCALE;
+    uint64_t rnd = self.dst_(self.rng_);
+    if (rnd >= rate) {
+      return ;
+    }
+    throw std::runtime_error("biubiu");
+  }
+#endif
+public:
+  TaskContext(KvSendStub* s, TPKind k, ParseBlockFunc* p) noexcept
+    : stub(s), tpkind(k), parse_block(p) {
+#ifndef NDEBUG
+    this->rng_.seed(std::uint_fast64_t(s->dst_info_.worker_id));
+#endif
+  }
+
+  void do_task(BatchSendTask& batch) {
+    auto& self = *this;
+    auto const step_idx = batch.step->step_idx;
+    const auto& srcinfo = self.stub->src_info_;
+    const auto& dstinfo = self.stub->dst_info_;
+    const auto dst_id = dstinfo.inst_id;
+    const auto dst_worker_id = dstinfo.worker_id;
+
+#ifndef NDEBUG
+    // 用于提高 https://aone.alibaba-inc.com/v2/project/664220/req/60815172 复现概率.
+    usleep(300 * 1000);  // sleep 300ms
+#endif
+
+    self.iter_start_ts = SteadyClock::now();  // iterator begin;
+    auto const queue_us = elapse_us(batch.step->start_send_ts, self.iter_start_ts);
+
+    // prepare
+    assert(self.flush_out_buf.empty());
+    assert(self.finished_req.empty());
+    assert(self.send_blocks.empty());
+    assert(!batch.tasks.empty());
+    for (const auto& task : batch.tasks) {
+      assert(task.new_tokens > 0);
+      assert(task.dst_inst_id() == dst_id);
+      assert(task.dst_worker_id() == dst_worker_id);
+      if (task.state() == ReqState::FAILED) {
+        continue;
+      }
+      assert(task.state() == ReqState::INPROCESS);
+
+      self.parse_block(&srcinfo, &dstinfo, &task, self.send_blocks);
+      if (task.reach_last_token) {
+        self.finished_req.emplace_back(&task);
+      }
+    }
+    if (self.send_blocks.empty()) {
+      return;
+    }
+    assert(!self.send_blocks.empty());
+
+    self.try_create_channel();
+    try {
+      self.do_send(batch);
+    } catch (std::exception& ex) {
+      LOG(ERROR) << "KVT tx_stub fail to send data. DstId=" << dst_id
+                 << ",DstWorkerId=" << dst_worker_id
+                 << ",StepIdx=" << step_idx
+                 << ',' << self.flush_out_buf
+                 << ",ex=" << ex.what();
+      self.ch.reset();
+      for (const auto& task : batch.tasks) {
+        assert(task.state() == ReqState::INPROCESS || task.state() == ReqState::FAILED);
+        task.set_state(ReqState::FAILED);
+      }
+      return ;
+    }
+    assert(self.send_finish_ts != Timepoint());
+
+    for (auto task : self.finished_req) {
+      assert(task->reach_last_token);
+      LOG(INFO) << "KVT tx_stub. DstId=" << dst_id << ",DstWorkerId=" << dst_worker_id
+                << ",StepIdx=" << step_idx << ",FinishedReq=" << task->req_id();
+      task->set_state(ReqState::OK);
+      // DO NOT ACCESS task! IT MAY BE FREED!
+      // Add clang tidy: USE-AFTER-MOVED to detect the bug.
+    }
+
+    batch.step->update_last_send_finish_ts(self.send_finish_ts);
+    LOG(INFO) << "SendStubMetrics. DstId=" << dst_id << ",DstWorkerId=" << dst_worker_id
+              << ",StepIdx=" << step_idx << ",FinishedReqSize=" << self.finished_req.size()
+              << "," << self.flush_out_buf
+              << ",QueueUs=" << queue_us
+              << ",WaitUs=" << self.wait_time_us
+              << ",WaitAndSendUs=" << self.wait_and_send_us
+              << ",SendNotifyUs=" << self.send_notify_us
+              << ",SendFinishTs=" << self.send_finish_ts.time_since_epoch().count();  //  send stub id
+    return ;
+  }
+
+  void clear() noexcept {
+    auto& self = *this;
+    self.flush_out_buf.clear();
+    self.send_blocks.clear();
+    self.finished_req.clear();
+  }
+private:
+  void do_send(BatchSendTask& batch) {
+    auto& self = *this;
+    const auto start_layer = self.stub->start_layer_;
+    const auto num_layers = self.stub->num_layers_;
+
+    self.ch->register_data(self.send_blocks, self.tpkind);
+    self.wait_time_us = 0;
+    for (auto i = start_layer; i < num_layers; ++i) {
+      TimeWatch wait_start;
+      batch.step->wait_layer_ready(i);
+      self.wait_time_us += wait_start.get_elapse_us();
+
+      // NOTE: write 可能是异步的! write 返回并不意味着数据发送了!
+      self.ch->send_data(i);
+    }
+    self.fault_inject();
+    self.ch->flush(self.flush_out_buf);
+    self.send_finish_ts = SteadyClock::now();
+    self.wait_and_send_us = elapse_us(self.iter_start_ts, self.send_finish_ts);
+
+    if (self.finished_req.empty()) {
+      self.send_notify_us = 0;
+      return ;
+    }
+
+    self.ch->send_notification(self.finished_req);
+    auto send_notify_end_ts = SteadyClock::now();
+    self.send_notify_us = elapse_us(self.send_finish_ts, send_notify_end_ts);
+    self.send_finish_ts = send_notify_end_ts;
+    return ;
+  }
+
+  void try_create_channel() {
+    auto& self = *this;
+    if (self.ch) {
+      return ;
+    }
+    self.ch = self.stub->channel_factory_->create(self.stub->dst_info_);
+    return ;
+  }
+};
+
+void KvSendStub::start_async() {
+  TPKind tpkind = TPKind::UNKNOWN;
+  ParseBlockFunc* parse_block_send = nullptr;
   if (src_info_.tp_size == dst_info_.tp_size) {
     parse_block_send = parse_block_send_p_eq_d;
     tpkind = TPKind::PEQD;
@@ -154,6 +322,7 @@ void KvSendStub::start_async() {
     tpkind = TPKind::PLTD;
   }
   assert(tpkind != TPKind::UNKNOWN);
+  auto taskctx = TaskContext(this, tpkind, parse_block_send);
 
   for (;;) {
     BatchSendTask batch;
@@ -162,113 +331,36 @@ void KvSendStub::start_async() {
       assert(send_tasks_.is_closed());
       break;
     }
-    auto const step_idx = batch.step->step_idx;
 
-#ifndef NDEBUG
-    // 用于提高 https://aone.alibaba-inc.com/v2/project/664220/req/60815172 复现概率.
-    usleep(300 * 1000);  // sleep 300ms
-#endif
-
-    auto const iter_start_ts = SteadyClock::now();  // iterator begin;
-    auto const queue_us = elapse_us(batch.step->start_send_ts, iter_start_ts);
-
-    assert(flush_out_buf.empty());
-    assert(finished_req.empty());
-    assert(send_blocks.empty());
-    assert(!batch.tasks.empty());
-    for (const auto& task : batch.tasks) {
-      assert(task.new_tokens > 0);
-      assert(task.dst_inst_id() == dst_id);
-      assert(task.dst_worker_id() == dst_worker_id);
-
-      parse_block_send(&src_info_, &dst_info_, &task, send_blocks);
-
-      if (task.reach_last_token) {
-        finished_req.emplace_back(&task);
-      }
-    }
-    assert(!send_blocks.empty());
-
-    uint64_t wait_time_us = 0;
-    uint64_t wait_and_send_us = 0;
-    uint64_t send_notify_us = 0;
-    Timepoint send_finish_ts;
     try {
-      ch_->register_data(send_blocks, tpkind);
-      for (auto i = start_layer_; i < num_layers_; ++i) {
-        TimeWatch wait_start;
-        batch.step->wait_layer_ready(i);
-        wait_time_us += wait_start.get_elapse_us();
-
-        // NOTE: write 可能是异步的! write 返回并不意味着数据发送了!
-        ch_->send_data(i);
-      }
-      ch_->flush(flush_out_buf);
-      send_finish_ts = SteadyClock::now();
-      wait_and_send_us = elapse_us(iter_start_ts, send_finish_ts);
-
-      if (!finished_req.empty()) {
-        ch_->send_notification(finished_req);
-
-        auto send_notify_end_ts = SteadyClock::now();
-        send_notify_us = elapse_us(send_finish_ts, send_notify_end_ts);
-        send_finish_ts = send_notify_end_ts;
-      }
-    } catch (std::exception &e) {
-      LOG(ERROR) << "KVT tx_stub fail to send data. dst_id=" << dst_id << ",dst_worker_id=" << dst_worker_id
-                << ",step_idx=" << step_idx << ',' << flush_out_buf << ",ex=" << e.what();
+      taskctx.do_task(batch);
+    } catch (const std::exception& ex) {
+      LOG(ERROR) << "do task failed. DstId=" << dst_info_.inst_id
+                  << ",DstWorkerId=" << dst_info_.worker_id
+                  << ",StepIdx=" << batch.step->step_idx
+                  << ",Ex=" << ex.what();
       state_.store(StubState::POISONED, std::memory_order_release);
       break;
     }
-    assert(send_finish_ts != Timepoint());
 
-    for (auto task : finished_req) {
-      assert(task->reach_last_token);
-      LOG(INFO) << "KVT tx_stub. dst_id=" << dst_id << ",dst_worker_id=" << dst_worker_id
-                << ",step_idx=" << step_idx << ",send finish reqid=" << task->req_id();
-      task->set_transfer_done();
-      // DO NOT ACCESS task! IT MAY BE FREED!
-      // Add clang tidy: USE-AFTER-MOVED to detect the bug.
-    }
-
-    batch.step->update_last_send_finish_ts(send_finish_ts);
-    LOG(INFO) << "SendStubMetrics. DstId=" << dst_id << ",DstWorkerId=" << dst_worker_id
-              << ",StepIdx=" << step_idx << ",FinishedReqSize=" << finished_req.size()
-              << "," << flush_out_buf
-              << ",QueueUs=" << queue_us
-              << ",WaitUs=" << wait_time_us
-              << ",WaitAndSendUs=" << wait_and_send_us
-              << ",SendNotifyUs=" << send_notify_us
-              << ",SendFinishTs=" << send_finish_ts.time_since_epoch().count();  //  send stub id
-
-    send_blocks.clear();
-    finished_req.clear();
-    flush_out_buf.clear();
+    taskctx.clear();
   }
 
   auto state = state_.load(std::memory_order_relaxed);
   if (state == StubState::STOPPING) {
-    if (!state_.compare_exchange_weak(state, StubState::DISCARD, std::memory_order_seq_cst)) {
+    if (!state_.compare_exchange_strong(state, StubState::DISCARD, std::memory_order_seq_cst)) {
       state_.store(StubState::POISONED, std::memory_order_seq_cst);
     }
   }
 
   LOG(INFO) << "KVT tx_stub: stop to send kv of to worker("
-            << dst_id << ":" << dst_worker_id << ");";
-}
-
-KvSendStub::KvSendStub(KvSendStub &&other) noexcept:
-    dst_info_(other.dst_info_),
-    src_info_(other.src_info_),
-    start_layer_(other.start_layer_),
-    num_layers_(other.num_layers_),
-    ch_(std::move(other.ch_)) {
+            << dst_info_.inst_id << ":" << dst_info_.worker_id << ");";
 }
 
 void KvSendStub::start() {
   auto state = state_.load(std::memory_order_relaxed);
   if (state == StubState::INIT) {
-    if (state_.compare_exchange_weak(state, StubState::WORKING, std::memory_order_seq_cst)) {
+    if (state_.compare_exchange_strong(state, StubState::WORKING, std::memory_order_seq_cst)) {
       send_backend_.emplace(&KvSendStub::start_async, this);
     }
   }
@@ -313,42 +405,16 @@ SendStub KvSendStubFactory::create_stub(const InstanceId& dst_inst_name,
                                         std::optional<TransferProtocol> proto_opt) {
 
   auto info_opt = naming_worker_->get_worker_info(dst_inst_name, dst_worker_id);
-  if (info_opt.has_value()) {
-    auto info = info_opt.value();
-    Channel ch;
-    SupportTransferProtocols target_supports(info.transfer_protocols);
-    if (proto_opt.has_value()) {
-      auto &proto = proto_opt.value();
-      if (target_supports.is_support(proto)) {
-        ch = create_channel(ctx_, proto);
-        ch->connect(info);
-      } else {
-        LOG(ERROR) << "KVT: target worker(" << dst_inst_name << ":" << dst_worker_id << ") does not support protocol("
-                   << proto.to_string() << ");";
-        throw std::runtime_error("target worker not support protocol: " + proto.to_string());
-      }
-    } else {
-      auto protos = target_supports.as_vector();
-      // TODO : set priority for each protocol;
-      for (const auto &p : protos) {
-        try {
-          ch = create_channel(ctx_, p);
-          ch->connect(info);
-          LOG(INFO) << "KVT : connect target worker(" << dst_inst_name << ":" << dst_worker_id << ") use "
-                    << p.to_string() << " protocol;";
-          break;
-        } catch (std::exception &e) {
-          LOG(WARNING) << "KVT : can't connect target worker(" << dst_inst_name << ":" << dst_worker_id
-                       << ") with " << p.to_string() << " protocol, try other protocol ...";
-        }
-      }
-    }
-    return std::make_unique<KvSendStub>(info, ctx_->worker_info(), start_layer, num_layers, std::move(ch));
-  } else {
+  if (!info_opt.has_value()) {
     LOG(ERROR) << "KVT: can't find worker(" << dst_inst_name << ":" << dst_worker_id << ") from naming service;";
     throw std::runtime_error("can not find worker(" +
         dst_inst_name + ":" + std::to_string(dst_worker_id) +
         ") from naming service;");
   }
+  auto info = info_opt.value();
+  auto channel_factory = std::make_unique<ChannelFactory>(ctx_, proto_opt);
+  return std::make_unique<KvSendStub>(info, ctx_->worker_info(),
+                                      start_layer, num_layers,
+                                      std::move(channel_factory));
 }
 }

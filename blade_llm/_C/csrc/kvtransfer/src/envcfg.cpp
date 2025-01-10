@@ -69,5 +69,14 @@ int env_fsnaming_tolerate_interval_s() {
   return val;
 }
 
+int env_debug_tx_failrate() {
+  static constexpr int DEFVAL = 1;
+  static int val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_DEBUG_TX_FAILRATE", DEFVAL);
+  });
+  return val;
+}
 
 }  // namespace blade_llm {

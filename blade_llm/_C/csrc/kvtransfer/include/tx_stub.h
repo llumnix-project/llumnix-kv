@@ -75,13 +75,13 @@ class KvSendStub : public ISendStub, public noncopyable {
              const WorkerInfo &src_info,
              uint32_t start_layer,
              uint32_t num_layers,
-             Channel &&channel) :
+             std::unique_ptr<IChannelFactory> channel_factory) :
       dst_info_(dst_info),
       src_info_(src_info),
       start_layer_(start_layer),
       num_layers_(num_layers),
-      ch_(std::move(channel)) {};
-  KvSendStub(KvSendStub &&other) noexcept;
+      channel_factory_(std::move(channel_factory)) {};
+  KvSendStub(KvSendStub &&other) = delete;
   void start() override;
   [[nodiscard]] const WorkerInfo &dst_info() const override {
     return dst_info_;
@@ -92,9 +92,11 @@ class KvSendStub : public ISendStub, public noncopyable {
   ~KvSendStub() override;
  private:
   void start_async();
-  uint32_t start_layer_{0};
-  uint32_t num_layers_{0};
-  std::unique_ptr<IChannel> ch_;
+  struct TaskContext;
+ private:
+  uint32_t const start_layer_{0};
+  uint32_t const num_layers_{0};
+  std::unique_ptr<IChannelFactory> channel_factory_;
   BlockingQueue<BatchSendTask> send_tasks_{};
   std::atomic<StubState> state_{INIT};
   std::optional<std::thread> send_backend_;

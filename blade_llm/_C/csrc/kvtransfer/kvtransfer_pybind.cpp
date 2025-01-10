@@ -127,11 +127,14 @@ void flush_send(size_t step_id) {
 }
 
 bool check_transfer_done(const std::string &req_id) {
-  if (KV_CLIENT != nullptr) {
-    return KV_CLIENT->check_transfer_done(req_id);
-  } else {
+  if (KV_CLIENT == nullptr) {
     throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv client is not initialized");
   }
+  auto rs = KV_CLIENT->check_transfer_done(req_id);
+  if (rs == ReqState::FAILED) {
+    throw KVTransferException(ErrorKind::INVALID_OPERATION, "send failed");
+  }
+  return rs == ReqState::OK;
 }
 
 void init_kv_transfer_server(const std::string &inst_name,
@@ -218,8 +221,6 @@ void submit_req_recv(const std::string &src_inst_name,
                      const std::vector<uint32_t> &dst_block_ids) {
 
   if (KV_SERVICE != nullptr) {
-    LOG(INFO) << "KVT: submit recv request: " << req_id << " from "
-              << src_inst_name << ":" << src_worker_id <<";";
     KV_SERVICE->submit_recv(src_inst_name, src_worker_id, req_id, dst_block_ids);
   } else {
     throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv service is not start");

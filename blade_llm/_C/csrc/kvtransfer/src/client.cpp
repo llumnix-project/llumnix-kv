@@ -254,17 +254,23 @@ void KvTransferClient::flush_send(size_t step_id) {
   last_step_guard_.reset();
 }
 
-bool KvTransferClient::check_transfer_done(const RequestId &req_id) {
+ReqState KvTransferClient::check_transfer_done(const RequestId &req_id) {
   auto r = reqs_.find(req_id);
   if (r == reqs_.end()) {
-    return true;
+    return ReqState::OK;
   }
+
+  ReqState ret = ReqState::OK;
   for (const auto &req : r->second) {
-    if (!req->is_all_transferred()) {
-      return false;
+    auto rs = req->state();
+    if (rs == ReqState::INPROCESS) {
+      return ReqState::INPROCESS;
+    }
+    if (rs == ReqState::FAILED) {
+      ret = ReqState::FAILED;
     }
   }
   reqs_.erase(r);
-  return true;
+  return ret;
 }
 }

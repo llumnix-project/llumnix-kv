@@ -94,6 +94,15 @@ struct WorkerInfo {
   [[nodiscard]] std::string to_string() const;
 };
 
+static constexpr inline int ReqStateInprocess = 0;
+static constexpr inline int ReqStateOk = 1;
+static constexpr inline int ReqStateFailed = 2;
+enum class ReqState : int {
+  INPROCESS = ReqStateInprocess,
+  // final state
+  OK = ReqStateOk,
+  FAILED = ReqStateFailed,
+};
 class RequestInfo;
 class ReqSendTask {
   const RequestInfo* const req_ = nullptr;
@@ -108,7 +117,8 @@ public:
     new_tokens(new_),
     reach_last_token(last_) {}
 
-  void set_transfer_done() const;
+  void set_state(ReqState) const noexcept;
+  ReqState state() const noexcept;
 
   const auto& req_id() const noexcept;
   const auto& dst_blocks() const noexcept;
@@ -145,7 +155,8 @@ class RequestInfo {
   const std::vector<uint32_t> src_blocks;
   const std::vector<uint32_t> dst_blocks;
  private:
-  mutable std::atomic_bool is_all_transferred_{false};
+  static_assert(std::atomic<ReqState>::is_always_lock_free);
+  mutable std::atomic<ReqState> state_{ReqState::INPROCESS};
 #ifndef NDEBUG
   uint32_t last_seen_ = 0;
   bool has_last_ = false;
@@ -177,23 +188,19 @@ class RequestInfo {
     return ;
   }
 
-  bool is_all_transferred() const {
-    return is_all_transferred_.load(std::memory_order_acquire);
+  ReqState state() const noexcept {
+    return this->state_.load(std::memory_order_acquire);
   }
 
  private:
   friend class ReqSendTask;
 
-  void set_transfer_done() const {
-    is_all_transferred_.store(true, std::memory_order_release);
+  void set_state(ReqState state) const noexcept {
+    assert(state != ReqState::INPROCESS);
+    this->state_.store(state, std::memory_order_release);
   }
 };
 
-inline void ReqSendTask::set_transfer_done() const {
-  assert(this->reach_last_token);
-  this->req_->set_transfer_done();
-  // DO NOT ACCESS req_! THIS MAY BE FREED!
-}
 
 inline const auto& ReqSendTask::req_id() const noexcept {
   return this->req_->req_id;
@@ -215,6 +222,13 @@ inline auto ReqSendTask::dst_worker_id() const noexcept {
   return this->req_->dst_worker_id;
 }
 
+inline void ReqSendTask::set_state(ReqState s) const noexcept {
+  return this->req_->set_state(s);
+}
+
+inline ReqState ReqSendTask::state() const noexcept {
+  return this->req_->state();
+}
 
 } // namespace blade_llm
 

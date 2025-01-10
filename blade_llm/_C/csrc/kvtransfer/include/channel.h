@@ -73,5 +73,22 @@ class IChannel {
 
 using Channel = std::unique_ptr<IChannel>;
 std::unique_ptr<IChannel> create_channel(Context *ctx, const TransferProtocol&);
+
+class IChannelFactory {
+public:
+  virtual ~IChannelFactory() = default;
+  virtual Channel create(const WorkerInfo& dst_info) = 0;
+};
+
+class ChannelFactory : public IChannelFactory {
+  Context* const ctx_;  // onwner: kvclient
+  std::optional<TransferProtocol> const proto_;
+public:
+  ChannelFactory(Context* ctx, std::optional<TransferProtocol> proto) noexcept:
+    ctx_(ctx), proto_(proto) {}
+
+  Channel create(const WorkerInfo& dst_info) override;
+};
+
 }
 #endif //KVTRANSFER_INCLUDE_CHANNEL_H_

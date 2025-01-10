@@ -49,7 +49,7 @@ class KvTransferClient : public noncopyable {
   void notify_event_record(size_t step_id);
   void flush_send(size_t step_id);
 
-  bool check_transfer_done(const RequestId &);
+  ReqState check_transfer_done(const RequestId &);
   Context *context() { return ctx_.get(); };
   void enable_auto_connect() { auto_connect_ = true; }
 
