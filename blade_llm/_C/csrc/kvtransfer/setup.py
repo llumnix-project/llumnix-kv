@@ -28,7 +28,6 @@ class CMakeBuild(build_ext):
             "-DBUILD_RDMA=ON",
             "-DBUILD_PYTHON_BIND=ON",
             "-DUSE_PYBIND11=ON",
-            "-DCURL_REQUIRED=ON",
         ]
         build_args = []
         if not cmake_generator or cmake_generator == "Ninja":
