@@ -84,3 +84,6 @@ dmypy.json
 *.hip
 # this is special because it's hipfied from our cuda_compat.h
 hip_compat.h
+
+# debug files
+tensors/
