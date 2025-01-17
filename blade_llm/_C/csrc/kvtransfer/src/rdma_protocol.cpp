@@ -8,6 +8,7 @@
 #include "assert.h"
 #include "envcfg.h"
 #include "utils/timer.h"
+#include "utils/id_generator.h"
 #include <fstream>
 #include <iomanip>
 #include <mutex>
@@ -27,6 +28,29 @@ using namespace accl::barex;
 #endif
 
 namespace blade_llm {
+
+// rpc req/resp
+// +-------+-------+------------+
+// | magic | reqid |  rpc body  |
+// rpc header: magic: 4 bytes. reqid: 8 bytes.
+// rpc body: rep/resp body 根据 magic 解码.
+static constexpr size_t RPC_HEADER = sizeof(uint32_t) + sizeof(uint64_t);
+static constexpr uint32_t MEM_HANDLES_REQ_MAGIC = 0x20181218;
+
+static std::pair<uint32_t, uint64_t> deser_rpc_header(const char* buf) noexcept {
+  uint32_t magic;
+  memcpy(&magic, buf, sizeof(magic));
+  uint64_t reqid;
+  memcpy(&reqid, buf + sizeof(magic), sizeof(reqid));
+  return std::make_pair(magic, reqid);
+}
+
+static void ser_rpc_header(char* buf, uint32_t magic, uint64_t reqid) noexcept {
+  memcpy(buf, &magic, sizeof(magic));
+  memcpy(buf + sizeof(magic), &reqid, sizeof(reqid));
+  return;
+}
+
 
 static constexpr uint32_t SEND_MAGIC = 0x53456e64;  /* SEnd */
 
@@ -131,6 +155,13 @@ bool decode_notification(const char *in_buf,
 #ifdef ENABLE_RDMA
 
 
+template<typename T, typename E>
+static std::future<T> make_exp_future(E ex) {
+  std::promise<T> pr;
+  pr.set_exception(std::make_exception_ptr(std::move(ex)));
+  return pr.get_future();
+}
+
 void XContextDeleter::operator()(accl::barex::XContext *ctx) {
   ctx->Shutdown();
   ctx->WaitStop();
@@ -159,6 +190,54 @@ void XConnectorDeleter::operator()(accl::barex::XConnector *tp) {
   tp->Shutdown();
   tp->WaitStop();
   delete tp;
+}
+
+
+// Send will release sdata
+// cb is invoked after sdata is freed.
+static void Send(XChannel *ch, memp_t sdata, DoneCallback cb) {
+  auto bufptr = sdata.buf;
+  auto bufdev = sdata.d_type;
+  auto wrapped_cb = [bufptr, bufdev, ch, cb=std::move(cb)] (Status s) {
+    ch->ReleaseBuffer(bufptr, bufdev);
+    cb(std::move(s));
+  };
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+  struct x_msg_header header = {0};
+#pragma GCC diagnostic pop
+
+  auto result = ch->Send(std::move(sdata), /* auto_release */ false, header, wrapped_cb);
+  if (result != BAREX_SUCCESS) {
+    wrapped_cb(Status(result));
+  }
+
+  return ;
+}
+
+// Send will release sdata
+[[nodiscard]] static std::future<void> Send(XChannel *ch, memp_t sdata) {
+  auto pr = std::make_shared<std::promise<void>>();
+  auto fut = pr->get_future();
+
+  Send(ch, std::move(sdata), [pr=std::move(pr)] (Status s) {
+    if (s.IsOk()) {
+      pr->set_value();
+    } else {
+      auto ex = std::make_exception_ptr(std::runtime_error("Send ERR: " + s.ErrMsg()));
+      pr->set_exception(std::move(ex));
+    }
+  });
+
+  return fut;
+}
+
+static memp_t AllocCPUBuffer(XChannel* ch, uint64_t size) {
+  memp_t bufmr;
+  auto result = ch->AllocBuffer(bufmr, size, CPU);
+  RTCHECK(result == accl::barex::BAREX_SUCCESS);
+  return bufmr;
 }
 
 BarexMRGuard::~BarexMRGuard() {
@@ -406,9 +485,8 @@ BarexCtx::~BarexCtx() {
 CliBarexCtx::CliBarexCtx(std::string mp_name,
                          std::string tp_name,
                          int tpcnt,
-                         Context *ctx,
-                         std::unique_ptr<accl::barex::XChannelCallback> ctxcb) :
-    BarexCtx(std::move(mp_name), std::move(tp_name), tpcnt, ctx, std::move(ctxcb)),
+                         Context *ctx) :
+    BarexCtx(std::move(mp_name), std::move(tp_name), tpcnt, ctx, this->get_ctx_cb()),
     layer_blk_size(ctx->layer_num_blocks() * ctx->block_size()) {
   XConnector *connector = nullptr;
   auto result = XConnector::NewInstance(connector, env_conn_tpsize(), TIMER_3S, {this->xctx()});
@@ -417,7 +495,147 @@ CliBarexCtx::CliBarexCtx(std::string mp_name,
   return;
 }
 
-void RDMAServer::CtxCallback::OnRecvCall(XChannel *_ch, char *in_buf, size_t len, x_msg_header _header) {
+void CliBarexCtx::RpcCtxCb::OnRecvCall(accl::barex::XChannel *_ch,
+  char *buf, size_t len,
+  accl::barex::x_msg_header header) {
+  if (len < RPC_HEADER) {
+    LOG(ERROR) << "RpcCtxCb.OnRecvCall. BadMsg. len=" << len;
+    return;
+  }
+  auto& self = *this;
+  auto [magic, reqid] = deser_rpc_header(buf);
+  auto on_resp = self.cli_ctx_->pop(reqid);
+  if (!on_resp) {
+    LOG(ERROR) << "RpcCtxCb.OnRecvCall. UnknownReqId. reqid=" << reqid << ",magic=" << magic;
+    return ;
+  }
+  return on_resp(Status::OK(), buf, len);
+}
+
+struct GetMemHandles {
+  using Promise = std::promise<std::vector<RDMAMemHandle>>;
+private:
+#ifndef NDEBUG
+  uint64_t const reqid_;
+#endif
+  std::shared_ptr<Promise> pr_;
+
+public:
+  GetMemHandles(uint64_t r, std::shared_ptr<Promise> pr) noexcept:
+#ifndef NDEBUG
+    reqid_(r),
+#endif
+    pr_(std::move(pr)) {}
+
+  void operator()(Status s, char* buf, size_t len) {
+    auto& self = *this;
+    if (!s.IsOk()) {
+      auto ex = std::make_exception_ptr(std::runtime_error("GetMemHandles ERR: " + s.ErrMsg()));
+      self.pr_->set_exception(std::move(ex));
+      return ;
+    }
+#ifndef NDEBUG
+    assert(len >= RPC_HEADER);
+    auto [magic, reqid] = deser_rpc_header(buf);
+    assert(magic == MEM_HANDLES_REQ_MAGIC);
+    assert(reqid == self.reqid_);
+#endif
+    buf += RPC_HEADER;
+    len -= RPC_HEADER;
+    assert(len % sizeof(RDMAMemHandle) == 0);
+    size_t handle_n = len / sizeof(RDMAMemHandle);
+    auto vec = std::vector<RDMAMemHandle>(handle_n);
+    memcpy(vec.data(), buf, handle_n * sizeof(RDMAMemHandle));
+    self.pr_->set_value(std::move(vec));
+    return ;
+  }
+};
+
+std::future<std::vector<RDMAMemHandle>> CliBarexCtx::get_mem_handles(XChannel* dst) const {
+  auto& self = *this;
+  uint32_t magic = MEM_HANDLES_REQ_MAGIC;
+  uint64_t reqid = new_id();
+  memp_t bufmr = AllocCPUBuffer(dst, sizeof(magic) + sizeof(reqid));
+  ser_rpc_header(bufmr.buf, magic, reqid);
+
+  auto pr = std::make_shared<GetMemHandles::Promise>();
+  auto fut = pr->get_future();
+  self.push(reqid, GetMemHandles(reqid, std::move(pr)));
+
+  Send(dst, std::move(bufmr), [this, reqid] (Status s) {
+    // this owner: KV_CLIENT.ctx_
+    if (s.IsOk()) {
+      return ;
+    }
+    this->on_send_error(std::move(s), reqid);
+  });
+  return fut;
+}
+
+void CliBarexCtx::push(uint64_t reqid, OnRespF on_resp) const {
+  // SAFTEY: lock
+  auto& self = *const_cast<CliBarexCtx*>(this);
+  auto lock = std::lock_guard<std::mutex>(self.mtx_);
+  auto [_, ok] = self.rpc_.emplace(reqid, std::move(on_resp));
+  assert(ok);
+  return ;
+}
+
+auto CliBarexCtx::pop(uint64_t reqid) const -> OnRespF {
+  // SAFTEY: lock
+  auto& self = *const_cast<CliBarexCtx*>(this);
+  auto lock = std::lock_guard<std::mutex>(self.mtx_);
+  auto iter = self.rpc_.find(reqid);
+  if (iter == self.rpc_.end()) {
+    // empty func
+    return {};
+  }
+  auto handle = std::move(iter->second);
+  self.rpc_.erase(iter);
+  return handle;
+}
+
+void CliBarexCtx::on_send_error(accl::barex::Status s, uint64_t reqid) const {
+  auto& self = *this;
+  auto handle = self.pop(reqid);
+  if (!handle) {
+    // empty func
+    LOG(ERROR) << "on_send_error. unknown reqid=" << reqid << ",err=" << s.ErrMsg();
+    return ;
+  }
+  return handle(std::move(s), nullptr, 0);
+}
+
+bool RDMAServer::CtxCallback::is_mem_handles_req(char *in_buf, size_t len) noexcept {
+  if (len != RPC_HEADER) {
+    return false;
+  }
+  auto [magic, _] = deser_rpc_header(in_buf);
+  return magic == MEM_HANDLES_REQ_MAGIC;
+}
+
+void RDMAServer::CtxCallback::resp_mem_handles(accl::barex::XChannel *channel, char *inbuf, size_t inlen) {
+  assert(inlen == RPC_HEADER);
+  auto& self = *this;
+  auto& handles = self.server_->info_.handles;
+  const size_t msglen = handles.size() * sizeof(RDMAMemHandle);
+  memp_t bufmr = AllocCPUBuffer(channel, RPC_HEADER + msglen);
+  memcpy(bufmr.buf, inbuf, RPC_HEADER);
+  memcpy(bufmr.buf + RPC_HEADER, handles.data(), msglen);
+
+  return Send(channel, std::move(bufmr), [] (Status s) {
+    if (s.IsOk()) {
+      return ;
+    }
+    LOG(ERROR) << "resp_mem_handles err=" << s.ErrMsg();
+  });
+}
+
+void RDMAServer::CtxCallback::OnRecvCall(XChannel *ch, char *in_buf, size_t len, x_msg_header _header) {
+  if (is_mem_handles_req(in_buf, len)) {
+    return this->resp_mem_handles(ch, in_buf, len);
+  }
+
   InstanceId inst_id;
   uint32_t worker_id;
   std::string req_id;
@@ -494,10 +712,11 @@ static void get_ip(RDMAInfo *out) {
 
 void RDMAServer::start_server(ITransferService *service, Context *ctx) {
   auto &self = *this;
+  RDMAInfo& info = self.info_;
   if (service == nullptr) {
     throw std::runtime_error("KvTransferService should not be null;");
   }
-  auto rdma_ctx = RDMAProtoContext::server_context("KVTServer", std::make_unique<CtxCallback>(service));
+  auto rdma_ctx = RDMAProtoContext::server_context("KVTServer", std::make_unique<CtxCallback>(service, this));
   if (!rdma_ctx->check_support()) {
     throw std::runtime_error("can't start RDMA transfer server as RDMA protocol not support;");
   }
@@ -512,24 +731,18 @@ void RDMAServer::start_server(ITransferService *service, Context *ctx) {
     throw std::runtime_error("KVT server: rdma context not register.");
   }
   auto barex_ctx = proto_ctx->barex_ctx();
-  std::vector<void *> ptrs(layer_ptr.size());
-  std::vector<uint32_t> rkeys(layer_ptr.size());
 
+  info.handles.reserve(layer_ptr.size());
   for (size_t idx = 0; idx < layer_ptr.size(); ++idx) {
     auto &out = barex_ctx->layer_mr()[idx].mr();
     auto layer_blk_p = reinterpret_cast<void *>(layer_ptr[idx]);
-    ptrs[idx] = layer_blk_p;
-    rkeys[idx] = out.mr->rkey;
+    auto& handle = info.handles.emplace_back();
+    handle.ptr = layer_blk_p;
+    handle.rkey = out.mr->rkey;
+    handle.lkey = out.mr->lkey;
   }
-  auto ptr_size = sizeof(void *) * layer_ptr.size();
-  auto other_info_size = sizeof(uint32_t) * layer_ptr.size() + ptr_size;
-  winfo->other_info.resize(other_info_size);
-  auto other_info_ptr = winfo->other_info.data();
-  memcpy(other_info_ptr, ptrs.data(), ptr_size);
-  other_info_ptr += ptr_size;
-  memcpy(other_info_ptr, rkeys.data(), sizeof(uint32_t) * layer_ptr.size());
+  assert(info.handles.size() == layer_ptr.size());
 
-  RDMAInfo info;
   get_ip(&info);
   info.port = get_port();
   RTCHECK(info.port > 0);
@@ -565,22 +778,6 @@ void RDMAChannel::connect(const WorkerInfo &dst_info) {
   self.port_ = std::stoi(port_str);
   dst_layer_blk_size_ = dst_info.layer_num_blocks * dst_info.block_size;
   dst_layer_num_ = dst_info.num_layers;
-  auto handle_size = (sizeof(void *) + sizeof(uint32_t)) * dst_layer_num_;
-  assert(handle_size == dst_info.other_info.size());
-  dst_ptrs_.resize(dst_layer_num_);
-  dst_rkeys_.resize(dst_layer_num_);
-  auto bytes = dst_info.other_info.data();
-  auto ptr_size = sizeof(void *) * dst_layer_num_;
-  memcpy(dst_ptrs_.data(), dst_info.other_info.data(), ptr_size);
-  bytes += ptr_size;
-  memcpy(dst_rkeys_.data(), bytes, sizeof(uint32_t) * dst_layer_num_);
-}
-
-template<typename T, typename E>
-static std::future<T> make_exp_future(E ex) {
-  std::promise<T> pr;
-  pr.set_exception(std::make_exception_ptr(std::move(ex)));
-  return pr.get_future();
 }
 
 [[nodiscard]] static std::future<XChannel *> Connect(XConnector &self, std::string server_addr, int port) {
@@ -609,26 +806,38 @@ static std::future<T> make_exp_future(E ex) {
 void RDMAChannel::do_init() {
   auto &self = *this;
   if (!self.chs_.empty()) {
+    assert(self.dst_handles_.size() == self.dst_layer_num_);
     return;
   }
   const int sp = env_send_parallel();
   assert(sp > 0);
 
-  self.chs_.reserve(sp);
+  auto chs = std::vector<accl::barex::XChannel*>();
+  chs.reserve(sp);
   auto futs = std::vector<std::future<XChannel *>>();
   futs.reserve(sp);
   auto conn = self.ctx_->connector();
   assert(conn != nullptr);
-  LOG(INFO) << "KVT: rdma connect to : " << self.ip_ << ":" << self.port_;
   for (int i = 0; i < sp; ++i) {
     auto fut = Connect(*conn, self.ip_, self.port_);
     futs.emplace_back(std::move(fut));
   }
 
   for (auto &fut : futs) {
-    self.chs_.emplace_back(fut.get());
+    chs.emplace_back(fut.get());
   }
+  assert(!chs.empty());
+
+  auto mhfut = self.ctx_->get_mem_handles(chs[0]);
+  auto mh = mhfut.get();
+
+  self.dst_handles_ = std::move(mh);
+  self.chs_ = std::move(chs);
+  LOG(INFO) << "RDMAChannel connect. dstip=" << self.ip_
+            << ",dstport=" << self.port_
+            << ",dsthandles_n=" << self.dst_handles_.size();
   assert(!self.chs_.empty());
+  assert(self.dst_handles_.size() == self.dst_layer_num_);
   return;
 }
 
@@ -803,14 +1012,13 @@ void RDMAChannel::send_data(size_t layer_idx) {
   auto &self = *this;
   assert(layer_idx < self.dst_layer_num_);
   assert(self.dst_layer_num_ == self.ctx_->layer_mr().size());
-  assert(self.dst_layer_num_ == self.dst_ptrs_.size());
-  assert(self.dst_layer_num_ == self.dst_rkeys_.size());
   self.do_init();
 
   if (self.kind_ == TPKind::PLTD) {
     return self.send_data_pltd(layer_idx);
   }
 
+  auto& dst_layer_handle = self.dst_handles_[layer_idx];
   auto datasp = std::make_shared<std::vector<rw_memp_t>>();
   const auto& data = *self.data_;
   assert(!data.empty());
@@ -826,8 +1034,8 @@ void RDMAChannel::send_data(size_t layer_idx) {
     src_mr.buf += src_offset;
     src_mr.buf_len = len;
 
-    auto rkey = self.dst_rkeys_[layer_idx];
-    auto *rladdr = reinterpret_cast<char *>(self.dst_ptrs_[layer_idx]);
+    auto rkey = dst_layer_handle.rkey;
+    auto *rladdr = reinterpret_cast<char *>(dst_layer_handle.ptr);
     assert(rladdr);
     uint64_t raddr = reinterpret_cast<uint64_t>(rladdr + dst_offset);
     datasp->emplace_back(rw_memp_t{std::move(src_mr), raddr, rkey});
@@ -876,8 +1084,10 @@ void RDMAChannel::send_data_pltd(size_t layer_idx) {
   assert(!self.chs_.empty());
   assert(!self.data_->empty());
   const auto& input = *self.data_;
-  uint64_t const rladdr = reinterpret_cast<uint64_t>(self.dst_ptrs_[layer_idx]);
-  auto const rkey = self.dst_rkeys_[layer_idx];
+  assert(layer_idx < self.dst_handles_.size());
+  auto& dst_layer_handle = self.dst_handles_[layer_idx];
+  uint64_t const rladdr = reinterpret_cast<uint64_t>(dst_layer_handle.ptr);
+  auto const rkey = dst_layer_handle.rkey;
 
 #ifndef NDEBUG
   uint64_t dst_len_debug = 0;
@@ -967,13 +1177,14 @@ void RDMAChannel::do_write(uint32_t layer_idx,
   assert(dst_offset < self.dst_layer_blk_size_);
   assert(dst_offset + len <= self.dst_layer_blk_size_);
   assert(layer_idx < self.dst_layer_num_);
+  auto& dst_layer_handle = self.dst_handles_[layer_idx];
 
   auto src_mr = self.ctx_->layer_mr()[layer_idx].mr();
   src_mr.buf += src_offset;
   src_mr.buf_len = len;
 
-  auto rkey = self.dst_rkeys_[layer_idx];
-  auto *rladdr = reinterpret_cast<char *>(self.dst_ptrs_[layer_idx]);
+  auto rkey = dst_layer_handle.rkey;
+  auto *rladdr = reinterpret_cast<char *>(dst_layer_handle.ptr);
   assert(rladdr);
   uint64_t raddr = reinterpret_cast<uint64_t>(rladdr + dst_offset);
 
@@ -1028,40 +1239,6 @@ void RDMAChannel::flush(std::string& outstr) {
   return;
 }
 
-// Send will release sdata
-[[nodiscard]] static std::future<void> Send(XChannel *ch, memp_t sdata) {
-  // barex Send 要求 callback copyable...
-  // std::promise<void> pr;
-  auto pr = std::make_shared<std::promise<void>>();
-  auto fut = pr->get_future();
-  auto bufptr = sdata.buf;
-  auto bufdev = sdata.d_type;
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
-  struct x_msg_header header = {0};
-#pragma GCC diagnostic pop
-
-  auto result = ch->Send(std::move(sdata), /* auto_release */ true, header,
-                         [pr = std::move(pr), bufptr, bufdev, ch](Status s) mutable {
-                           if (!s.IsOk()) {
-                             // send 失败时, auto_release 不会 release.
-                             ch->ReleaseBuffer(bufptr, bufdev);
-                             auto ex = std::make_exception_ptr(std::runtime_error("Send ERR: " + s.ErrMsg()));
-                             pr->set_exception(std::move(ex));
-                             return;
-                           }
-                           pr->set_value();
-                         }
-  );
-  if (result != BAREX_SUCCESS) {
-    ch->ReleaseBuffer(bufptr, bufdev);
-    auto ex = std::runtime_error("Send Submit Err: " + Status(result).ErrMsg());
-    return make_exp_future<void>(std::move(ex));
-  }
-
-  return fut;
-}
 
 void RDMAChannel::send_notification(const std::vector<const ReqSendTask*>& reqs) {
   auto &self = *this;
@@ -1074,14 +1251,12 @@ void RDMAChannel::send_notification(const std::vector<const ReqSendTask*>& reqs)
     const auto &reqid = r->req_id();
     const auto &block_ids = r->dst_blocks();
     // 编码规则见 RDMAServer::CtxCallback::OnRecvCall
-    memp_t bufmr;
     auto const msglen = get_encode_size(src_inst_id_, src_worker_id_, reqid, block_ids);
-    auto result = self.ctx_->mp()->AllocBuffer(bufmr, msglen, CPU);
-    RTCHECK(result == accl::barex::BAREX_SUCCESS);
-    encode_notification(bufmr.buf, self.src_inst_id_, self.src_worker_id_, reqid, block_ids);
-
     auto *use_ch = self.ch();
     assert(use_ch->GetMempool() == self.ctx_->mp());
+    auto bufmr = AllocCPUBuffer(use_ch, msglen);
+    encode_notification(bufmr.buf, self.src_inst_id_, self.src_worker_id_, reqid, block_ids);
+
     auto fut = Send(use_ch, std::move(bufmr));
     self.send_futs_.emplace_back(std::move(fut));
   }
@@ -1121,8 +1296,7 @@ void RDMAProtoContext::init(Context *ctx) {
       name_prefix + "mp",
       name_prefix + "tp",
       env_ctx_tpsize(),
-      ctx,
-      std::move(callback_));
+      ctx);
   }
 }
 std::unique_ptr<RDMAProtoContext> RDMAProtoContext::server_context(std::string &&name,
@@ -1130,7 +1304,7 @@ std::unique_ptr<RDMAProtoContext> RDMAProtoContext::server_context(std::string &
   return std::make_unique<RDMAProtoContext>(std::move(name), true, std::move(bk));
 }
 std::unique_ptr<RDMAProtoContext> RDMAProtoContext::client_context(std::string &&name) {
-  return std::make_unique<RDMAProtoContext>(std::move(name), false, std::make_unique<CliCtxCallback>());
+  return std::make_unique<RDMAProtoContext>(std::move(name), false, nullptr);
 }
 
 #ifdef ENABLE_TORCH

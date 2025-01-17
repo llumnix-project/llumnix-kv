@@ -16,6 +16,8 @@
 #include <arpa/inet.h>
 #include <thread>
 #include <future>
+#include <mutex>
+#include <unordered_map>
 #include "thrid_party/logging.h"
 
 #ifdef ENABLE_RDMA
@@ -133,30 +135,65 @@ struct BarexCtx : public noncopyable {
   std::vector<BarexMRGuard> layer_mr_;
 };
 
+// RDMAMemHandle 可以 memcpy.
+struct RDMAMemHandle {
+  void *ptr = nullptr;
+  uint32_t rkey = 0;
+  uint32_t lkey = 0; // 不必要, 正好这里 padding 4 字节, 不用白不用.
+};
+static_assert(std::is_standard_layout_v<RDMAMemHandle>);
+
 struct CliBarexCtx : public BarexCtx {
-  const uint64_t layer_blk_size;
   CliBarexCtx(std::string mp_name,
               std::string tp_name,
               int tpcnt,
-              Context *ctx,
-              std::unique_ptr<accl::barex::XChannelCallback> ctxcb);
+              Context *ctx);
 
   auto *connector() const noexcept {
     return this->connector_.get();
   }
+
+  // rpc
+  std::future<std::vector<RDMAMemHandle>> get_mem_handles(accl::barex::XChannel* dst) const;
+
  private:
+   struct RpcCtxCb : public accl::barex::XChannelCallback {
+     RpcCtxCb(const CliBarexCtx* clictx) noexcept: cli_ctx_(clictx) {}
+
+     void OnRecvCall(accl::barex::XChannel *channel,
+                     char *in_buf,
+                     size_t len,
+                     accl::barex::x_msg_header header) override;
+   private:
+     const CliBarexCtx* const cli_ctx_ = nullptr;  // owner: KV_CLIENT.ctx_
+   };
+
+   std::unique_ptr<RpcCtxCb> get_ctx_cb() const noexcept {
+    return std::make_unique<RpcCtxCb>(this);
+   }
+
+   using OnRespF = std::function<void(accl::barex::Status, char*, size_t)>;
+   void push(uint64_t reqid, OnRespF on_resp) const;
+   // may return empty function
+   OnRespF pop(uint64_t reqid) const;
+   void on_send_error(accl::barex::Status s, uint64_t reqid) const;
+
+ public:
+  const uint64_t layer_blk_size;
+ private:
+  std::mutex mtx_;
+  // reqid, on resp callback
+  std::unordered_map<uint64_t, OnRespF> rpc_;
   std::unique_ptr<accl::barex::XConnector, XConnectorDeleter> connector_;
 };
 
-// RDMAMemHandle 可以 memcpy.
 static constexpr int LAYER_NUM_MAX = 100;
 struct RDMAInfo {
   char ip[INET_ADDRSTRLEN]{'\0'};  // decode listen ip, 以 '\0' 结尾.
   int port = 0;  // decode listen port
+  std::vector<RDMAMemHandle> handles;
 };
 
-static_assert(std::is_standard_layout_v<RDMAInfo>);
-static_assert(sizeof(RDMAInfo) <= MAX_ADDRESS_LEN);
 
 class RDMAChannel : public IChannel, public noncopyable {
  public:
@@ -192,14 +229,13 @@ class RDMAChannel : public IChannel, public noncopyable {
   InstanceId const src_inst_id_;
   WorkerId const src_worker_id_ = 0;
   CliBarexCtx *const ctx_;  // owner: KvTransferClient
+
   std::string ip_;
   int port_{0};
-  std::vector<void *> dst_ptrs_;
-  std::vector<uint32_t> dst_rkeys_;
   size_t dst_layer_blk_size_{0};
   uint32_t dst_layer_num_{0};
-  int prev_ch_idx_ = 0;
 
+  int prev_ch_idx_ = 0;
   std::vector<IpcBlock>* data_ = nullptr;
   TPKind kind_ = TPKind::UNKNOWN;
   // sb is send block~
@@ -214,6 +250,7 @@ class RDMAChannel : public IChannel, public noncopyable {
 
   // init by do_init
   std::vector<accl::barex::XChannel *> chs_;   // owner: ctx_.connector_
+  std::vector<RDMAMemHandle> dst_handles_;
 };
 
 class RDMAServer : public ITransferServer {
@@ -221,16 +258,22 @@ class RDMAServer : public ITransferServer {
   void start_server(ITransferService *service, Context *ctx) override;
  private:
   class CtxCallback : public accl::barex::XChannelCallback {
-    ITransferService *ser_;
+    ITransferService* const ser_ = nullptr;   // owner: KV_SERVICE
+    const RDMAServer* const server_ = nullptr;   // owner: KV_SERVER
    public:
-    CtxCallback(ITransferService *s) noexcept: ser_(s) {}
+    CtxCallback(ITransferService *s, RDMAServer* v) noexcept:
+      ser_(s), server_(v) {}
 
     void OnRecvCall(accl::barex::XChannel *channel,
                     char *in_buf,
                     size_t len,
                     accl::barex::x_msg_header header) override;
+   private:
+    static bool is_mem_handles_req(char *in_buf, size_t len) noexcept;
+    void resp_mem_handles(accl::barex::XChannel *channel, char *in_buf, size_t len);
   };
  private:
+  RDMAInfo info_;
   std::unique_ptr<accl::barex::XListener, XListenerDeleter> listener_;
 };
 
