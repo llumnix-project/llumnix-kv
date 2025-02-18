@@ -816,6 +816,18 @@ TEST(SendStubTest, MergeIntervalTest) {
     EXPECT_EQ(data, edata);
     EXPECT_EQ(cnt, 2);
   }
+
+  {
+    // prompt cache 可能会生成重叠的区间.
+    std::vector<IpcBlock> edata{{1, 1, 2}, {1, 3, 3}, {2, 4, 0}};
+    std::vector<IpcBlock> data{{1, 1, 2}, {1, 3, 1}, {2, 4, 2}};
+    auto [min_size, max_size, total_size, cnt] = merge_interval(data);
+    EXPECT_EQ(min_size, 2);
+    EXPECT_EQ(max_size, 3);
+    EXPECT_EQ(total_size, 5);
+    EXPECT_EQ(data, edata);
+    EXPECT_EQ(cnt, 2);
+  }
 }
 
 
