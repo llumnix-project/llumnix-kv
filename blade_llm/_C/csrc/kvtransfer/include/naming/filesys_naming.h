@@ -29,9 +29,6 @@ class FileSysNaming : public INamingClient, noncopyable {
   std::optional<std::string> get(const InstanceId&, const std::string &k) override;
   void remove(const std::string &key) override;
   const std::vector<std::string> &list() override;
-  bool is_binary_store() override {
-    return false;
-  }
   ~FileSysNaming() override {
     stop_.store(true, std::memory_order_release);
     if (periodic_task_.joinable()) {

@@ -25,8 +25,8 @@ class INamingClient {
   virtual void remove(const std::string &key) = 0;
   virtual std::optional<std::string> get(const InstanceId &, const std::string &k) = 0;
   virtual const std::vector<std::string> &list() = 0;
-  virtual bool is_binary_store() {
-    return true;
+  static constexpr bool is_binary_store() {
+    return false;
   }
   virtual ~INamingClient() = default;
 };

@@ -149,8 +149,6 @@ void init_kv_transfer_server(const std::string &inst_name,
                              const std::vector<uint64_t> &layers,
                              const std::vector<TransferProtocol> &protocols) {
   if (KV_SERVER == nullptr) {
-    auto naming_client = connect_naming(inst_name, naming_url);
-    LOG(INFO) << "KVT: init kv server for worker(" << inst_name << ":" << worker_id << ") at " << inst_name;
     auto context = std::make_unique<Context>(inst_name, worker_id);
     context->set_tp(tp_size, worker_tp_rank);
     context->set_block_params(block_size, token_size, layer_num_blocks);
@@ -193,25 +191,9 @@ void init_kv_transfer_server(const std::string &inst_name,
       KV_SERVER = create_transfer_server(protocols[0]);
       KV_SERVER->start_server(KV_SERVICE, ctx);
     }
-    auto worker_info = ctx->worker_info();
-    worker_info.transfer_protocols = ctx->support_protocols().value();
-    auto naming_worker_client = naming_client.create_naming_worker_client();
-
-    int retry_times = 3;
-    while (retry_times > 0) {
-      try {
-        naming_worker_client->register_worker(worker_info);
-        break;
-      } catch (const std::exception &e) {
-        LOG(WARNING) << "KVT: register worker failed: " << e.what() << ", will try later.";
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-      retry_times--;
-    }
-    if (retry_times <= 0) {
-      LOG(ERROR) << "KVT: can't register worker after retry;";
-      throw std::runtime_error("register worker failed");
-    }
+    auto* worker_info = ctx->worker_info_mutable();
+    worker_info->transfer_protocols = ctx->support_protocols().value();
+    LOG(INFO) << "init_kv_transfer_server. worker_info=" << worker_info->to_string();
   }
 }
 
@@ -233,6 +215,19 @@ bool check_recv_done(const std::string &req_id) {
   } else {
     throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv service is not start");
   }
+}
+
+// empty 意味着不处于 kvt 环境下.
+std::string current_worker_info() {
+  Context* ctx = nullptr;
+  if (KV_CLIENT) {
+    ctx = KV_CLIENT->context();
+  } else if (KV_SERVICE) {
+    ctx = KV_SERVICE->get_context();
+  } else {
+    return {};
+  }
+  return ctx->worker_info().to_string();
 }
 
 #ifdef ENABLE_TORCH
@@ -289,5 +284,6 @@ PYBIND11_MODULE(kvtransfer_ops, m) {
   m.def("submit_req_recv", &blade_llm::submit_req_recv, "submit kv recv task to kv server;");
   m.def("check_recv_done", &blade_llm::check_recv_done, "check if all kv data of a request are received;");
   // common
+  m.def("current_worker_info", &blade_llm::current_worker_info, "get current worker info;");
   m.def("lib_support_transfer_protocols", &blade_llm::support_transfer_protocols, "get supported transfer types");
 }

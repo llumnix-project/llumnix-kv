@@ -54,9 +54,6 @@ class EASNamingClient : public INamingClient, noncopyable {
   void remove(const std::string &key) override;
   std::optional<std::string> get(const InstanceId&, const std::string &k) override;
   const std::vector<std::string> &list() override;
-  bool is_binary_store() override {
-    return false;
-  }
  private:
   void load();
   std::optional<EASNamingCache *> get_pod_kv(const std::string &pod_name);
