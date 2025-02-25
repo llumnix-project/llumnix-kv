@@ -48,7 +48,6 @@ enum StubState {
 class ISendStub {
  public:
   virtual void start() = 0;
-  [[nodiscard]] virtual const WorkerInfo& dst_info() const = 0;
   virtual void send_batch(BatchSendTask) = 0;
   virtual StubState check_state() = 0;
   virtual void stop() = 0;
@@ -68,29 +67,34 @@ class ISendStubFactory {
 };
 
 class KvSendStub : public ISendStub, public noncopyable {
- public:
-  const WorkerInfo dst_info_;
+ private:
+  // dst_info_.addr/.other_info 可能会在 start_async 线程修改.
+  WorkerInfo dst_info_;
   const WorkerInfo src_info_;
+  // OWNER: KvSendStubFactory.naming_worker_
+  INamingWorkerClient* const naming_ = nullptr;
+
+  public:
   KvSendStub(const WorkerInfo &dst_info,
              const WorkerInfo &src_info,
              uint32_t start_layer,
              uint32_t num_layers,
-             std::unique_ptr<IChannelFactory> channel_factory) :
+             std::unique_ptr<IChannelFactory> channel_factory,
+             INamingWorkerClient* naming) :
       dst_info_(dst_info),
       src_info_(src_info),
+      naming_(naming),
       start_layer_(start_layer),
       num_layers_(num_layers),
       channel_factory_(std::move(channel_factory)) {};
   KvSendStub(KvSendStub &&other) = delete;
   void start() override;
-  [[nodiscard]] const WorkerInfo &dst_info() const override {
-    return dst_info_;
-  }
   void send_batch(BatchSendTask) override;
   StubState check_state() override;
   void stop() override;
   ~KvSendStub() override;
  private:
+  void update_dst_info(WorkerInfo&& new_dst);
   void start_async();
   struct TaskContext;
  private:

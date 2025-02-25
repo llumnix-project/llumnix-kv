@@ -63,11 +63,23 @@ public:
   }
 };
 
+class FakeNamingWorkerClient : public INamingWorkerClient {
+public:
+  void register_worker(const WorkerInfo &worker_info) override {
+    throw std::runtime_error("biubiu~");
+  }
+
+  std::optional<WorkerInfo> get_worker_info(const InstanceId &, WorkerId) override {
+    return std::nullopt;
+  }
+};
+
 class FakeSendStubFactory : public ISendStubFactory {
  public:
   const std::vector<uint64_t> dst_layer;
   Context *ctx;
   std::queue<std::string> *notifies;
+  std::unique_ptr<FakeNamingWorkerClient> naming_ = std::make_unique<FakeNamingWorkerClient>();
 
   FakeSendStubFactory(Context *ctx, const std::vector<uint64_t> &dst, std::queue<std::string> &n):
     ctx(ctx), dst_layer(dst), notifies(&n) {}
@@ -80,7 +92,7 @@ class FakeSendStubFactory : public ISendStubFactory {
     dst_info.worker_tp_rank = 0;
     dst_info.block_size =  16 * KB;
     dst_info.token_size = KB;
-    return std::make_unique<KvSendStub>(dst_info, ctx->worker_info(), start_layer, num_layers, std::move(cf));
+    return std::make_unique<KvSendStub>(dst_info, ctx->worker_info(), start_layer, num_layers, std::move(cf), naming_.get());
   }
 };
 

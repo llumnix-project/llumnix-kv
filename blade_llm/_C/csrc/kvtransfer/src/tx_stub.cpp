@@ -138,6 +138,26 @@ static void parse_block_send_p_lt_d(
 
 using ParseBlockFunc = decltype(parse_block_send_p_lt_d);
 
+static bool same_dst(const WorkerInfo& l, const WorkerInfo& r) noexcept {
+  return l.inst_id == r.inst_id &&
+         l.worker_id == r.worker_id &&
+         l.tp_size == r.tp_size &&
+         l.worker_tp_rank == r.worker_tp_rank &&
+         l.block_size == r.block_size &&
+         l.token_size == r.token_size &&
+         l.layer_num_blocks == r.layer_num_blocks &&
+         l.num_layers == r.num_layers &&
+         l.transfer_protocols == r.transfer_protocols;
+}
+
+void KvSendStub::update_dst_info(WorkerInfo&& new_dst) {
+  auto& self = *this;
+  assert(same_dst(self.dst_info_, new_dst));
+  self.dst_info_.addr = std::move(new_dst.addr);
+  self.dst_info_.other_info = std::move(new_dst.other_info);
+  return ;
+}
+
 struct KvSendStub::TaskContext {
   KvSendStub* const stub = nullptr;
   TPKind const tpkind = TPKind::UNKNOWN;
@@ -220,8 +240,8 @@ public:
     }
     assert(!self.send_blocks.empty());
 
-    self.try_create_channel();
     try {
+      self.try_create_channel();
       self.do_send(batch);
     } catch (std::exception& ex) {
       LOG(ERROR) << "KVT tx_stub fail to send data. DstId=" << dst_id
@@ -298,12 +318,33 @@ private:
     return ;
   }
 
+  void refresh_dst_info() {
+    auto& self = *this;
+    const auto& dst_info = self.stub->dst_info_;
+    auto dst_info_opt = self.stub->naming_->get_worker_info(dst_info.inst_id, dst_info.worker_id);
+    if (!dst_info_opt) {
+      LOG(WARNING) << "TaskContext.dst_info: none: use orig_dst_info=" << dst_info.to_string();
+      return;
+    }
+    if (!same_dst(dst_info, *dst_info_opt)) {
+      LOG(WARNING) << "TaskContext.dst_info: invalid dst: orig_dst_info="
+                   << dst_info.to_string()
+                   << "bad_dst_info=" << dst_info_opt->to_string();
+      return ;
+    }
+    self.stub->update_dst_info(std::move(*dst_info_opt));
+    return ;
+  }
+
   void try_create_channel() {
     auto& self = *this;
     if (self.ch) {
       return ;
     }
+    self.refresh_dst_info();
     self.ch = self.stub->channel_factory_->create(self.stub->dst_info_);
+    LOG(INFO) << "create channel. dst=" << self.stub->dst_info_.to_string()
+              << ";ch=" << self.ch.get();
     return ;
   }
 };
@@ -415,6 +456,7 @@ SendStub KvSendStubFactory::create_stub(const InstanceId& dst_inst_name,
   auto channel_factory = std::make_unique<ChannelFactory>(ctx_, proto_opt);
   return std::make_unique<KvSendStub>(info, ctx_->worker_info(),
                                       start_layer, num_layers,
-                                      std::move(channel_factory));
+                                      std::move(channel_factory),
+                                      naming_worker_.get());
 }
 }

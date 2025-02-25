@@ -163,7 +163,6 @@ void KvTransferClient::submit_req_send(const InstanceId &dst_inst_name,
     LOG(ERROR) << "KVT client: fail to submit request(" << req_id << ") because target worker disconnected.";
     throw KVTransferException(ErrorKind::TARGET_DISCONNECTED, "target worker disconnected;");
   }
-  assert(dst_inst_name == inst[dst_worker_id]->dst_info().inst_id);
   auto req_info = std::make_unique<RequestInfo>(dst_inst_name,
                                                 dst_worker_id,
                                                 req_id,

@@ -65,7 +65,6 @@ class MockSendStub : public ISendStub {
  public:
   MockSendStub() = default;
   MOCK_METHOD(void, start, (), (override));
-  MOCK_METHOD(const WorkerInfo&, dst_info, (), (const, override));
   MOCK_METHOD(void, send_batch, (BatchSendTask), (override));
   MOCK_METHOD(StubState, check_state, (), (override));
   MOCK_METHOD(void, stop, (), (override));
@@ -84,10 +83,6 @@ class ProxyStub : public ISendStub {
 
   void start() override {
     stub->start();
-  }
-
-  [[nodiscard]] const WorkerInfo &dst_info() const override {
-    return info_;
   }
 
   void send_batch(BatchSendTask batch) override {

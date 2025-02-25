@@ -146,6 +146,35 @@ class ProxyChannel : public IChannel {
 };
 
 
+class FakeNamingWorkerClient : public INamingWorkerClient {
+  int kind_ = 0;
+  int kind3_times_ = 0;
+  WorkerInfo dst_info_;
+public:
+  FakeNamingWorkerClient(int k, WorkerInfo d): kind_(k), dst_info_(d) {}
+
+  void register_worker(const WorkerInfo &worker_info) override {
+    throw std::runtime_error("biubiu~");
+  }
+
+  std::optional<WorkerInfo> get_worker_info(const InstanceId &, WorkerId) override {
+    if (this->kind_ == 0) {
+      return std::nullopt;
+    }
+    if (this->kind_ == 1) {
+      return WorkerInfo("DO-NOT-EXISTS-WORKER-ID", 1);
+    }
+    if (this->kind_ == 2) {
+      return this->dst_info_;
+    }
+    if (kind3_times_ == 0) {
+      kind3_times_ += 1;
+      throw std::runtime_error("biubiubiu~");
+    }
+    return std::nullopt;
+  }
+};
+
 class FakeChannelFactory : public IChannelFactory {
   IChannel* ch_;
 public:
@@ -191,8 +220,10 @@ static void test_parse_block_generate(int p_rank, int d_rank) {
   fbc->connect(d_info);
   auto& fbcq = fbc->q;
   auto flush_cnt = fbc->flush_cnt;
+  auto naming = FakeNamingWorkerClient(std::min(p_rank, 2), d_info);
   auto tx = KvSendStub(d_info, p_info, 0, num_layers,
-                       std::make_unique<FakeChannelFactory>(fbc.get()));
+                       std::make_unique<FakeChannelFactory>(fbc.get()),
+                       &naming);
   tx.start();
   EXPECT_EQ(tx.check_state(), StubState::WORKING);
 
@@ -395,7 +426,8 @@ static void dgtp_test_parse_block_generate(int p_rank, int d_rank) {
   fbc->connect(d_info);
   auto& fbcq = fbc->q;
   auto flush_cnt = fbc->flush_cnt;
-  auto tx = KvSendStub(d_info, p_info, 0, num_layers, std::make_unique<FakeChannelFactory>(fbc.get()));
+  auto naming = FakeNamingWorkerClient(2, d_info);
+  auto tx = KvSendStub(d_info, p_info, 0, num_layers, std::make_unique<FakeChannelFactory>(fbc.get()), &naming);
   tx.start();
   EXPECT_EQ(tx.check_state(), StubState::WORKING);
 
@@ -592,7 +624,8 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
   ctx.set_block_params(bs, ts, 8);
   ctx.set_layer_data_address(0, {0, 8 * bs});
   uint32_t num_layers = 2;
-  auto tx = KvSendStub(dst_info, src_info, 0, num_layers, std::make_unique<FakeChannelFactory>(fbc.get()));
+  auto naming = FakeNamingWorkerClient(2, dst_info);
+  auto tx = KvSendStub(dst_info, src_info, 0, num_layers, std::make_unique<FakeChannelFactory>(fbc.get()), &naming);
   tx.start();
   EXPECT_EQ(tx.check_state(), StubState::WORKING);
   {
@@ -753,7 +786,8 @@ TEST(SendStubTest, UseMockChannel) {
   EXPECT_CALL(channel, send_notification(_)).Times(0);
 
   {
-    auto tx = KvSendStub(dst_info, src_info, 0, num_layers, std::make_unique<FakeChannelFactory>(&channel));
+    auto naming = FakeNamingWorkerClient(2, dst_info);
+    auto tx = KvSendStub(dst_info, src_info, 0, num_layers, std::make_unique<FakeChannelFactory>(&channel), &naming);
     tx.start();
     tx.send_batch(std::move(task));
     step_0->notify_layer_ready(num_layers);
@@ -943,7 +977,8 @@ TEST(SendStubTest, FaultTolerantTest) {
   uint32_t num_layers = 2;
 
   FTTCF fttcf;
-  auto tx = std::make_unique<KvSendStub>(dst_info, src_info, 0, num_layers, std::make_unique<ProxyChannelFactory>(&fttcf));
+  auto naming = FakeNamingWorkerClient(2, dst_info);
+  auto tx = std::make_unique<KvSendStub>(dst_info, src_info, 0, num_layers, std::make_unique<ProxyChannelFactory>(&fttcf), &naming);
   tx->start();
 
   RequestInfo req1("1", 0, "1", {10, 11, 12}, {14, 15, 16});
@@ -1006,4 +1041,83 @@ TEST(SendStubTest, FaultTolerantTest) {
     usleep(10 * 1000);
   }
 }
+
+
+TEST(SendStubTest, CreateChannelFaultTolerantTest) {
+  WorkerInfo src_info("0", 0);
+  src_info.block_size = bs;
+  src_info.token_size = ts;
+
+  WorkerInfo dst_info("1", 0);
+  dst_info.block_size = bs;
+  dst_info.token_size = ts;
+
+  Context ctx("0", 1);
+  ctx.set_block_params(bs, ts, 8);
+  ctx.set_layer_data_address(0, {0, 8 * bs});
+  uint32_t num_layers = 2;
+
+  FTTCF fttcf;
+  auto naming = FakeNamingWorkerClient(3, WorkerInfo());
+  auto tx = std::make_unique<KvSendStub>(dst_info, src_info, 0, num_layers, std::make_unique<ProxyChannelFactory>(&fttcf), &naming);
+  tx->start();
+
+  RequestInfo req1("1", 0, "1", {10, 11, 12}, {14, 15, 16});
+  RequestInfo req2("1", 0, "2", {17, 18, 19}, {20, 21, 22});
+  RequestInfo req3("1", 0, "3", {0, 1, 2}, {4, 5, 6});
+  {
+    auto step_0 = std::make_shared<Step>(0);
+    BatchSendTask task(step_0);
+    task.tasks.emplace_back(&req1, 0, 8, true);
+    task.tasks.emplace_back(&req2, 0, 8, false);
+    tx->send_batch(std::move(task));
+    step_0->notify_layer_ready(num_layers);
+
+    while (req1.state() == ReqState::INPROCESS) {
+      usleep(10 * 1000);
+    }
+    while (req2.state() == ReqState::INPROCESS) {
+      usleep(10 * 1000);
+    }
+    EXPECT_EQ(req1.state(), ReqState::FAILED);
+    EXPECT_EQ(req2.state(), ReqState::FAILED);
+    EXPECT_FALSE(fttcf.register_data_called_[0]);
+    EXPECT_FALSE(fttcf.send_data_called_[0]);
+    EXPECT_FALSE(fttcf.flush_called_[0]);
+    EXPECT_FALSE(fttcf.send_notification_called_[0]);
+
+    auto step_1 = std::make_shared<Step>(1);
+    BatchSendTask task1(step_1);
+    task1.tasks.emplace_back(&req1, 0, 8, true);
+    task1.tasks.emplace_back(&req2, 0, 8, false);
+    tx->send_batch(std::move(task1));
+  }
+
+  {
+    auto step_2 = std::make_shared<Step>(2);
+    BatchSendTask task2(step_2);
+    task2.tasks.emplace_back(&req2, 8, 16, true);
+    task2.tasks.emplace_back(&req3, 0, 8, true);
+    tx->send_batch(std::move(task2));
+    step_2->notify_layer_ready(num_layers);
+
+    while (req3.state() == ReqState::INPROCESS) {
+      usleep(10 * 1000);
+    }
+    EXPECT_EQ(req1.state(), ReqState::FAILED);
+    EXPECT_EQ(req2.state(), ReqState::FAILED);
+    EXPECT_EQ(req3.state(), ReqState::FAILED);
+    EXPECT_TRUE(fttcf.register_data_called_[0]);
+    EXPECT_TRUE(fttcf.send_data_called_[0]);
+    EXPECT_FALSE(fttcf.flush_called_[0]);
+    EXPECT_FALSE(fttcf.send_notification_called_[0]);
+  }
+  tx->stop();
+  tx.reset();
+  while (!fttcf.dead_ch_[0]) {
+    usleep(10 * 1000);
+  }
+}
+
+
 }
