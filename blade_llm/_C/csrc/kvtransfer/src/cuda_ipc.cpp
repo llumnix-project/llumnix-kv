@@ -267,12 +267,6 @@ void CudaTransferServer::handle_connect_reqs() {
       InstanceId src_inst_id;
       uint32_t src_worker_id;
       if (read_handshake(client_sock, src_inst_id, src_worker_id)) {
-        if (src_worker_id >= MAX_WORKERS_PER_INST) {
-          LOG(WARNING) << "KVT cuda_ipc server: accept connection from invalid worker: ("
-                       << src_inst_id << ":" << src_worker_id << "), discard.";
-          continue;
-        }
-
         LOG(INFO) << "KVT cuda_ipc server: uds server: accept connection from ("
                   << src_inst_id << ":" << src_worker_id << ")";
         pool_.spawn(&recv_transfer_done, src_inst_id, src_worker_id, client_sock, service_, &shutdown_);

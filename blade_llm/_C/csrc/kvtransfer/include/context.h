@@ -11,7 +11,6 @@
 #include "common.h"
 #include "protocol.h"
 
-#define MAX_WORKERS_PER_INST (8)
 
 namespace blade_llm {
 class ICUDABarrier {

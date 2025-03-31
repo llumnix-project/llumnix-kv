@@ -6,7 +6,6 @@
 #include "protocol/cuda_ipc.h"
 #include "protocol/rdma_protocol.h"
 
-#define MAX_WORKERS_PER_INST (8)
 
 namespace blade_llm {
 
@@ -69,9 +68,6 @@ void KvTransferClient::add_target(const InstanceId &inst_name,
                                   uint32_t start_layer,
                                   uint32_t num_layers,
                                   std::optional<TransferProtocol> proto_opt) {
-  if (worker_id >= MAX_WORKERS_PER_INST) {
-    throw KVTransferException(ErrorKind::INVALID_TARGET, "invalid worker id;");
-  }
   auto &inst = targets_[inst_name];
   if (inst.size() <= worker_id) {
     inst.resize(worker_id + 1);
@@ -92,9 +88,6 @@ void KvTransferClient::add_target(const InstanceId &inst_name,
 }
 
 void KvTransferClient::remove_target(const InstanceId &inst_name, const WorkerId &worker_id) {
-  if (worker_id >= MAX_WORKERS_PER_INST) {
-    return;
-  }
   auto &inst = targets_[inst_name];
   while (inst.size() <= worker_id) {
     return;
@@ -139,9 +132,9 @@ void KvTransferClient::submit_req_send(const InstanceId &dst_inst_name,
                                        std::vector<uint32_t> src_block_ids,
                                        std::vector<uint32_t> dst_block_ids) {
 
-  if (dst_worker_id >= MAX_WORKERS_PER_INST || new_tokens <= 0) {
-    LOG(ERROR) << "KVT client: invalid worker id: " << dst_worker_id << ";";
-    throw KVTransferException(ErrorKind::INVALID_REQUEST_PARAM, "invalid worker id;");
+  if (new_tokens <= 0) {
+    LOG(ERROR) << "KVT client: invalid new tokens=" << new_tokens << ";";
+    throw KVTransferException(ErrorKind::INVALID_REQUEST_PARAM, "invalid new tokens;");
   }
 
   auto &inst = targets_[dst_inst_name];

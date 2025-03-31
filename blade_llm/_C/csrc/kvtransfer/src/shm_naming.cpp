@@ -6,6 +6,7 @@
 #include "naming/shm_naming.h"
 #include "thrid_party/logging.h"
 
+// THIS CODE IS OUT-OF-DATE!
 #define MAX_WORKS (8)
 #define MAX_INSTANCES (8)
 #define MAX_WORKER_INFO_SIZE (16384)
