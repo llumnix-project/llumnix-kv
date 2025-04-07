@@ -53,13 +53,13 @@ bool try_connect_uds(const char *path, int *sock_fd) {
   return true;
 }
 
-int write_sock(int sock_fd, const char *buf, size_t buf_size) {
+int write_sock(int sock_fd, const void *bufp, size_t buf_size) {
+  auto* buf = reinterpret_cast<const char*>(bufp);
   size_t offset = 0;
   size_t left = buf_size;
   while (left > 0) {
     auto ret = send(sock_fd, buf + offset, left, 0);
     if (ret == -1) {
-      LOG(ERROR) << "KVT socket: fail to send socket, errorno = " << errno;
       return -1;
     }
     offset += ret;
@@ -68,8 +68,25 @@ int write_sock(int sock_fd, const char *buf, size_t buf_size) {
   return offset;
 }
 
-int read_sock(int sock_fd, char *buf, size_t buf_size) {
-  return recv(sock_fd, buf, buf_size, MSG_WAITALL);
+int read_sock(int sock_fd, void *bufp, size_t buf_size) {
+  auto* buf = reinterpret_cast<char*>(bufp);
+  size_t offset = 0;
+  size_t left = buf_size;
+  while (left > 0) {
+    int ret = recv(sock_fd, buf + offset, left, MSG_WAITALL);
+    // > However, the call may still return less data than requested
+    // > if a signal is caught.
+    if (ret == -1) {
+      return -1;
+    }
+    if (ret == 0) {
+      break;
+    }
+    assert(ret > 0);
+    offset += ret;
+    left -= ret;
+  }
+  return offset;
 }
 
 int try_read(int sock_fd, char *buf, size_t buf_size, int timeout_ms) {

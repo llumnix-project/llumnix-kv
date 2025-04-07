@@ -9,12 +9,25 @@
 #include <vector>
 #include <cassert>
 #include <iostream>
+#include <unistd.h>
 
 #define MAX_OTHER_INFO_LEN (8192)
 #define MAX_ADDRESS_LEN (64)
 #define INVALID_INST_WORKER_ID (UINT32_MAX)
 #define MAX_INSTANCE_NAME_LEN (256)
 #define KB (1ULL << 10ULL) // 1KB
+
+class FdGuard {
+  int const fd_;
+ public:
+  FdGuard(int fd) noexcept: fd_(fd) {}
+  ~FdGuard() {
+    ::close(this->fd_);
+  }
+  int fd() const noexcept {
+    return this->fd_;
+  }
+};
 
 
 #define RTCHECK(expr) do { \

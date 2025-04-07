@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 #include "client.h"
+#include "envcfg.h"
 #include "thrid_party/logging.h"
 
 using ::testing::Return;
@@ -395,6 +396,9 @@ static void test_parse_block_generate(int p_rank, int d_rank) {
 }
 
 TEST(SendStubTest, ParseBlockSendPGtD) {
+  if (env_cache_shape() != RAGGED_FLASH_CACHE_SHAPE) {
+    return ;
+  }
   test_parse_block_generate(0, 0);
   test_parse_block_generate(1, 0);
   test_parse_block_generate(2, 0);
@@ -599,6 +603,9 @@ static void dgtp_test_parse_block_generate(int p_rank, int d_rank) {
 }
 
 TEST(SendStubTest, ParseBlockSendDGtP) {
+  if (env_cache_shape() != RAGGED_FLASH_CACHE_SHAPE) {
+    return ;
+  }
   dgtp_test_parse_block_generate(0, 0);
   dgtp_test_parse_block_generate(0, 1);
   dgtp_test_parse_block_generate(0, 2);
@@ -611,10 +618,14 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
   WorkerInfo src_info("0", 0);
   src_info.block_size = bs;
   src_info.token_size = ts;
+  src_info.layer_num_blocks = 8;
+  size_t src_half_layer_size = src_info.layer_num_blocks * bs / 2;
 
   WorkerInfo dst_info("1", 0);
   dst_info.block_size = bs;
   dst_info.token_size = ts;
+  dst_info.layer_num_blocks = 16;
+  size_t dst_half_layer_size = dst_info.layer_num_blocks * bs / 2;
 
   auto fbc = std::make_shared<FakeChannel>();
   fbc->connect(dst_info);
@@ -644,19 +655,62 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     EXPECT_FALSE(req0.state() == ReqState::OK);
-    EXPECT_EQ(q->size(), 3);
-    uint32_t layer = 0;
-    while (layer < 2) {
-      auto msg = q->front();
+    if (env_cache_shape() == RAGGED_FLASH_CACHE_SHAPE) {
+      EXPECT_EQ(q->size(), 3);
+      uint32_t layer = 0;
+      while (layer < 2) {
+        auto msg = q->front();
+        q->pop();
+        EXPECT_EQ(msg.dst_inst_id, "1");
+        EXPECT_EQ(msg.dst_worker_id, 0);
+        EXPECT_TRUE(msg.data.has_value());
+        EXPECT_EQ(msg.data.value().layer_idx, layer);
+        EXPECT_EQ(msg.data.value().src_offset, 0);
+        EXPECT_EQ(msg.data.value().dst_offset, 4 * 16 * KB);
+        EXPECT_EQ(msg.data.value().length, 8 * KB);
+        layer++;
+      }
+    } else {
+      EXPECT_EQ(q->size(), 5);
+      auto layer0_k = q->front();
       q->pop();
-      EXPECT_EQ(msg.dst_inst_id, "1");
-      EXPECT_EQ(msg.dst_worker_id, 0);
-      EXPECT_TRUE(msg.data.has_value());
-      EXPECT_EQ(msg.data.value().layer_idx, layer);
-      EXPECT_EQ(msg.data.value().src_offset, 0);
-      EXPECT_EQ(msg.data.value().dst_offset, 4 * 16 * KB);
-      EXPECT_EQ(msg.data.value().length, 8 * KB);
-      layer++;
+      auto layer0_v = q->front();
+      q->pop();
+      auto layer1_k = q->front();
+      q->pop();
+      auto layer1_v = q->front();
+      q->pop();
+      EXPECT_EQ(layer0_k.dst_inst_id, "1");
+      EXPECT_EQ(layer0_k.dst_worker_id, 0);
+      EXPECT_TRUE(layer0_k.data.has_value());
+      EXPECT_EQ(layer0_k.data.value().layer_idx, 0);
+      EXPECT_EQ(layer0_k.data.value().src_offset, 0);
+      EXPECT_EQ(layer0_k.data.value().dst_offset, 4 * bs / 2);
+      EXPECT_EQ(layer0_k.data.value().length, 8 * KB / 2);
+
+      EXPECT_EQ(layer0_v.dst_inst_id, "1");
+      EXPECT_EQ(layer0_v.dst_worker_id, 0);
+      EXPECT_TRUE(layer0_v.data.has_value());
+      EXPECT_EQ(layer0_v.data.value().layer_idx, 0);
+      EXPECT_EQ(layer0_v.data.value().src_offset, 0 + src_half_layer_size);
+      EXPECT_EQ(layer0_v.data.value().dst_offset, 4 * bs / 2 + dst_half_layer_size);
+      EXPECT_EQ(layer0_v.data.value().length, 8 * KB / 2);
+
+      EXPECT_EQ(layer1_k.dst_inst_id, "1");
+      EXPECT_EQ(layer1_k.dst_worker_id, 0);
+      EXPECT_TRUE(layer1_k.data.has_value());
+      EXPECT_EQ(layer1_k.data.value().layer_idx, 1);
+      EXPECT_EQ(layer1_k.data.value().src_offset, 0);
+      EXPECT_EQ(layer1_k.data.value().dst_offset, 4 * bs / 2);
+      EXPECT_EQ(layer1_k.data.value().length, 8 * KB / 2);
+
+      EXPECT_EQ(layer1_v.dst_inst_id, "1");
+      EXPECT_EQ(layer1_v.dst_worker_id, 0);
+      EXPECT_TRUE(layer1_v.data.has_value());
+      EXPECT_EQ(layer1_v.data.value().layer_idx, 1);
+      EXPECT_EQ(layer1_v.data.value().src_offset, 0 + src_half_layer_size);
+      EXPECT_EQ(layer1_v.data.value().dst_offset, 4 * bs / 2 + dst_half_layer_size);
+      EXPECT_EQ(layer1_v.data.value().length, 8 * KB / 2);
     }
     auto flush = q->front();
     q->pop();
@@ -678,22 +732,59 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     EXPECT_FALSE(req1.state() == ReqState::OK);
-    EXPECT_EQ(q->size(), 3); // because req1 has 17 tokens need two continuous blocks, can be merged;
-    {
-      auto b1 = q->front();
-      q->pop();
-      EXPECT_TRUE(b1.data.has_value());
-      EXPECT_EQ(b1.data.value().layer_idx, 0);
-      EXPECT_EQ(b1.data.value().src_offset, 0);
-      EXPECT_EQ(b1.data.value().dst_offset, 4 * 16 * KB);
-      EXPECT_EQ(b1.data.value().length, 17 * KB);
-      auto b2 = q->front();
-      q->pop();
-      EXPECT_TRUE(b2.data.has_value());
-      EXPECT_EQ(b2.data.value().layer_idx, 1);
-      EXPECT_EQ(b2.data.value().src_offset, 0);
-      EXPECT_EQ(b2.data.value().dst_offset, 4 * 16 * KB);
-      EXPECT_EQ(b2.data.value().length, 17 * KB);
+    if (env_cache_shape() == RAGGED_FLASH_CACHE_SHAPE) {
+      EXPECT_EQ(q->size(), 3); // because req1 has 17 tokens need two continuous blocks, can be merged;
+      {
+        auto b1 = q->front();
+        q->pop();
+        EXPECT_TRUE(b1.data.has_value());
+        EXPECT_EQ(b1.data.value().layer_idx, 0);
+        EXPECT_EQ(b1.data.value().src_offset, 0);
+        EXPECT_EQ(b1.data.value().dst_offset, 4 * 16 * KB);
+        EXPECT_EQ(b1.data.value().length, 17 * KB);
+        auto b2 = q->front();
+        q->pop();
+        EXPECT_TRUE(b2.data.has_value());
+        EXPECT_EQ(b2.data.value().layer_idx, 1);
+        EXPECT_EQ(b2.data.value().src_offset, 0);
+        EXPECT_EQ(b2.data.value().dst_offset, 4 * 16 * KB);
+        EXPECT_EQ(b2.data.value().length, 17 * KB);
+      }
+    } else {
+      EXPECT_EQ(q->size(), 5); // because req1 has 17 tokens need two continuous blocks, can be merged;
+      {
+        auto b1 = q->front();
+        q->pop();
+        EXPECT_TRUE(b1.data.has_value());
+        EXPECT_EQ(b1.data.value().layer_idx, 0);
+        EXPECT_EQ(b1.data.value().src_offset, 0);
+        EXPECT_EQ(b1.data.value().dst_offset, 4 * 16 * KB / 2);
+        EXPECT_EQ(b1.data.value().length, 17 * KB / 2);
+
+        b1 = q->front();
+        q->pop();
+        EXPECT_TRUE(b1.data.has_value());
+        EXPECT_EQ(b1.data.value().layer_idx, 0);
+        EXPECT_EQ(b1.data.value().src_offset, 0 + src_half_layer_size);
+        EXPECT_EQ(b1.data.value().dst_offset, 4 * 16 * KB / 2 + dst_half_layer_size);
+        EXPECT_EQ(b1.data.value().length, 17 * KB / 2);
+
+        b1 = q->front();
+        q->pop();
+        EXPECT_TRUE(b1.data.has_value());
+        EXPECT_EQ(b1.data.value().layer_idx, 1);
+        EXPECT_EQ(b1.data.value().src_offset, 0);
+        EXPECT_EQ(b1.data.value().dst_offset, 4 * 16 * KB / 2);
+        EXPECT_EQ(b1.data.value().length, 17 * KB / 2);
+
+        b1 = q->front();
+        q->pop();
+        EXPECT_TRUE(b1.data.has_value());
+        EXPECT_EQ(b1.data.value().layer_idx, 1);
+        EXPECT_EQ(b1.data.value().src_offset, 0 + src_half_layer_size);
+        EXPECT_EQ(b1.data.value().dst_offset, 4 * 16 * KB / 2 + dst_half_layer_size);
+        EXPECT_EQ(b1.data.value().length, 17 * KB / 2);
+      }
     }
     auto flush = q->front();
     q->pop();
@@ -716,32 +807,67 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
     }
 
     EXPECT_TRUE(req3.state() == ReqState::OK);
-    EXPECT_EQ(q->size(), 4);
-    {
-      auto b1 = q->front();
-      q->pop();
-      EXPECT_TRUE(b1.data.has_value());
-      EXPECT_EQ(b1.data.value().layer_idx, 0);
-      EXPECT_EQ(b1.data.value().src_offset, 4 * bs + ts); // 4
-      EXPECT_EQ(b1.data.value().dst_offset, 8 * bs + ts);
-      EXPECT_EQ(b1.data.value().length, 16 * ts);
-      auto b2 = q->front();
-      q->pop();
-      EXPECT_TRUE(b2.data.has_value());
-      EXPECT_EQ(b2.data.value().layer_idx, 1);
-      EXPECT_EQ(b2.data.value().src_offset, 4 * bs + ts);
-      EXPECT_EQ(b2.data.value().dst_offset, 8 * bs + ts);
-      EXPECT_EQ(b2.data.value().length, 16 * ts);
-      auto flush = q->front();
-      q->pop();
-      EXPECT_EQ(flush.dst_inst_id, "1");
-      EXPECT_EQ(flush.dst_worker_id, 0);
-      auto b3 = q->front();
-      q->pop();
-      EXPECT_TRUE(b3.req_id.has_value());
-      EXPECT_EQ(b3.req_id.value(), "req_id00000000000000000000000002");
+    if (env_cache_shape() == RAGGED_FLASH_CACHE_SHAPE) {
+      EXPECT_EQ(q->size(), 4);
+      {
+        auto b1 = q->front();
+        q->pop();
+        EXPECT_TRUE(b1.data.has_value());
+        EXPECT_EQ(b1.data.value().layer_idx, 0);
+        EXPECT_EQ(b1.data.value().src_offset, 4 * bs + ts); // 4
+        EXPECT_EQ(b1.data.value().dst_offset, 8 * bs + ts);
+        EXPECT_EQ(b1.data.value().length, 16 * ts);
+        auto b2 = q->front();
+        q->pop();
+        EXPECT_TRUE(b2.data.has_value());
+        EXPECT_EQ(b2.data.value().layer_idx, 1);
+        EXPECT_EQ(b2.data.value().src_offset, 4 * bs + ts);
+        EXPECT_EQ(b2.data.value().dst_offset, 8 * bs + ts);
+        EXPECT_EQ(b2.data.value().length, 16 * ts);
+      }
+    } else {
+      EXPECT_EQ(q->size(), 4 + 2);
+      {
+        auto b1 = q->front();
+        q->pop();
+        EXPECT_TRUE(b1.data.has_value());
+        EXPECT_EQ(b1.data.value().layer_idx, 0);
+        EXPECT_EQ(b1.data.value().src_offset, (4 * bs + ts) / 2); // 4
+        EXPECT_EQ(b1.data.value().dst_offset, (8 * bs + ts) / 2);
+        EXPECT_EQ(b1.data.value().length, 16 * ts / 2);
+        b1 = q->front();
+        q->pop();
+        EXPECT_TRUE(b1.data.has_value());
+        EXPECT_EQ(b1.data.value().layer_idx, 0);
+        EXPECT_EQ(b1.data.value().src_offset, (4 * bs + ts) / 2 + src_half_layer_size); // 4
+        EXPECT_EQ(b1.data.value().dst_offset, (8 * bs + ts) / 2 + dst_half_layer_size);
+        EXPECT_EQ(b1.data.value().length, 16 * ts / 2);
+
+        b1 = q->front();
+        q->pop();
+        EXPECT_TRUE(b1.data.has_value());
+        EXPECT_EQ(b1.data.value().layer_idx, 1);
+        EXPECT_EQ(b1.data.value().src_offset, (4 * bs + ts) / 2); // 4
+        EXPECT_EQ(b1.data.value().dst_offset, (8 * bs + ts) / 2);
+        EXPECT_EQ(b1.data.value().length, 16 * ts / 2);
+        b1 = q->front();
+        q->pop();
+        EXPECT_TRUE(b1.data.has_value());
+        EXPECT_EQ(b1.data.value().layer_idx, 1);
+        EXPECT_EQ(b1.data.value().src_offset, (4 * bs + ts) / 2 + src_half_layer_size); // 4
+        EXPECT_EQ(b1.data.value().dst_offset, (8 * bs + ts) / 2 + dst_half_layer_size);
+        EXPECT_EQ(b1.data.value().length, 16 * ts / 2);
+      }
     }
-  }
+    auto flush = q->front();
+    q->pop();
+    EXPECT_EQ(flush.dst_inst_id, "1");
+    EXPECT_EQ(flush.dst_worker_id, 0);
+    auto b3 = q->front();
+    q->pop();
+    EXPECT_TRUE(b3.req_id.has_value());
+    EXPECT_EQ(b3.req_id.value(), "req_id00000000000000000000000002");
+}
 }
 
 class MockChannel : public IChannel {
@@ -755,6 +881,9 @@ class MockChannel : public IChannel {
 };
 
 TEST(SendStubTest, UseMockChannel) {
+  if (env_cache_shape() != RAGGED_FLASH_CACHE_SHAPE) {
+    return ;
+  }
   uint32_t bs = 16 * KB;
   uint32_t ts = KB;
   WorkerInfo src_info("0", 0);
@@ -963,6 +1092,9 @@ public:
 
 
 TEST(SendStubTest, FaultTolerantTest) {
+  if (env_cache_shape() != RAGGED_FLASH_CACHE_SHAPE) {
+    return ;
+  }
   WorkerInfo src_info("0", 0);
   src_info.block_size = bs;
   src_info.token_size = ts;

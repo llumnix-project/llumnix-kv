@@ -1,30 +1,24 @@
 #include "tx_stub.h"
 #include "utils/timer.h"
 #include "thrid_party/logging.h"
+#include "utils/socket_helper.h"
 #include "channel.h"
 #include "envcfg.h"
+#include <string.h>
 #include <unistd.h>
 #include <random>
 
 namespace blade_llm {
 
-static void parse_block_send_p_eq_d(
-  const WorkerInfo *src_worker_info,
-  const WorkerInfo *dst_worker_info,
+static void do_parse_block_send_p_eq_d(
+  size_t block_size, size_t token_size,
   const ReqSendTask *task,
-  std::vector<IpcBlock> &send_blocks) {
-  // as tp size is same, token size should be same;
-  assert(src_worker_info->tp_size == dst_worker_info->tp_size);
-  assert(src_worker_info->token_size == dst_worker_info->token_size);
-  assert(src_worker_info->block_size == dst_worker_info->block_size);
-  assert(src_worker_info->worker_tp_rank == dst_worker_info->worker_tp_rank);
-  auto token_size = src_worker_info->token_size;
-  size_t block_size = src_worker_info->block_size;
-
+  std::vector<IpcBlock> &send_blocks
+) {
   // ntpb: number tokens per block
   uint32_t src_ntpb = block_size / token_size;
-  uint32_t dst_ntpb = block_size / token_size;
-  assert(src_ntpb == dst_ntpb);
+  uint32_t dst_ntpb = src_ntpb;
+  assert(src_ntpb * token_size == block_size);
 
   auto wrote_tokens = task->seen_tokens;
   auto left_tokens = task->new_tokens;
@@ -47,7 +41,60 @@ static void parse_block_send_p_eq_d(
     wrote_tokens += tokens;
     left_tokens -= tokens;
   }
+  return ;
 }
+
+// RAGGED_FLASH_CACHE_SHAPE
+static void parse_block_send_p_eq_d(
+  const WorkerInfo *src_worker_info,
+  const WorkerInfo *dst_worker_info,
+  const ReqSendTask *task,
+  std::vector<IpcBlock> &send_blocks) {
+  // as tp size is same, token size should be same;
+  assert(src_worker_info->tp_size == dst_worker_info->tp_size);
+  assert(src_worker_info->token_size == dst_worker_info->token_size);
+  assert(src_worker_info->block_size == dst_worker_info->block_size);
+  assert(src_worker_info->worker_tp_rank == dst_worker_info->worker_tp_rank);
+  auto token_size = src_worker_info->token_size;
+  size_t block_size = src_worker_info->block_size;
+  return do_parse_block_send_p_eq_d(block_size, token_size, task, send_blocks);
+}
+
+// FLASH_CACHE_SHAPE
+static void vllm_parse_block_send_p_eq_d(
+  const WorkerInfo *src_worker_info,
+  const WorkerInfo *dst_worker_info,
+  const ReqSendTask *task,
+  std::vector<IpcBlock> &send_blocks) {
+  // as tp size is same, token size should be same;
+  assert(src_worker_info->tp_size == dst_worker_info->tp_size);
+  assert(src_worker_info->token_size == dst_worker_info->token_size);
+  assert(src_worker_info->block_size == dst_worker_info->block_size);
+  assert(src_worker_info->worker_tp_rank == dst_worker_info->worker_tp_rank);
+  size_t const kv_token_size = src_worker_info->token_size;
+  size_t const kv_block_size = src_worker_info->block_size;
+  size_t const k_token_size = kv_token_size / 2;
+  size_t const k_block_size = kv_block_size / 2;
+  assert(2 * k_token_size == kv_token_size);
+  assert(2 * k_block_size == kv_block_size);
+  size_t const src_layer_size = k_block_size * src_worker_info->layer_num_blocks;
+  size_t const dst_layer_size = k_block_size * dst_worker_info->layer_num_blocks;
+  // src_layer_size, dst_layer_size 并不一定要相等.
+
+  size_t sb_idx = send_blocks.size();  // sb: send block~
+  do_parse_block_send_p_eq_d(k_block_size, k_token_size, task, send_blocks);
+  size_t const sb_end_idx = send_blocks.size();
+
+  for (; sb_idx < sb_end_idx; ++sb_idx) {
+    auto sb = send_blocks[sb_idx];
+    sb.src_offset += src_layer_size;
+    sb.dst_offset += dst_layer_size;
+    send_blocks.emplace_back(std::move(sb));
+  }
+
+  return ;
+}
+
 
 static void do_parse_block_send(
   const WorkerInfo *p_info,  // src
@@ -158,12 +205,25 @@ void KvSendStub::update_dst_info(WorkerInfo&& new_dst) {
   return ;
 }
 
+static char* expand_vec(std::vector<char>& buf, size_t s) {
+  auto old_s = buf.size();
+  buf.resize(old_s + s);
+  return buf.data() + old_s;
+}
+
+// see vllm disagg.py
+static constexpr uint32_t SEND_DONE_REP = 0x20181219ul;
+static constexpr uint32_t SEND_DONE_RESP = 0x91218102ul;
+
 struct KvSendStub::TaskContext {
   KvSendStub* const stub = nullptr;
   TPKind const tpkind = TPKind::UNKNOWN;
   ParseBlockFunc* const parse_block = nullptr;
 
   // runtime state
+  std::vector<char> send_done_buf;
+  std::optional<FdGuard> send_done_sock;
+  const sockaddr_in* const send_done_addr = env_send_done_addr();  // OWNER: GLOBAL
   std::string flush_out_buf;
   std::vector<IpcBlock> send_blocks;
   std::vector<const ReqSendTask *> finished_req;
@@ -286,6 +346,107 @@ public:
     self.finished_req.clear();
   }
 private:
+  // send self.send_done_buf to self.send_done_sock
+  void do_rpc_send_done() {
+    auto& self = *this;
+
+    if (!self.send_done_sock.has_value()) {
+      int sock = socket(AF_INET, SOCK_STREAM, 0);
+      if (sock == -1) {
+        int errno_bak = errno;
+        auto errmsg = std::string("rpc send done: create socket error. errno=");
+        errmsg += std::to_string(errno_bak);
+        throw std::runtime_error(std::move(errmsg));
+      }
+      self.send_done_sock.emplace(sock);
+
+      auto* addr = reinterpret_cast<const sockaddr*>(self.send_done_addr);
+      int sysok = connect(sock, addr, sizeof(*self.send_done_addr));
+      if (sysok == -1) {
+        int errno_bak = errno;
+        auto errmsg = std::string("rpc send done: connect error. errno=");
+        errmsg += std::to_string(errno_bak);
+        throw std::runtime_error(std::move(errmsg));
+      }
+    }
+    int sock = self.send_done_sock->fd();
+
+    const auto& sbuf = self.send_done_buf;
+    int sysok = write_sock(sock, sbuf.data(), sbuf.size());
+    if (sysok == -1) {
+      int errno_bak = errno;
+      auto errmsg = std::string("rpc send done: write error. errno=");
+      errmsg += std::to_string(errno_bak);
+      throw std::runtime_error(std::move(errmsg));
+    }
+
+    uint32_t resp = 0;
+    sysok = read_sock(sock, &resp, sizeof(resp));
+    if (sysok == -1) {
+      int errno_bak = errno;
+      auto errmsg = std::string("rpc send done: read error. errno=");
+      errmsg += std::to_string(errno_bak);
+      throw std::runtime_error(std::move(errmsg));
+    }
+    if (sysok != sizeof(resp) || resp != SEND_DONE_RESP) {
+      auto errmsg = std::string("rpc send done: invalid response");
+      throw std::runtime_error(std::move(errmsg));
+    }
+    return ;
+  }
+
+  void rpc_send_done(const std::vector<const ReqSendTask*>& reqs) {
+    auto& self = *this;
+
+    // see vllm disagg.py
+    self.send_done_buf.resize(4 + 4 + 4);
+    uint32_t header = SEND_DONE_REP;
+    uint32_t worker_id = self.stub->src_info_.worker_id;
+    uint32_t num_req = reqs.size();
+    memcpy(self.send_done_buf.data() + 0, &header, 4);
+    memcpy(self.send_done_buf.data() + 4, &worker_id, 4);
+    memcpy(self.send_done_buf.data() + 8, &num_req, 4);
+    for (const auto* req : reqs) {
+      const std::string& reqid = req->req_id();
+      uint32_t reqid_s = reqid.size();
+      char* dst = expand_vec(self.send_done_buf, 4 + reqid_s);
+      memcpy(dst, &reqid_s, 4);
+      memcpy(dst + 4, reqid.data(), reqid_s);
+    }
+
+    // 考虑到我们使用的是一个长链接, 其可能已经失效了, 这里会在需要的时候,
+    // 进行重试, 重新创建一个连接. 当然, 一次就好~
+    try {
+      self.do_rpc_send_done();
+      return ;
+    } catch (const std::exception& ex) {
+      LOG(ERROR) << "do_rpc_send_done failed. ex=" << ex.what();
+      self.send_done_sock.reset();
+    }
+
+    try {
+      self.do_rpc_send_done();
+      return ;
+    } catch (const std::exception& ex) {
+      LOG(ERROR) << "do_rpc_send_done failed. ex=" << ex.what();
+      self.send_done_sock.reset();
+      throw;
+    }
+    return ;
+}
+
+  void send_done(const std::vector<const ReqSendTask*>& reqs) {
+    auto& self = *this;
+    if (self.send_done_addr == nullptr) {
+      // channel send done, used in bladellm
+      self.ch->send_notification(self.finished_req);
+    } else {
+      // rpc send done, used in vllm
+      self.rpc_send_done(self.finished_req);
+    }
+    return;
+  }
+
   void do_send(BatchSendTask& batch) {
     auto& self = *this;
     const auto start_layer = self.stub->start_layer_;
@@ -311,7 +472,7 @@ private:
       return ;
     }
 
-    self.ch->send_notification(self.finished_req);
+    self.send_done(self.finished_req);
     auto send_notify_end_ts = SteadyClock::now();
     self.send_notify_us = elapse_us(self.send_finish_ts, send_notify_end_ts);
     self.send_finish_ts = send_notify_end_ts;
@@ -352,16 +513,26 @@ private:
 void KvSendStub::start_async() {
   TPKind tpkind = TPKind::UNKNOWN;
   ParseBlockFunc* parse_block_send = nullptr;
-  if (src_info_.tp_size == dst_info_.tp_size) {
-    parse_block_send = parse_block_send_p_eq_d;
+  const int cache_shape = env_cache_shape();
+  if (cache_shape == RAGGED_FLASH_CACHE_SHAPE) {
+    if (src_info_.tp_size == dst_info_.tp_size) {
+      parse_block_send = parse_block_send_p_eq_d;
+      tpkind = TPKind::PEQD;
+    } else if (src_info_.tp_size > dst_info_.tp_size) {
+      parse_block_send = parse_block_send_p_gt_d;
+      tpkind = TPKind::PGTD;
+    } else {
+      parse_block_send = parse_block_send_p_lt_d;
+      tpkind = TPKind::PLTD;
+    }
+  } else if (cache_shape == FLASH_CACHE_SHAPE) {
+    RTCHECK(src_info_.tp_size == dst_info_.tp_size);
+    parse_block_send = vllm_parse_block_send_p_eq_d;
     tpkind = TPKind::PEQD;
-  } else if (src_info_.tp_size > dst_info_.tp_size) {
-    parse_block_send = parse_block_send_p_gt_d;
-    tpkind = TPKind::PGTD;
   } else {
-    parse_block_send = parse_block_send_p_lt_d;
-    tpkind = TPKind::PLTD;
+    RTCHECK(false);
   }
+
   assert(tpkind != TPKind::UNKNOWN);
   auto taskctx = TaskContext(this, tpkind, parse_block_send);
 

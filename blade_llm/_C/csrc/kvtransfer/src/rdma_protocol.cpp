@@ -648,15 +648,6 @@ void RDMAServer::CtxCallback::OnRecvCall(XChannel *ch, char *in_buf, size_t len,
   return;
 }
 
-class FdGuard {
-  int const fd_;
- public:
-  FdGuard(int fd) noexcept: fd_(fd) {}
-  ~FdGuard() {
-    ::close(this->fd_);
-  }
-};
-
 static int get_port() {
   int sockfd, portno = 0;
   struct sockaddr_in serv_addr;
