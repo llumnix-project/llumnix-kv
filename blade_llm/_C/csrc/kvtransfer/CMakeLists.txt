@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
-project(kvtransfer LANGUAGES CXX CUDA)
 set(CMAKE_CUDA_ARCHITECTURES 80 86 90)
+project(kvtransfer LANGUAGES CXX CUDA)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_SHARED_LINKER_FLAGS "-Wl,--no-undefined")
