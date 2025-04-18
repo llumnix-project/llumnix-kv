@@ -57,6 +57,10 @@ void init_kv_transfer_client(const std::string &inst_name,
     KV_CLIENT = KvTransferClient::create(std::move(context), protocols, std::move(stub_factory));
     // disable auto connect after python runtime ready;
     KV_CLIENT->enable_auto_connect();
+    auto* ctx = KV_CLIENT->context();
+    auto* worker_info = ctx->worker_info_mutable();
+    worker_info->transfer_protocols = ctx->support_protocols().value();
+    LOG(INFO) << "init_kv_transfer_client. worker_info=" << worker_info->to_string();
   }
 }
 
@@ -218,16 +222,24 @@ bool check_recv_done(const std::string &req_id) {
 }
 
 // empty 意味着不处于 kvt 环境下.
-std::string current_worker_info() {
-  Context* ctx = nullptr;
-  if (KV_CLIENT) {
-    ctx = KV_CLIENT->context();
-  } else if (KV_SERVICE) {
-    ctx = KV_SERVICE->get_context();
-  } else {
+std::string current_worker_info(const std::string& kind = "any") {
+    Context* ctx = nullptr;
+
+    if (kind == "client" && KV_CLIENT) {
+        ctx = KV_CLIENT->context();
+    } else if (kind == "server" && KV_SERVICE) {
+        ctx = KV_SERVICE->get_context();
+    } else if (kind == "any") {
+        if (KV_CLIENT) {
+            ctx = KV_CLIENT->context();
+        } else if (KV_SERVICE) {
+            ctx = KV_SERVICE->get_context();
+        }
+    }
+    if (ctx) {
+      return ctx->worker_info().to_string();
+    }
     return {};
-  }
-  return ctx->worker_info().to_string();
 }
 
 #ifdef ENABLE_TORCH
@@ -284,6 +296,6 @@ PYBIND11_MODULE(kvtransfer_ops, m) {
   m.def("submit_req_recv", &blade_llm::submit_req_recv, "submit kv recv task to kv server;");
   m.def("check_recv_done", &blade_llm::check_recv_done, "check if all kv data of a request are received;");
   // common
-  m.def("current_worker_info", &blade_llm::current_worker_info, "get current worker info;");
+  m.def("current_worker_info", &blade_llm::current_worker_info, "get current worker info;", py::arg("kind") = "any");
   m.def("lib_support_transfer_protocols", &blade_llm::support_transfer_protocols, "get supported transfer types");
 }

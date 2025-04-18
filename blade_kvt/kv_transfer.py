@@ -60,7 +60,7 @@ except ImportError:
     def alloc_phy_cont_mem(size: int, device: torch.device) -> torch.UntypedStorage:
         raise RuntimeError("KVTransferOps is not available, please build BladeLLM with it.")
 
-    def current_worker_info() -> str:
+    def current_worker_info(kind: str = "any") -> str:
         return ""
 
 else:

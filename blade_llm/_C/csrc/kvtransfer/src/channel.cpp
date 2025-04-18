@@ -118,6 +118,6 @@ Channel ChannelFactory::create(const WorkerInfo& info) {
                    << ",ex=" << e.what();
     }
   }
-  throw std::runtime_error("target worker not support protocol");
+  throw std::runtime_error("target worker not support protocol, target_worker=" + info.to_string());
 }
 }
