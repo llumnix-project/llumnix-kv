@@ -10,7 +10,7 @@ logger = logging.getLogger("blade_kvt")
 
 
 def _persist_aff_data(aff_data, filepath):
-    max_gpu_rank = max([int(k) for k in aff_data.keys()])
+    max_gpu_rank = max([int(k) for k in aff_data])
     out = ','.join(aff_data[str(gpu_rank)] for gpu_rank in range(max_gpu_rank + 1))
     logger.info("persist_aff_data out=%s", out)
 

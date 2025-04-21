@@ -28,7 +28,7 @@ target-version = 'py310'
 # - TD
 # - PL
 # - RUF (except RUF001)
-select = ['E4', 'E7', 'E9', 'F', 'I', 'FLY', 'C901', 'ASYNC', 'LOG', 'G', 'PIE', 'RSE', 'TCH', 'INT', 'FURB', 'PLE', 'PLC', 'PLC', 'PLR']
+select = ['E4', 'E7', 'E9', 'F', 'I', 'FLY', 'C901', 'ASYNC', 'LOG', 'G', 'PIE', 'RSE', 'TCH', 'INT', 'FURB', 'PLE', 'PLC', 'PLC', 'PLR', 'C', 'SIM']
 ignore = [
   'E741',
   'PLE1205', # seems not works with loguru
@@ -37,6 +37,10 @@ ignore = [
   'PLR2004', # Magic value used in comparison
   'PLR0915', # Too many statements
   'PLR5501',
+  'C408',    # use {}/[]/() for collection construction
+  'SIM300',  # yoda expression
+  'SIM910',   # dict.get with None as defualt.
+  'SIM108',   # if-else-block-instead-of-if-exp
 ]
 logger-objects = ["loguru.logger"]
 
