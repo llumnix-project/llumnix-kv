@@ -76,3 +76,19 @@ else:
         connect_naming,
         current_worker_info,
     )
+
+
+def get_kv_transfer_token_bytes(
+    itemsize,
+    head_dim=0,
+    num_attention_heads=0,
+    tp_size=0,
+    kv_lora_rank=0,
+    qk_rope_head_dim=0,
+    num_query_group=None,
+    is_MLA=False,
+):
+    if is_MLA:
+        return itemsize * (kv_lora_rank + qk_rope_head_dim)
+    _kv_tranfer_unit = num_attention_heads // tp_size if num_query_group is None else max(1, num_query_group // tp_size)
+    return 2 * itemsize * head_dim * _kv_tranfer_unit
