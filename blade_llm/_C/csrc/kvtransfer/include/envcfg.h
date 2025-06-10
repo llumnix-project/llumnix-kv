@@ -22,4 +22,8 @@ constexpr int RAGGED_FLASH_CACHE_SHAPE = 1;
 constexpr int FLASH_CACHE_SHAPE = 2;
 int env_cache_shape();
 
+constexpr int SEND_DONE_HEAD_KIND = 1;
+constexpr int SEND_SAVE_DONE_HEAD_KIND = 2;
+int env_send_done_head_kind();
+
 }  // namespace blade_llm {

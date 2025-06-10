@@ -129,4 +129,15 @@ int env_cache_shape() {
   return val;
 }
 
+
+int env_send_done_head_kind() {
+  static constexpr int DEFVAL = SEND_SAVE_DONE_HEAD_KIND;
+  static int val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_SDH_KIND", DEFVAL);
+  });
+  return val;
+}
+
 }  // namespace blade_llm {

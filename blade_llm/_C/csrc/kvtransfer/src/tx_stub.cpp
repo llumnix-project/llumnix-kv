@@ -211,8 +211,9 @@ static char* expand_vec(std::vector<char>& buf, size_t s) {
   return buf.data() + old_s;
 }
 
-// see vllm disagg.py
-static constexpr uint32_t SEND_DONE_REP = 0x20181219ul;
+// see vllm vllm/v1/hybrid_connector/__init__.py
+static constexpr uint32_t SEND_DONE_REQ = 0x20181219ul;
+static constexpr uint32_t SEND_SAVE_DONE_REQ = 0x20181220ul;
 static constexpr uint32_t SEND_DONE_RESP = 0x91218102ul;
 
 struct KvSendStub::TaskContext {
@@ -400,7 +401,10 @@ private:
 
     // see vllm disagg.py
     self.send_done_buf.resize(4 + 4 + 4);
-    uint32_t header = SEND_DONE_REP;
+    uint32_t header = SEND_SAVE_DONE_REQ;
+    if (env_send_done_head_kind() == SEND_DONE_HEAD_KIND) {
+      header = SEND_DONE_REQ;
+    }
     uint32_t worker_tp_rank = self.stub->src_info_.worker_tp_rank;
     uint32_t num_req = reqs.size();
     memcpy(self.send_done_buf.data() + 0, &header, 4);
