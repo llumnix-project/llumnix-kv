@@ -226,7 +226,15 @@ class KVTransferClient:
 
         if self._cur_step_id is not None:
             raise RuntimeError("start_send_step has been called multiple times")
-        self._cur_step_id = start_send()
+
+        # see EMPTY_STEP_ID in client.cpp
+        EMPTY_STEP_ID = 9223372036854775807
+
+        # assert self._cur_step_id is None
+        step_id = start_send()
+        if step_id != EMPTY_STEP_ID:
+            self._cur_step_id = step_id
+        # self._cur_step_id = start_send()
 
     def flush_send_step(self):
         """

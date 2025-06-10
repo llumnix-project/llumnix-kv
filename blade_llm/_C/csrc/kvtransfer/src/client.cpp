@@ -186,7 +186,13 @@ void KvTransferClient::submit_delta_send(const RequestId &req_id,
   }
 }
 
+static constexpr size_t EMPTY_STEP_ID = 9223372036854775807;
+
 size_t KvTransferClient::start_send() {
+  if (targets_tasks_buf_.empty()) {
+    return EMPTY_STEP_ID;
+  }
+
   auto step = std::make_shared<Step>(step_id_++);
 
   for (auto& [inst_id, workers_task] : targets_tasks_buf_) {

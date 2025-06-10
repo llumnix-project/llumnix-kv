@@ -401,10 +401,10 @@ private:
     // see vllm disagg.py
     self.send_done_buf.resize(4 + 4 + 4);
     uint32_t header = SEND_DONE_REP;
-    uint32_t worker_id = self.stub->src_info_.worker_id;
+    uint32_t worker_tp_rank = self.stub->src_info_.worker_tp_rank;
     uint32_t num_req = reqs.size();
     memcpy(self.send_done_buf.data() + 0, &header, 4);
-    memcpy(self.send_done_buf.data() + 4, &worker_id, 4);
+    memcpy(self.send_done_buf.data() + 4, &worker_tp_rank, 4);
     memcpy(self.send_done_buf.data() + 8, &num_req, 4);
     for (const auto* req : reqs) {
       const std::string& reqid = req->req_id();
