@@ -36,10 +36,25 @@ class KvTransferClient : public noncopyable {
   void submit_req_send(const InstanceId &dst_inst,
                        const WorkerId &dst_worker,
                        const RequestId &,
+                       uint32_t seen_tokens,
                        uint32_t new_tokens,
                        bool has_last_token,
                        std::vector<uint32_t> src_block_ids,
                        std::vector<uint32_t> dst_block_ids);
+
+  void submit_req_send(const InstanceId &dst_inst,
+                       const WorkerId &dst_worker,
+                       const RequestId &r,
+                       uint32_t new_tokens,
+                       bool has_last_token,
+                       std::vector<uint32_t> src_block_ids,
+                       std::vector<uint32_t> dst_block_ids) {
+    return submit_req_send(dst_inst, dst_worker,
+                           r, 0, new_tokens, has_last_token,
+                           std::move(src_block_ids),
+                           std::move(dst_block_ids));
+  }
+
   void submit_delta_send(const RequestId &,
                          uint32_t seen_tokens,
                          uint32_t new_tokens,

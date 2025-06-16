@@ -172,7 +172,7 @@ class RequestInfo {
   static_assert(std::atomic<ReqState>::is_always_lock_free);
   mutable std::atomic<ReqState> state_{ReqState::INPROCESS};
 #ifndef NDEBUG
-  uint32_t last_seen_ = 0;
+  uint32_t last_seen_ = UINT32_MAX;
   bool has_last_ = false;
 #endif
 
@@ -194,6 +194,9 @@ class RequestInfo {
   void update_send(uint32_t seen, uint32_t new_tokens, bool has_last) {
 #ifndef NDEBUG
     assert(!this->has_last_);
+    if (this->last_seen_ == UINT32_MAX) {
+      this->last_seen_ = seen;
+    }
     assert(this->last_seen_ == seen);
     assert(new_tokens > 0);
     this->last_seen_ += new_tokens;

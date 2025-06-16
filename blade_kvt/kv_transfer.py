@@ -25,6 +25,9 @@ except ImportError:
         def submit_req_send(self, *args, **kwargs):
             raise RuntimeError("KVTransferOps is not available, please build BladeLLM with it.")
 
+        def submit_req_send2(self, *args, **kwargs):
+            raise RuntimeError("KVTransferOps is not available, please build BladeLLM with it.")
+
         def submit_delta_send(self, *args, **kwargs):
             raise RuntimeError("KVTransferOps is not available, please build BladeLLM with it.")
 

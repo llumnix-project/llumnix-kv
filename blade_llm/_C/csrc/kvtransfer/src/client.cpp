@@ -129,6 +129,7 @@ void KvTransferClient::add_send_task(std::shared_ptr<RequestInfo> req, uint32_t 
 void KvTransferClient::submit_req_send(const InstanceId &dst_inst_name,
                                        const WorkerId &dst_worker_id,
                                        const RequestId &req_id,
+                                       uint32_t seen_tokens,
                                        uint32_t new_tokens,
                                        bool has_last_token,
                                        std::vector<uint32_t> src_block_ids,
@@ -163,13 +164,14 @@ void KvTransferClient::submit_req_send(const InstanceId &dst_inst_name,
                                                 req_id,
                                                 std::move(src_block_ids),
                                                 std::move(dst_block_ids));
-  add_send_task(req_info, 0, new_tokens, has_last_token);
+  add_send_task(req_info, seen_tokens, new_tokens, has_last_token);
   if (!auto_remove_req_ || !has_last_token) {
     reqs_[req_id].emplace_back(std::move(req_info));
   }
-  LOG(INFO) << "KVT client step=" << step_id_ << ": accept send request(" << req_id
-            << ") to worker(" << dst_inst_name << ":" << dst_worker_id << ") with "
-            << new_tokens << " tokens. has_last_token=" << has_last_token;
+  LOG(INFO) << "submit_req_send:step=" << step_id_ << ";req_id=" << req_id
+            << ";dst_worker=" << dst_inst_name << ',' << dst_worker_id
+            << ";seen_tokens=" << seen_tokens << ";new_tokens=" << new_tokens
+            << ";has_last_token=" << has_last_token;
 }
 void KvTransferClient::submit_delta_send(const RequestId &req_id,
                                          uint32_t seen_tokens,
@@ -183,10 +185,10 @@ void KvTransferClient::submit_delta_send(const RequestId &req_id,
 
   for (auto &req : r->second) {
     add_send_task(req, seen_tokens, new_tokens, has_last_token);
-    LOG(INFO) << "KVT client step=" << step_id_ << ": accept delta " << seen_tokens
-              << "," << new_tokens << "," << has_last_token
-              << " send of request("
-              << req_id << ") to worker (" << req->dst_inst_id << ":" << req->dst_worker_id << ");";
+    LOG(INFO) << "submit_delta_send:step=" << step_id_ << ";req_id=" << req_id
+              << ";dst_worker=" << req->dst_inst_id << ',' << req->dst_worker_id
+              << ";seen_tokens=" << seen_tokens << ";new_tokens=" << new_tokens
+              << ";has_last_token=" << has_last_token;
   }
 
   if (has_last_token && auto_remove_req_) {

@@ -76,17 +76,19 @@ void add_target(const std::string &inst_name,
   }
 }
 
-void submit_req_send(const std::string &dst_inst_name,
-                     uint32_t dst_worker_id,
-                     const std::string &req_id,
-                     uint32_t new_tokens,
-                     bool has_last_token,
-                     std::vector<uint32_t> src_block_ids,
-                     std::vector<uint32_t> dst_block_ids) {
+void submit_req_send2(const std::string &dst_inst_name,
+                      uint32_t dst_worker_id,
+                      const std::string &req_id,
+                      uint32_t seen_tokens,
+                      uint32_t new_tokens,
+                      bool has_last_token,
+                      std::vector<uint32_t> src_block_ids,
+                      std::vector<uint32_t> dst_block_ids) {
   if (KV_CLIENT != nullptr) {
     KV_CLIENT->submit_req_send(dst_inst_name,
                                dst_worker_id,
                                req_id,
+                               seen_tokens,
                                new_tokens,
                                has_last_token,
                                std::move(src_block_ids),
@@ -94,6 +96,19 @@ void submit_req_send(const std::string &dst_inst_name,
   } else {
     throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv client is not initialized");
   }
+}
+
+void submit_req_send(const std::string &dst_inst_name,
+                     uint32_t dst_worker_id,
+                     const std::string &req_id,
+                     uint32_t new_tokens,
+                     bool has_last_token,
+                     std::vector<uint32_t> src_block_ids,
+                     std::vector<uint32_t> dst_block_ids) {
+  return submit_req_send2(dst_inst_name, dst_worker_id,
+                          req_id, 0, new_tokens, has_last_token,
+                          std::move(src_block_ids),
+                          std::move(dst_block_ids));
 }
 
 void submit_delta_send(const std::string &req_id,
@@ -286,6 +301,7 @@ PYBIND11_MODULE(kvtransfer_ops, m) {
   m.def("init_kv_transfer_client", &blade_llm::init_kv_transfer_client, "init kv transfer client;");
   m.def("add_target", &blade_llm::add_target, "add target to kv client;");
   m.def("submit_req_send", &blade_llm::submit_req_send, "submit kv send to kv client;");
+  m.def("submit_req_send2", &blade_llm::submit_req_send2, "submit kv send to kv client;");
   m.def("submit_delta_send", &blade_llm::submit_delta_send, "submit kv token to kv client;");
   m.def("start_send", &blade_llm::start_send, "start to send submitted kv data;");
   m.def("notify_event_record", &blade_llm::notify_event_record, "record kv send events;");

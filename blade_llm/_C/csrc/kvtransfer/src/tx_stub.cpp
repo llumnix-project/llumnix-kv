@@ -24,16 +24,18 @@ static void do_parse_block_send_p_eq_d(
   auto left_tokens = task->new_tokens;
   const auto &src_blocks = task->src_blocks();
   const auto &dst_blocks = task->dst_blocks();
-  assert(src_blocks.size() == dst_blocks.size());
+  // assert(src_blocks.size() == dst_blocks.size());
 
   while (left_tokens > 0) {
     auto src_block_idx = wrote_tokens / src_ntpb;
     auto src_token_idx = wrote_tokens % src_ntpb;
+    assert(src_block_idx < src_blocks.size());
     size_t src_offset = src_blocks[src_block_idx] * block_size
         + src_token_idx * token_size;
     auto tokens = std::min(src_ntpb - src_token_idx, left_tokens);
     auto dst_block_idx = wrote_tokens / dst_ntpb;
     auto dst_token_idx = wrote_tokens % dst_ntpb;
+    assert(dst_block_idx < dst_blocks.size());
     size_t dst_offset = dst_blocks[dst_block_idx] * block_size
         + dst_token_idx * token_size;
     size_t length = tokens * token_size;

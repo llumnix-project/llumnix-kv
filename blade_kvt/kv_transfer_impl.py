@@ -17,7 +17,7 @@ from blade_kvt.kvtransfer_ops import (
     start_send,
     submit_delta_send,
     submit_req_recv,
-    submit_req_send,
+    submit_req_send2,
 )
 
 
@@ -179,6 +179,21 @@ class KVTransferClient:
         src_block_ids: List[int],
         dst_block_ids: List[int],
     ):
+        return self.submit_req_send2(
+            dst_inst_id, dst_worker_id, req_id, 0, new_tokens, has_last_token, src_block_ids, dst_block_ids
+        )
+
+    def submit_req_send2(
+        self,
+        dst_inst_id: str,
+        dst_worker_id: int,
+        req_id: str,
+        seen_tokens: int,
+        new_tokens: int,
+        has_last_token: bool,
+        src_block_ids: List[int],
+        dst_block_ids: List[int],
+    ):
         """
         Submit requests which need to send kv to remote;
         This function call just submit a task to the underlying transfer module,
@@ -196,7 +211,9 @@ class KVTransferClient:
         """
         if not self._inited:
             raise RuntimeError("KVTransferClient not inited")
-        submit_req_send(dst_inst_id, dst_worker_id, req_id, new_tokens, has_last_token, src_block_ids, dst_block_ids)
+        submit_req_send2(
+            dst_inst_id, dst_worker_id, req_id, seen_tokens, new_tokens, has_last_token, src_block_ids, dst_block_ids
+        )
 
     def submit_delta_send(self, req_id: str, seen_tokens: int, new_tokens: int, has_last_token: bool):
         """
