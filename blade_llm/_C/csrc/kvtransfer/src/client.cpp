@@ -5,12 +5,14 @@
 #include "utils/timer.h"
 #include "protocol/cuda_ipc.h"
 #include "protocol/rdma_protocol.h"
+#include "envcfg.h"
 
 
 namespace blade_llm {
 
 KvTransferClient::KvTransferClient(std::unique_ptr<Context> &&ctx,
                                    std::unique_ptr<ISendStubFactory> &&factory) :
+    auto_remove_req_(env_send_done_addr() != nullptr),
     ctx_(std::move(ctx)),
     stub_factory_(std::move(factory)),
     single_thd_(4) {}
@@ -102,7 +104,7 @@ void KvTransferClient::remove_target(const InstanceId &inst_name, const WorkerId
   }
 }
 
-void KvTransferClient::add_send_task(RequestInfo* req, uint32_t seen, uint32_t new_tokens, bool has_last) {
+void KvTransferClient::add_send_task(std::shared_ptr<RequestInfo> req, uint32_t seen, uint32_t new_tokens, bool has_last) {
   auto& self = *this;
   req->update_send(seen, new_tokens, has_last);
 
@@ -119,7 +121,7 @@ void KvTransferClient::add_send_task(RequestInfo* req, uint32_t seen, uint32_t n
     worker_task_p = &ret.second;
   }
   assert(!worker_task_p->step);
-  worker_task_p->tasks.emplace_back(req, seen, new_tokens, has_last);
+  worker_task_p->tasks.emplace_back(std::move(req), seen, new_tokens, has_last);
 
   return ;
 }
@@ -156,13 +158,15 @@ void KvTransferClient::submit_req_send(const InstanceId &dst_inst_name,
     LOG(ERROR) << "KVT client: fail to submit request(" << req_id << ") because target worker disconnected.";
     throw KVTransferException(ErrorKind::TARGET_DISCONNECTED, "target worker disconnected;");
   }
-  auto req_info = std::make_unique<RequestInfo>(dst_inst_name,
+  auto req_info = std::make_shared<RequestInfo>(dst_inst_name,
                                                 dst_worker_id,
                                                 req_id,
                                                 std::move(src_block_ids),
                                                 std::move(dst_block_ids));
-  add_send_task(req_info.get(), 0, new_tokens, has_last_token);
-  reqs_[req_id].emplace_back(std::move(req_info));
+  add_send_task(req_info, 0, new_tokens, has_last_token);
+  if (!auto_remove_req_ || !has_last_token) {
+    reqs_[req_id].emplace_back(std::move(req_info));
+  }
   LOG(INFO) << "KVT client step=" << step_id_ << ": accept send request(" << req_id
             << ") to worker(" << dst_inst_name << ":" << dst_worker_id << ") with "
             << new_tokens << " tokens. has_last_token=" << has_last_token;
@@ -178,11 +182,15 @@ void KvTransferClient::submit_delta_send(const RequestId &req_id,
   }
 
   for (auto &req : r->second) {
-    add_send_task(req.get(), seen_tokens, new_tokens, has_last_token);
+    add_send_task(req, seen_tokens, new_tokens, has_last_token);
     LOG(INFO) << "KVT client step=" << step_id_ << ": accept delta " << seen_tokens
               << "," << new_tokens << "," << has_last_token
               << " send of request("
               << req_id << ") to worker (" << req->dst_inst_id << ":" << req->dst_worker_id << ");";
+  }
+
+  if (has_last_token && auto_remove_req_) {
+    reqs_.erase(r);
   }
 }
 
@@ -253,6 +261,7 @@ void KvTransferClient::flush_send(size_t step_id) {
 }
 
 ReqState KvTransferClient::check_transfer_done(const RequestId &req_id) {
+  assert(!auto_remove_req_);
   auto r = reqs_.find(req_id);
   if (r == reqs_.end()) {
     return ReqState::OK;

@@ -10,6 +10,7 @@
 #include <cassert>
 #include <iostream>
 #include <unistd.h>
+#include <memory>
 
 #define MAX_OTHER_INFO_LEN (8192)
 #define MAX_ADDRESS_LEN (64)
@@ -118,14 +119,14 @@ enum class ReqState : int {
 };
 class RequestInfo;
 class ReqSendTask {
-  const RequestInfo* const req_ = nullptr;
+  const std::shared_ptr<RequestInfo> req_ = nullptr;
 public:
   const uint32_t seen_tokens{0};
   const uint32_t new_tokens{0};  // always gt 0.
   const bool reach_last_token{false};
 public:
-  ReqSendTask(RequestInfo* req, uint32_t seen_, uint32_t new_, bool last_):
-    req_(req),
+  ReqSendTask(std::shared_ptr<RequestInfo> req, uint32_t seen_, uint32_t new_, bool last_):
+    req_(std::move(req)),
     seen_tokens(seen_),
     new_tokens(new_),
     reach_last_token(last_) {}
@@ -155,7 +156,7 @@ inline std::ostream& operator<<(std::ostream& os, const ReqSendTask& task) {
   os << "ReqSendTask(seen_tokens: " << task.seen_tokens
       << ", new_tokens: " << task.new_tokens
       << ", reach_last_token: " << std::boolalpha << task.reach_last_token
-      << ", req_: " << task.req_ << ")";
+      << ", req_: " << task.req_.get() << ")";
   return os;
 }
 

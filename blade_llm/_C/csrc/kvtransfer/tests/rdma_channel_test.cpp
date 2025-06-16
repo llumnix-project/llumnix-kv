@@ -194,8 +194,8 @@ TEST(RDMAChannelTest, TestTransefer) {
     channel.connect(dst_info.value());
     std::vector<uint32_t> blocks{0, 1};
     std::vector<const ReqSendTask *> reqs;
-    RequestInfo r("0", 0, "test_rdma", blocks, blocks);
-    ReqSendTask t(&r, 0, 1, true);
+    auto rp = std::make_shared<RequestInfo>("0", 0, "test_rdma", blocks, blocks);
+    ReqSendTask t(rp, 0, 1, true);
     reqs.push_back(&t);
     std::vector<IpcBlock> data{{0, 0, token_size}, {2 * token_size, 2 * token_size, token_size}};
     channel.register_data(data, TPKind::PEQD);

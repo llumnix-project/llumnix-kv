@@ -11,7 +11,8 @@ using ::testing::ElementsAre;
 
 using namespace blade_llm;
 
-struct TestRequestInfo : public RequestInfo {
+struct TestRequestInfo : public RequestInfo,
+                         public std::enable_shared_from_this<TestRequestInfo> {
   std::vector<ReqSendTask> task_;
 public:
   using RequestInfo::RequestInfo;
@@ -19,7 +20,7 @@ public:
   void add_send_task(uint32_t seen, uint32_t new_tokens, bool has_last) {
     auto& self = *this;
     self.update_send(seen, new_tokens, has_last);
-    self.task_.emplace_back(this, seen, new_tokens, has_last);
+    self.task_.emplace_back(this->shared_from_this(), seen, new_tokens, has_last);
   }
 
   void pop_tasks(std::vector<ReqSendTask>& out) {
@@ -120,7 +121,8 @@ class FakeStubFactory : public ISendStubFactory {
 
 TEST(KVTransferClientTest, SendTo1) {
   auto ctx = std::make_unique<Context>("1", 1);
-  TestRequestInfo req1("2", 1, "REQ00000001", {0, 1}, {0, 1});
+  auto req1p = std::make_shared<TestRequestInfo>("2", 1, "REQ00000001", std::vector<uint32_t>{0, 1}, std::vector<uint32_t>{0, 1});
+  auto& req1 = *req1p;
   req1.add_send_task(0, 1, false);
   std::vector<TestRequestInfo*> expect_reqs{&req1};
   MockSendStub stub;
@@ -160,9 +162,11 @@ TEST(KVTransferClientTest, SendTo1) {
 
 TEST(KVTransferClientTest, SendTo2) {
   auto ctx = std::make_unique<Context>("1", 1);
-  TestRequestInfo req0("3", 1, "REQ00000000", {0, 1}, {0, 1});
+  auto req0p = std::make_shared<TestRequestInfo>("3", 1, "REQ00000000", std::vector<uint32_t>{0, 1}, std::vector<uint32_t>{0, 1});
+  auto& req0 = *req0p;
   req0.add_send_task(0, 1, false);
-  TestRequestInfo req1("2", 1, "REQ00000001", {2, 3}, {2, 3});
+  auto req1p = std::make_shared<TestRequestInfo>("2", 1, "REQ00000001", std::vector<uint32_t>{2, 3}, std::vector<uint32_t>{2, 3});
+  auto& req1 = *req1p;
   req1.add_send_task(0, 1, false);
   std::vector<TestRequestInfo*> expect_reqs0{&req1};
   std::vector<TestRequestInfo*> expect_reqs1{&req0};
@@ -204,9 +208,11 @@ TEST(KVTransferClientTest, SendTo2) {
 
 TEST(KVTransferClientTest, SendToPP2) {
   auto ctx = std::make_unique<Context>("1", 1);
-  TestRequestInfo req0("3", 1, "REQ00000001", {0, 1}, {0, 1});
+  auto req0p = std::make_shared<TestRequestInfo>("3", 1, "REQ00000001", std::vector<uint32_t>{0, 1}, std::vector<uint32_t>{0, 1});
+  auto req1p = std::make_shared<TestRequestInfo>("2", 1, "REQ00000001", std::vector<uint32_t>{0, 1}, std::vector<uint32_t>{2, 3});
+  auto& req0 = *req0p;
+  auto& req1 = *req1p;
   req0.add_send_task(0, 1, false);
-  TestRequestInfo req1("2", 1, "REQ00000001", {0, 1}, {2, 3});
   req1.add_send_task(0, 1, false);
   std::vector<TestRequestInfo*> expect_reqs0{&req1};
   std::vector<TestRequestInfo*> expect_reqs1{&req0};

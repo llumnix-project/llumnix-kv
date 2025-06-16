@@ -264,8 +264,8 @@ TEST(CudaIpcTest, TestTransfer) {
     EXPECT_TRUE(info_opt.has_value());
     channel->connect(info_opt.value());
     LOG(INFO) << "test cuda server connected;";
-    RequestInfo req_info("0", 0, "REQ-0001", {0, 1}, {0, 1});
-    ReqSendTask req_task(&req_info, 0, 1, true);
+    auto req_info = std::make_shared<RequestInfo>("0", 0, "REQ-0001", std::vector<uint32_t>{0, 1}, std::vector<uint32_t>{0, 1});
+    ReqSendTask req_task(req_info, 0, 1, true);
     std::vector<IpcBlock> data{{0, 0, 128}};
     channel->register_data(data, TPKind::PEQD);
     channel->send_data(0);

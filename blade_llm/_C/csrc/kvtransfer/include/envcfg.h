@@ -13,6 +13,7 @@ int env_fsnaming_tolerate_interval_s();
 int env_debug_tx_failrate();
 
 // RETURN addr 指向着某处全局空间, 不要修改.
+// NULL 意味着不使用 send done 机制.
 const struct sockaddr_in* env_send_done_addr();
 
 // sync with kv_transfer_impl._get_layer_num_blocks
