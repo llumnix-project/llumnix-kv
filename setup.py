@@ -73,11 +73,19 @@ _kvtransfer_src = os.path.join(os.getcwd(), "kvtransfer")
 _build_options = ["-DBUILD_TESTS=OFF", "-DBUILD_RDMA=ON", "-DBUILD_PYTHON_BIND=ON"]
 blade_kvt_ext = CMakeExtension("blade_kvt.kvtransfer_ops", src_dir=_kvtransfer_src, build_options=_build_options)
 
+def get_kvt_version() -> str:
+    git_describe_command = [
+        "git", "describe", "--dirty", "--tags", "--long", "--match",
+        "v*[0-9]*[0-9]*[0-9]"
+    ]
+    version = get_version(write_to="_version.py",
+                          git_describe_command=git_describe_command)
+    return version
+
 # rm -rf blade_llm.egg blade_kvt.egg dist/
 setup(
     name="blade_kvt",
-    use_scm_version=True,
-    setup_requires=['setuptools_scm'],
+    version=get_kvt_version(),
     packages=["blade_kvt"],
     author="Alibaba PAI Team",
     ext_modules=[blade_kvt_ext],
