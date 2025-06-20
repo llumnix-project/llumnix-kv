@@ -1,3 +1,5 @@
+from setuptools import setup, Extension
+
 import os
 import subprocess
 from pathlib import Path
@@ -5,7 +7,6 @@ from shutil import which
 from typing import List, Union
 
 import torch
-from setuptools import Extension
 from torch.utils.cpp_extension import (
     BuildExtension,
 )
@@ -67,6 +68,18 @@ class CustomBuildExtension(BuildExtension):
             super().build_extension(ext)
 
 
-_kvtransfer_src = os.path.join(os.getcwd(), "blade_llm/_C/csrc/kvtransfer")
+_kvtransfer_src = os.path.join(os.getcwd(), "kvtransfer")
 _build_options = ["-DBUILD_TESTS=OFF", "-DBUILD_RDMA=ON", "-DBUILD_PYTHON_BIND=ON"]
 blade_kvt_ext = CMakeExtension("blade_kvt.kvtransfer_ops", src_dir=_kvtransfer_src, build_options=_build_options)
+
+# rm -rf blade_llm.egg blade_kvt.egg dist/
+setup(
+    name="blade_kvt",
+    version="1.0.0",
+    packages=["blade_kvt"],
+    author="Alibaba PAI Team",
+    ext_modules=[blade_kvt_ext],
+    cmdclass={
+        "build_ext": CustomBuildExtension,
+    },
+)
