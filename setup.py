@@ -1,4 +1,5 @@
 from setuptools import setup, Extension
+from setuptools_scm import get_version
 
 import os
 import subprocess
@@ -75,7 +76,8 @@ blade_kvt_ext = CMakeExtension("blade_kvt.kvtransfer_ops", src_dir=_kvtransfer_s
 # rm -rf blade_llm.egg blade_kvt.egg dist/
 setup(
     name="blade_kvt",
-    version="1.0.0",
+    use_scm_version=True,
+    setup_requires=['setuptools_scm'],
     packages=["blade_kvt"],
     author="Alibaba PAI Team",
     ext_modules=[blade_kvt_ext],
