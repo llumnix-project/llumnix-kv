@@ -215,7 +215,7 @@ static char* expand_vec(std::vector<char>& buf, size_t s) {
 
 // see vllm vllm/v1/hybrid_connector/__init__.py
 static constexpr uint32_t SEND_DONE_REQ = 0x20181219ul;
-static constexpr uint32_t SEND_SAVE_DONE_REQ = 0x20181220ul;
+static constexpr uint32_t SAVE_DONE2_REQ = 0x20181223ul;
 static constexpr uint32_t SEND_DONE_RESP = 0x91218102ul;
 
 struct KvSendStub::TaskContext {
@@ -350,7 +350,7 @@ public:
   }
 private:
   // send self.send_done_buf to self.send_done_sock
-  void do_rpc_send_done() {
+  void do_rpc_send_done(int respsize) {
     auto& self = *this;
 
     if (!self.send_done_sock.has_value()) {
@@ -383,15 +383,16 @@ private:
       throw std::runtime_error(std::move(errmsg));
     }
 
-    uint32_t resp = 0;
-    sysok = read_sock(sock, &resp, sizeof(resp));
+    char respbuf[16];
+    assert(respsize < int(sizeof(respbuf)));
+    sysok = read_sock(sock, respbuf, respsize);
     if (sysok == -1) {
       int errno_bak = errno;
       auto errmsg = std::string("rpc send done: read error. errno=");
       errmsg += std::to_string(errno_bak);
       throw std::runtime_error(std::move(errmsg));
     }
-    if (sysok != sizeof(resp) || resp != SEND_DONE_RESP) {
+    if (sysok != respsize) {
       auto errmsg = std::string("rpc send done: invalid response");
       throw std::runtime_error(std::move(errmsg));
     }
@@ -402,13 +403,11 @@ private:
     auto& self = *this;
 
     // see vllm disagg.py
-    self.send_done_buf.resize(4 + 4 + 4);
-    uint32_t header = SEND_SAVE_DONE_REQ;
-    if (env_send_done_head_kind() == SEND_DONE_HEAD_KIND) {
-      header = SEND_DONE_REQ;
-    }
+    int respsize = 4;
+    uint32_t header = SEND_DONE_REQ;
     uint32_t worker_tp_rank = self.stub->src_info_.worker_tp_rank;
     uint32_t num_req = reqs.size();
+    self.send_done_buf.resize(4 + 4 + 4);
     memcpy(self.send_done_buf.data() + 0, &header, 4);
     memcpy(self.send_done_buf.data() + 4, &worker_tp_rank, 4);
     memcpy(self.send_done_buf.data() + 8, &num_req, 4);
@@ -419,11 +418,19 @@ private:
       memcpy(dst, &reqid_s, 4);
       memcpy(dst + 4, reqid.data(), reqid_s);
     }
+    if (env_send_done_head_kind() == SEND_SAVE_DONE_HEAD_KIND) {
+      size_t const reqsize = self.send_done_buf.size();
+      char* dst = expand_vec(self.send_done_buf, reqsize);
+      memcpy(dst, self.send_done_buf.data(), reqsize);
+      uint32_t save_header = SAVE_DONE2_REQ;
+      memcpy(dst, &save_header, sizeof(uint32_t));
+      respsize = 8;
+    }
 
     // 考虑到我们使用的是一个长链接, 其可能已经失效了, 这里会在需要的时候,
     // 进行重试, 重新创建一个连接. 当然, 一次就好~
     try {
-      self.do_rpc_send_done();
+      self.do_rpc_send_done(respsize);
       return ;
     } catch (const std::exception& ex) {
       LOG(ERROR) << "do_rpc_send_done failed. ex=" << ex.what();
@@ -431,7 +438,7 @@ private:
     }
 
     try {
-      self.do_rpc_send_done();
+      self.do_rpc_send_done(respsize);
       return ;
     } catch (const std::exception& ex) {
       LOG(ERROR) << "do_rpc_send_done failed. ex=" << ex.what();
