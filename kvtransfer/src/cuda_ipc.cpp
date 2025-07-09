@@ -194,6 +194,10 @@ void CudaIpcChannel::flush(std::string&) {
 
 void CudaIpcChannel::send_notification(const std::vector<const ReqSendTask*>& reqs) {
   for (const auto* req : reqs) {
+    assert(req->state() != ReqState::INPROCESS);
+    if (req->state() != ReqState::OK) {
+      continue;
+    }
     notify_writer_.write(req->req_id(), req->dst_blocks());
   }
 }
