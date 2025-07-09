@@ -960,15 +960,9 @@ void RDMAChannel::register_data(std::vector<IpcBlock>& data, TPKind kind) {
 #endif
 
   self.origin_sb_num_ = data.size();
-  if (kind == TPKind::PGTD) {
-    self.merged_sb_num_ = data.size();
-    self.sb_size_max_ = data[0].length;
-    self.sb_size_min_ = data[0].length;
-    self.sb_size_total_ = data[0].length * data.size();
-    return ;
-  }
 
-  if (kind == TPKind::PEQD) {
+  if (kind != TPKind::PLTD) {
+    // TPKind::PGTD, TPKind::PEQD
     auto const [min, max, total, cnt] = merge_interval(data);
     self.merged_sb_num_ = cnt;
     self.sb_size_min_ = min;

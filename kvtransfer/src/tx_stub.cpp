@@ -159,6 +159,21 @@ static void parse_block_send_p_gt_d(
   const WorkerInfo *d_info,  // dst
   const ReqSendTask *task,
   std::vector<IpcBlock> &send_blocks) {
+  if (p_info->token_size == d_info->token_size) {
+    // 此时表明 kvcache 在各个 P rank 之间是完全一样的.
+    // 只需要 tp rank=0 的 worker 传输 kvcache 即可.
+    // 后续这里可以让所有 worker 都参与进来, 每个 worker 传 1 部分.
+    if (p_info->worker_tp_rank != 0) {
+      return ;
+    }
+
+    assert(d_info->worker_tp_rank == 0);
+    assert(p_info->block_size == d_info->block_size);
+    auto token_size = p_info->token_size;
+    size_t block_size = p_info->block_size;
+    return do_parse_block_send_p_eq_d(block_size, token_size, task, send_blocks);
+  }
+
   return do_parse_block_send(
     p_info, task->src_blocks(),
     d_info, task->dst_blocks(),
