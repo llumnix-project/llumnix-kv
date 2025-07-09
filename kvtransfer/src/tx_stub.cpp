@@ -288,46 +288,53 @@ public:
       assert(task.new_tokens > 0);
       assert(task.dst_inst_id() == dst_id);
       assert(task.dst_worker_id() == dst_worker_id);
+      if (task.reach_last_token) {
+        self.finished_req.emplace_back(&task);
+      }
+
       if (task.state() == ReqState::FAILED) {
         continue;
       }
       assert(task.state() == ReqState::INPROCESS);
-
       self.parse_block(&srcinfo, &dstinfo, &task, self.send_blocks);
-      if (task.reach_last_token) {
-        self.finished_req.emplace_back(&task);
-      }
     }
-    if (self.send_blocks.empty()) {
-      return;
-    }
-    assert(!self.send_blocks.empty());
 
-    try {
-      self.try_create_channel();
-      self.do_send(batch);
-    } catch (std::exception& ex) {
-      LOG(ERROR) << "KVT tx_stub fail to send data. DstId=" << dst_id
-                 << ",DstWorkerId=" << dst_worker_id
-                 << ",StepIdx=" << step_idx
-                 << ',' << self.flush_out_buf
-                 << ",ex=" << ex.what();
-      self.ch.reset();
-      for (const auto& task : batch.tasks) {
-        assert(task.state() == ReqState::INPROCESS || task.state() == ReqState::FAILED);
-        task.set_state(ReqState::FAILED);
+    if (!self.send_blocks.empty()) {
+      try {
+        self.try_create_channel();
+        self.do_send(batch);
+      } catch (std::exception& ex) {
+        LOG(ERROR) << "KVT tx_stub fail to send data. DstId=" << dst_id
+                  << ",DstWorkerId=" << dst_worker_id
+                  << ",StepIdx=" << step_idx
+                  << ',' << self.flush_out_buf
+                  << ",ex=" << ex.what();
+        self.ch.reset();
+        for (const auto& task : batch.tasks) {
+          assert(task.state() == ReqState::INPROCESS || task.state() == ReqState::FAILED);
+          task.set_state(ReqState::FAILED);
+        }
       }
-      return ;
     }
-    assert(self.send_finish_ts != Timepoint());
 
     for (auto task : self.finished_req) {
       assert(task->reach_last_token);
+      if (task->state() == ReqState::INPROCESS) {
+        task->set_state(ReqState::OK);
+      }
+
       LOG(INFO) << "KVT tx_stub. DstId=" << dst_id << ",DstWorkerId=" << dst_worker_id
-                << ",StepIdx=" << step_idx << ",FinishedReq=" << task->req_id();
-      task->set_state(ReqState::OK);
-      // DO NOT ACCESS task! IT MAY BE FREED!
-      // Add clang tidy: USE-AFTER-MOVED to detect the bug.
+                << ",StepIdx=" << step_idx
+                << ",State=" << static_cast<int>(task->state())
+                << ",FinishedReq=" << task->req_id();
+    }
+
+    self.send_notify_us = 0;
+    if (!self.finished_req.empty()) {
+      self.send_done(self.finished_req);
+      auto send_notify_end_ts = SteadyClock::now();
+      self.send_notify_us = elapse_us(self.send_finish_ts, send_notify_end_ts);
+      self.send_finish_ts = send_notify_end_ts;
     }
 
     batch.step->update_last_send_finish_ts(self.send_finish_ts);
@@ -412,6 +419,9 @@ private:
     memcpy(self.send_done_buf.data() + 4, &worker_tp_rank, 4);
     memcpy(self.send_done_buf.data() + 8, &num_req, 4);
     for (const auto* req : reqs) {
+      // send fail 待处理!
+      assert(req->state() == ReqState::OK);
+
       const std::string& reqid = req->req_id();
       uint32_t reqid_s = reqid.size();
       char* dst = expand_vec(self.send_done_buf, 4 + reqid_s);
@@ -479,16 +489,6 @@ private:
     self.ch->flush(self.flush_out_buf);
     self.send_finish_ts = SteadyClock::now();
     self.wait_and_send_us = elapse_us(self.iter_start_ts, self.send_finish_ts);
-
-    if (self.finished_req.empty()) {
-      self.send_notify_us = 0;
-      return ;
-    }
-
-    self.send_done(self.finished_req);
-    auto send_notify_end_ts = SteadyClock::now();
-    self.send_notify_us = elapse_us(self.send_finish_ts, send_notify_end_ts);
-    self.send_finish_ts = send_notify_end_ts;
     return ;
   }
 

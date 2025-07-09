@@ -1239,6 +1239,11 @@ void RDMAChannel::send_notification(const std::vector<const ReqSendTask*>& reqs)
   self.send_futs_.reserve(reqs.size());
 
   for (const auto* r : reqs) {
+    assert(r->state() != ReqState::INPROCESS);
+    if (r->state() != ReqState::OK) {
+      continue;
+    }
+
     const auto &reqid = r->req_id();
     const auto &block_ids = r->dst_blocks();
     // 编码规则见 RDMAServer::CtxCallback::OnRecvCall
