@@ -1,5 +1,6 @@
 from setuptools import setup, Extension
 from setuptools_scm import get_version
+from setuptools_scm.version import get_local_node_and_date
 
 import os
 import subprocess
@@ -73,12 +74,22 @@ _kvtransfer_src = os.path.join(os.getcwd(), "kvtransfer")
 _build_options = ["-DBUILD_TESTS=OFF", "-DBUILD_RDMA=ON", "-DBUILD_PYTHON_BIND=ON"]
 blade_kvt_ext = CMakeExtension("blade_kvt.kvtransfer_ops", src_dir=_kvtransfer_src, build_options=_build_options)
 
+
+def _local_version(version) -> str:
+    local_ver = get_local_node_and_date(version)
+    version_parts = [local_ver]
+    if int(os.environ.get("BLADELLM_CMAKE_DEBUG", 0)):
+        version_parts.append('debug')
+    return '.'.join(version_parts)
+
+
 def get_kvt_version() -> str:
     git_describe_command = [
         "git", "describe", "--dirty", "--tags", "--long", "--match",
         "v*[0-9]*[0-9]*[0-9]"
     ]
     version = get_version(write_to="_version.py",
+                          local_scheme=_local_version,
                           git_describe_command=git_describe_command)
     return version
 
