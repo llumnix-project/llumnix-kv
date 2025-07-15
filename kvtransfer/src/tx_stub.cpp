@@ -97,6 +97,41 @@ static void vllm_parse_block_send_p_eq_d(
   return ;
 }
 
+static void parse_block_send_gt(
+  size_t p_token_size, size_t p_k_size, size_t d_token_size,
+  uint32_t ntpb, size_t group_off,
+  const std::vector<uint32_t>& p_blocks,
+  const std::vector<uint32_t>& d_blocks,
+  uint32_t wrote_tokens,
+  uint32_t left_tokens,
+  std::vector<IpcBlock> &send_blocks
+) {
+  assert(p_k_size == p_token_size || p_k_size * 2 == p_token_size);
+  const size_t p_block_size = p_token_size * ntpb;
+  const size_t d_block_size = d_token_size * ntpb;
+
+  while (left_tokens > 0) {
+    const uint32_t block_idx = wrote_tokens / ntpb;
+    assert(block_idx < p_blocks.size() && block_idx < d_blocks.size());
+    const uint32_t token_idx_base = wrote_tokens % ntpb;
+    const size_t p_blk_off = p_blocks[block_idx] * p_block_size;
+    const size_t d_blk_off = d_blocks[block_idx] * d_block_size;
+    const uint32_t tokens = std::min(ntpb - token_idx_base, left_tokens);
+
+    for (uint32_t idx = 0; idx < tokens; ++idx) {
+      const uint32_t token_idx = token_idx_base + idx;
+      const size_t pk_token_off = p_blk_off + token_idx * p_token_size;
+      const size_t d_token_off = d_blk_off + token_idx * d_token_size;
+      const size_t dk_token_off = d_token_off + group_off * p_k_size;
+      send_blocks.emplace_back(pk_token_off, dk_token_off, p_k_size);
+    }
+
+    wrote_tokens += tokens;
+    left_tokens -= tokens;
+  }
+
+  return;
+}
 
 static void do_parse_block_send(
   const WorkerInfo *p_info,  // src
@@ -106,49 +141,88 @@ static void do_parse_block_send(
   uint32_t wrote_tokens,
   uint32_t left_tokens,
   std::vector<IpcBlock> &send_blocks) {
+  // for bladellm
+  // cache shape [num_gpu_blocks, block_size, 2, num_kv_heads, head_dim]
+  // p_info->block_size: uint32_t 类型, 需要先转 size_t 不然仍有溢出风险.
+  const size_t p_block_size = p_info->block_size;
+  const size_t d_block_size = d_info->block_size;
+  const size_t p_token_size = p_info->token_size;
+  const size_t d_token_size = d_info->token_size;
   assert(p_info->tp_size > d_info->tp_size);
   assert((p_info->tp_size % d_info->tp_size) == 0);
   const uint32_t group_n = p_info->tp_size / d_info->tp_size;
   assert(p_info->worker_tp_rank / group_n == d_info->worker_tp_rank);
   const uint32_t group_off = p_info->worker_tp_rank % group_n;
-  assert(d_info->token_size == p_info->token_size * group_n);
-  assert(d_info->token_size % 2 == 0);
-  assert(p_info->token_size % 2 == 0);
-  // cache shape [num_gpu_blocks, block_size, 2, num_kv_heads, head_dim]
-  const size_t p_k_size = p_info->token_size / 2;
-  const size_t d_k_size = d_info->token_size / 2;
+  assert(d_token_size == p_token_size * group_n);
+  assert(d_token_size % 2 == 0);
+  assert(p_token_size % 2 == 0);
+  const size_t p_k_size = p_token_size / 2;
+  const size_t d_k_size = d_token_size / 2;
   assert(d_k_size == p_k_size * group_n);
-  // p_info->block_size: uint32_t 类型, 需要先转 size_t 不然仍有溢出风险.
-  size_t p_block_size = p_info->block_size;
-  size_t d_block_size = d_info->block_size;
-  size_t p_token_size = p_info->token_size;
-  size_t d_token_size = d_info->token_size;
   // ntpb: number tokens per block
-  const uint32_t ntpb = p_block_size / p_info->token_size;
-  assert(ntpb * p_info->token_size == p_block_size);
-  assert(ntpb * d_info->token_size == d_block_size);
-  assert(p_blocks.size() == d_blocks.size());
+  const uint32_t ntpb = p_block_size / p_token_size;
+  assert(ntpb * p_token_size == p_block_size);
+  assert(ntpb * d_token_size == d_block_size);
 
-  while (left_tokens > 0) {
-    const uint32_t block_idx = wrote_tokens / ntpb;
-    const uint32_t token_idx_base = wrote_tokens % ntpb;
-    const size_t p_blk_off = p_blocks[block_idx] * p_block_size;
-    const size_t d_blk_off = d_blocks[block_idx] * d_block_size;
-    const uint32_t tokens = std::min(ntpb - token_idx_base, left_tokens);
+  const size_t sbsize = send_blocks.size();
+  parse_block_send_gt(
+    p_token_size, p_k_size, d_token_size, ntpb, group_off,
+    p_blocks, d_blocks, wrote_tokens, left_tokens, send_blocks);
+  const size_t sbsize_after = send_blocks.size();
 
-    for (uint32_t idx = 0; idx < tokens; ++idx) {
-      const uint32_t token_idx = token_idx_base + idx;
-      const size_t pk_token_off = p_blk_off + token_idx * p_token_size;
-      const size_t pv_token_off = pk_token_off + p_k_size;
-      const size_t d_token_off = d_blk_off + token_idx * d_token_size;
-      const size_t dk_token_off = d_token_off + group_off * p_k_size;
-      const size_t dv_token_off = dk_token_off + d_k_size;
-      send_blocks.emplace_back(pk_token_off, dk_token_off, p_k_size);
-      send_blocks.emplace_back(pv_token_off, dv_token_off, p_k_size);
-    }
+  for (size_t idx = sbsize; idx < sbsize_after; ++idx) {
+    const auto& sb = send_blocks[idx];
+    const size_t pv_token_off = sb.src_offset + p_k_size;
+    const size_t dv_token_off = sb.dst_offset + d_k_size;
+    assert(p_k_size == sb.length);
+    send_blocks.emplace_back(pv_token_off, dv_token_off, p_k_size);
+  }
+  return;
+}
 
-    wrote_tokens += tokens;
-    left_tokens -= tokens;
+
+// FLASH_CACHE_SHAPE
+// (2, num_blocks, block_size, num_kv_heads, head_dim)
+static void vllm_parse_block_send_p_gt_d(
+  const WorkerInfo *p_info,  // prefill
+  const WorkerInfo *d_info,  // decode
+  const ReqSendTask *task,
+  std::vector<IpcBlock> &send_blocks) {
+  // p_info->block_size: uint32_t 类型, 需要先转 size_t 不然仍有溢出风险.
+  const size_t p_block_size = p_info->block_size;
+  const size_t d_block_size = d_info->block_size;
+  const size_t p_token_size = p_info->token_size;
+  const size_t d_token_size = d_info->token_size;
+  assert(p_info->tp_size > d_info->tp_size);
+  assert((p_info->tp_size % d_info->tp_size) == 0);
+  const uint32_t group_n = p_info->tp_size / d_info->tp_size;
+  assert(p_info->worker_tp_rank / group_n == d_info->worker_tp_rank);
+  const uint32_t group_off = p_info->worker_tp_rank % group_n;
+  assert(d_token_size == p_token_size * group_n);
+  assert(d_token_size % 2 == 0);
+  assert(p_token_size % 2 == 0);
+  const size_t p_k_size = p_token_size / 2;
+  const size_t d_k_size = d_token_size / 2;
+  assert(d_k_size == p_k_size * group_n);
+  // ntpb: number tokens per block
+  const uint32_t ntpb = p_block_size / p_token_size;
+  assert(ntpb * p_token_size == p_block_size);
+  assert(ntpb * d_token_size == d_block_size);
+
+  size_t sb_idx = send_blocks.size();  // sb: send block~
+  parse_block_send_gt(
+    p_k_size, p_k_size, d_k_size, ntpb, group_off,
+    task->src_blocks(), task->dst_blocks(),
+    task->seen_tokens, task->new_tokens, send_blocks);
+  size_t const sb_end_idx = send_blocks.size();
+
+  size_t const pk_layer_size = ntpb * p_k_size * p_info->layer_num_blocks;
+  size_t const dk_layer_size = ntpb * d_k_size * d_info->layer_num_blocks;
+  for (; sb_idx < sb_end_idx; ++sb_idx) {
+    auto sb = send_blocks[sb_idx];
+    sb.src_offset += pk_layer_size;
+    sb.dst_offset += dk_layer_size;
+    send_blocks.emplace_back(std::move(sb));
   }
 
   return;
@@ -554,9 +628,15 @@ void KvSendStub::start_async() {
       tpkind = TPKind::PLTD;
     }
   } else if (cache_shape == FLASH_CACHE_SHAPE) {
-    RTCHECK(src_info_.tp_size == dst_info_.tp_size);
-    parse_block_send = vllm_parse_block_send_p_eq_d;
-    tpkind = TPKind::PEQD;
+    if (src_info_.tp_size == dst_info_.tp_size) {
+      parse_block_send = vllm_parse_block_send_p_eq_d;
+      tpkind = TPKind::PEQD;
+    } else if (src_info_.tp_size > dst_info_.tp_size) {
+      parse_block_send = vllm_parse_block_send_p_gt_d;
+      tpkind = TPKind::PGTD;
+    } else {
+      RTCHECK(false);
+    }
   } else {
     RTCHECK(false);
   }
