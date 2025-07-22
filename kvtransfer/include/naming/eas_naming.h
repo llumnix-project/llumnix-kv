@@ -22,6 +22,7 @@ class EASNamingCache : noncopyable {
   EASNamingCache(const std::string name);
   void update(const std::string &str);
   std::optional<std::string> get_value(const std::string &key) const;
+  std::vector<std::string> search_value(const std::string &prefix) const;
   uint32_t get_version() const;
   void set_outdated();
   bool is_outdated() const;
@@ -53,6 +54,7 @@ class EASNamingClient : public INamingClient, noncopyable {
   void store(const std::string &k, const std::string &v) override;
   void remove(const std::string &key) override;
   std::optional<std::string> get(const InstanceId&, const std::string &k) override;
+  std::vector<std::string> search(const InstanceId &, const std::string &prefix) override;
   const std::vector<std::string> &list() override;
  private:
   void load();

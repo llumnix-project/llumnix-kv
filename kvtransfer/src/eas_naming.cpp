@@ -18,6 +18,17 @@ std::optional<std::string> EASNamingCache::get_value(const std::string &key) con
   return std::nullopt;
 }
 
+std::vector<std::string> EASNamingCache::search_value(const std::string &prefix) const {
+  std::shared_lock<std::shared_mutex> lock(update_mutex_);
+  std::vector<std::string> result;
+  for (const auto & [k, v] : kv_) {
+    if (k.find(prefix) == 0) {
+      result.push_back(v);
+    }
+  }
+  return result;
+}
+
 uint32_t EASNamingCache::get_version() const {
   std::shared_lock<std::shared_mutex> lock(update_mutex_);
   return version_;
@@ -91,6 +102,15 @@ std::optional<std::string> EASNamingClient::get(const InstanceId& inst, const st
     return pod_opt.value()->get_value(k);
   }
   return std::nullopt;
+}
+
+std::vector<std::string> EASNamingClient::search(const InstanceId& inst, const std::string &prefix) {
+  load();
+  auto pod_opt = get_pod_kv(inst);
+  if (pod_opt.has_value()) {
+    return pod_opt.value()->search_value(prefix);
+  }
+  return {};
 }
 
 void EASNamingClient::remove(const std::string &key) {

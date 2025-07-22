@@ -22,6 +22,7 @@ public:
   void store(const std::string &k, const std::string &v) override;
   void remove(const std::string &key) override;
   std::optional<std::string> get(const InstanceId&, const std::string &k) override;
+  std::vector<std::string> search(const InstanceId &, const std::string &prefix) override;
   const std::vector<std::string>& list() override;
 private:
   std::optional<c10d::TCPStore> tcp_store_;

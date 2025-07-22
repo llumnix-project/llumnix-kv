@@ -27,6 +27,7 @@ class FileSysNaming : public INamingClient, noncopyable {
   void connect(const Schema &schema, const std::string &path) override;
   void store(const std::string &k, const std::string &v) override;
   std::optional<std::string> get(const InstanceId&, const std::string &k) override;
+  std::vector<std::string> search(const InstanceId &id, const std::string &prefix) override;
   void remove(const std::string &key) override;
   const std::vector<std::string> &list() override;
   ~FileSysNaming() override {
