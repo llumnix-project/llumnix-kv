@@ -1,0 +1,40 @@
+name: kvt_ci_test
+
+triggers:
+  push:
+    branches:
+      - main
+  merge_request:
+    target-branches:
+      - main
+
+strategy:
+  concurrency:
+    group: '${{git.ref}}'
+    cancel-in-progress: true
+    parallelism: 1
+
+jobs:
+  unit_test:
+    runs-on:
+      - self-hosted
+      - bladellm-h20x2-beijing
+    timeout: 90m
+    envs:
+      DEV_IMAGE: pai-blade-registry.cn-beijing.cr.aliyuncs.com/pai-blade/blade-llm-dev:latest-cu124
+      ACR_PASSWORD: ${{secrets.ACR_PASSWORD}}
+      ACR_USERNAME: ${{secrets.ACR_USERNAME}}
+      TORCH_CUDA_ARCH_LIST: '9.0'
+    steps:
+      - <<: !include /.aoneci/include/clear_running_container.yml
+      - <<: !include /.aoneci/include/checkout_code.yml
+      - <<: !include /.aoneci/include/pull_dev_image.yml
+      - id: build_and_test
+        envs:
+          NO_PROXY: ${{ vars.NO_PROXY }}
+          HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
+        run: |
+          CONTAINER_NAME=blade_kvt_ci_${{pipeline.inst.id}}_${RUNNER_ID} chmod +x ./tools/ci_run_kvtransfer_unit_tests_v2.sh && ./tools/ci_run_kvtransfer_unit_tests_v2.sh
+      - id: coverate_comment
+        run: |
+          echo "Coverate comment component is still unavailable yet."  >> ${AONE_CI_SUMMARY_MD}

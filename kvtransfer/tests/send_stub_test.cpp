@@ -1068,8 +1068,11 @@ public:
   void send_notification(const std::vector<const ReqSendTask*>& reqs) override {
     *send_notification_called_ = true;
     EXPECT_EQ(ch_id_, 1);
-    EXPECT_EQ(reqs.size(), 1);
-    EXPECT_EQ(reqs[0]->req_id(), "3");
+    EXPECT_EQ(reqs.size(), 2);
+    EXPECT_EQ(reqs[0]->req_id(), "2");
+    EXPECT_EQ(reqs[0]->state(), ReqState::FAILED);
+    EXPECT_EQ(reqs[1]->req_id(), "3");
+    EXPECT_EQ(reqs[1]->state(), ReqState::OK);
   }
 };
 
