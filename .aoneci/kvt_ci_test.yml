@@ -34,7 +34,7 @@ jobs:
           NO_PROXY: ${{ vars.NO_PROXY }}
           HTTPS_PROXY: ${{ vars.HTTPS_PROXY }}
         run: |
-          CONTAINER_NAME=bladellm_kvt_ci_${{pipeline.inst.id}}_${RUNNER_ID} ./tools/ci_run_kvtransfer_unit_tests_v2.sh
+          CONTAINER_NAME=bladekvt_kvt_ci_${{pipeline.inst.id}}_${RUNNER_ID} ./tools/ci_run_kvtransfer_unit_tests_v2.sh
       - id: coverate_comment
         run: |
           echo "Coverate comment component is still unavailable yet."  >> ${AONE_CI_SUMMARY_MD}
