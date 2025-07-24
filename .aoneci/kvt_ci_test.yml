@@ -32,9 +32,9 @@ jobs:
       - id: build_and_test
         envs:
           NO_PROXY: ${{ vars.NO_PROXY }}
-          HTTPS_PROXY: ${{ vars.HTTPS_PROXY }}
+          HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
         run: |
-          CONTAINER_NAME=bladekvt_kvt_ci_${{pipeline.inst.id}}_${RUNNER_ID} ./tools/ci_run_kvtransfer_unit_tests_v2.sh
+          CONTAINER_NAME=bladekvt_kvt_ci_${{pipeline.inst.id}}_${RUNNER_ID} chmod +x ./tools/ci_run_kvtransfer_unit_tests_v2.sh && ./tools/ci_run_kvtransfer_unit_tests_v2.sh
       - id: coverate_comment
         run: |
           echo "Coverate comment component is still unavailable yet."  >> ${AONE_CI_SUMMARY_MD}
