@@ -45,9 +45,9 @@ docker run --rm -t --user $(id -u):$(id -g) \
   pai-blade-registry.cn-beijing.cr.aliyuncs.com/pai-blade/blade-llm-dev:latest-cu124 \
   bash -c "export PATH=\${HOME}/.local/bin:\${PATH} \
     && python3 -m pip install gcovr --user --progress-bar off \
-    && cd ./blade_llm/_C/csrc/kvtransfer/ && mkdir build && cd build \
+    && cd ./kvtransfer/ && mkdir build && cd build \
     && cmake -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON -DBUILD_RDMA=ON .. && cmake --build . \
     && ctest -V \
     && BLLM_KVTRANS_CACHE_SHAPE=2 ctest -R '.*SendStubTest.*' -V \
-    && gcovr -r /workspace/blade_llm/_C/csrc --filter ../src --filter ../include --exclude ../include/thrid_party --exclude ../src/third_party \
-    && gcovr -r /workspace/blade_llm/_C/csrc --filter ../src --filter ../include --exclude ../include/thrid_party --exclude ../src/third_party --cobertura-pretty --cobertura /workspace/kvtransfer_tests.xml"
+    && gcovr -r /workspace/kvtransfer --filter ../src --filter ../include --exclude ../include/thrid_party --exclude ../src/third_party \
+    && gcovr -r /workspace/kvtransfer --filter ../src --filter ../include --exclude ../include/thrid_party --exclude ../src/third_party --cobertura-pretty --cobertura /workspace/kvtransfer_tests.xml"
