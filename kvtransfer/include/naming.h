@@ -24,6 +24,7 @@ class INamingClient {
   virtual void store(const std::string &k, const std::string &v) = 0;
   virtual void remove(const std::string &key) = 0;
   virtual std::optional<std::string> get(const InstanceId &, const std::string &k) = 0;
+  virtual std::vector<std::string> search(const InstanceId &, const std::string &prefix) = 0;
   virtual const std::vector<std::string> &list() = 0;
   static constexpr bool is_binary_store() {
     return false;
@@ -59,6 +60,9 @@ class GeneralNamingClient : public INamingClient {
   };
   std::optional<std::string> get(const InstanceId &n, const std::string &k) override {
     return client_->get(n, k);
+  };
+  std::vector<std::string> search(const InstanceId &n, const std::string &prefix) override {
+    return client_->search(n, prefix);
   };
   void remove(const std::string &key) override {
     client_->remove(key);

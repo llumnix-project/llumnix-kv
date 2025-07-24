@@ -42,6 +42,7 @@ void TCPStoreNaming::store(const std::string &key, const std::string &v) {
   auto real_key = inst_id + "/" + key;
   self.tcp_store_->set(real_key, value);
 }
+
 std::optional<std::string> TCPStoreNaming::get(const InstanceId& inst, const std::string &k) {
   auto& self = *this;
   assert(self.tcp_store_);
@@ -52,6 +53,10 @@ std::optional<std::string> TCPStoreNaming::get(const InstanceId& inst, const std
   } else {
     return std::string(val.begin(), val.end());
   }
+}
+
+std::vector<std::string> TCPStoreNaming::search(const InstanceId &inst, const std::string &prefix) {
+  throw std::runtime_error("unsupported search operation of tcpstore");
 }
 
 void TCPStoreNaming::remove(const std::string &key) {

@@ -57,6 +57,26 @@ std::optional<std::string> FileSysNaming::get(const InstanceId& inst_n, const st
   return std::nullopt;
 }
 
+std::vector<std::string> FileSysNaming::search(const InstanceId &inst_n, const std::string &prefix) {
+  std::vector<std::string> result;
+  auto inst_path = naming_path_ / inst_n;
+  if (std::filesystem::exists(inst_path) && std::filesystem::is_directory(inst_path)) {
+    for (const auto &entry : std::filesystem::directory_iterator(inst_path)) {
+      if (entry.path().filename().string().find(prefix) == 0) {
+        if (std::ifstream in{entry.path()}) {
+          std::string content;
+          std::getline(in, content);
+          in.close();
+          if (!content.empty()) {
+            result.push_back(std::move(content));
+          }
+        }
+      }
+    }
+  }
+  return result;
+}
+
 void FileSysNaming::remove(const std::string &key) {
   auto full_path = instance_path_ / key;
   if (std::remove(full_path.c_str()) != 0) {

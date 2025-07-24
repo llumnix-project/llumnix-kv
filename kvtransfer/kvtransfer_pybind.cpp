@@ -288,6 +288,7 @@ PYBIND11_MODULE(kvtransfer_ops, m) {
   naming_client.def(py::init<>())
       .def("connect", &blade_llm::GeneralNamingClient::connect, "connect to naming service;")
       .def("get", &blade_llm::GeneralNamingClient::get, "get key from naming service;")
+      .def("search", &blade_llm::GeneralNamingClient::search, "search key from naming service;")
       .def("store", &blade_llm::GeneralNamingClient::store, "get key from naming service;")
       .def("remove", &blade_llm::GeneralNamingClient::remove, "remove key from naming service;")
       .def("list", &blade_llm::GeneralNamingClient::list, "list keys from naming service;");
