@@ -273,6 +273,7 @@ TEST(CudaIpcTest, TestTransfer) {
     std::string out;
     channel->flush(out);
     auto iter = Source<const ReqSendTask>::from(&req_task, 1);
+    req_task.set_state(ReqState::OK);
     channel->send_notification(iter.get());
     channel->close();
     LOG(INFO) << "channel process exit ...";

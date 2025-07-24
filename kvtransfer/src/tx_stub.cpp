@@ -551,7 +551,9 @@ private:
     auto& self = *this;
     if (self.send_done_addr == nullptr) {
       // channel send done, used in bladellm
-      self.ch->send_notification(self.finished_req);
+      if (self.ch) {
+        self.ch->send_notification(self.finished_req);
+      }
     } else {
       // rpc send done, used in vllm
       self.rpc_send_done(self.finished_req);
