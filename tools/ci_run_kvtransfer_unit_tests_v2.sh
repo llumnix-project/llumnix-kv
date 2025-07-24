@@ -7,7 +7,7 @@ set -ex
 date_time=`date "+%Y%m%d_%H%M%S.%3N"`
 tmp_local_dir="${PWD}/tmp_local_${date_time}"
 mkdir -p ${tmp_local_dir}
-container_name=${CONTAINER_NAME:-bladellm_kvt_ci}
+container_name=${CONTAINER_NAME:-blade_kvt_ci}
 
 function clean_up {
     docker rm -f ${container_name} || true
