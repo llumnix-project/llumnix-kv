@@ -146,6 +146,9 @@ TEST(NamingTest, TestEASNaming) {
   auto value3 = eas_naming_client.get("podname1", "key3");
   EXPECT_TRUE(value3.has_value());
   EXPECT_EQ(value3.value(), "value3");
+  auto values = eas_naming_client.search("podname1", "key");
+  std::vector<std::string> expected{"value1", "value2", "value3"};
+  EXPECT_TRUE(std::is_permutation(values.begin(), values.end(), expected.begin(), expected.end()));
   post_kv_pair = {&instance_list_v3, &instances_str_v3};
   std::this_thread::sleep_for(std::chrono::milliseconds(1500));
   const auto &instance_v3 = eas_naming_client.list();
@@ -271,12 +274,16 @@ TEST(NamingTest, TestFileSysNaming) {
 
   FileSysNaming fn2("podname2");
   fn2.connect(FILESYS_NAMING_SCHEMA, naming_path);
-  fn2.store("key1", "value11");
+  fn2.store("ekey1", "evalue1");
+  fn2.store("ekey2", "evalue2");
+  fn2.store("wkey1", "wvalue1");
   std::this_thread::sleep_for(std::chrono::milliseconds(2100));
   pods = fn.list();
-  EXPECT_EQ(pods.size(), 2);
-  EXPECT_TRUE(pods[0] == "podname1" || pods[0] == "podname2");
-  EXPECT_TRUE(pods[1] == "podname1" || pods[1] == "podname2");
+  std::vector<std::string> expected_pods = {"podname1", "podname2"};
+  EXPECT_TRUE(std::is_permutation(pods.begin(), pods.end(), expected_pods.begin(), expected_pods.end()));
+  auto values = fn.search("podname2", "ekey");
+  std::vector<std::string> expected_values = {"evalue1", "evalue2"};
+  EXPECT_TRUE(std::is_permutation(values.begin(), values.end(), expected_values.begin(), expected_values.end()));
 }
 
 TEST(NamingTest, TestWorkerFileNamingClient) {
