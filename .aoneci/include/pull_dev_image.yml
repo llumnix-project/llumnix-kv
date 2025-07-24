@@ -1,0 +1,4 @@
+id: pull_dev_image
+run: |
+  source ./tools/image_utils.sh
+  pull_blade_image ${DEV_IMAGE}
