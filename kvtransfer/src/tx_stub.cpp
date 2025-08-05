@@ -502,13 +502,22 @@ private:
     int respsize = 4;
     uint32_t header = SEND_DONE_REQ;
     uint32_t worker_tp_rank = self.stub->src_info_.worker_tp_rank;
+    static constexpr uint32_t HAS_PLEN = 0x80000000u;
+    assert(worker_tp_rank < 0xffff);
+    worker_tp_rank |= HAS_PLEN;
     uint32_t num_req = reqs.size();
+
+    // len('cfb0aa74-6752-9bcd-879e-19d1d1cf368b-ee5d8cdc-57d1-478f-a1d7-5b0c05bd8fb3')
+    // == 73 一个典型的 dash reqid 长度.
+    self.send_done_buf.reserve((4 + 4 + 4 + num_req * (4 + 73 + 4)) * 2ul);
+
     self.send_done_buf.resize(4 + 4 + 4);
     memcpy(self.send_done_buf.data() + 0, &header, 4);
     memcpy(self.send_done_buf.data() + 4, &worker_tp_rank, 4);
     memcpy(self.send_done_buf.data() + 8, &num_req, 4);
     for (const auto* req : reqs) {
       // send fail 待处理!
+      assert(req->reach_last_token);
       assert(req->state() == ReqState::OK);
 
       const std::string& reqid = req->req_id();
@@ -517,6 +526,12 @@ private:
       memcpy(dst, &reqid_s, 4);
       memcpy(dst + 4, reqid.data(), reqid_s);
     }
+    for (const auto* req : reqs) {
+      uint32_t reqid_s = req->end_tokens();
+      char* dst = expand_vec(self.send_done_buf, 4);
+      memcpy(dst, &reqid_s, 4);
+    }
+
     if (env_send_done_head_kind() == SEND_SAVE_DONE_HEAD_KIND) {
       size_t const reqsize = self.send_done_buf.size();
       char* dst = expand_vec(self.send_done_buf, reqsize);

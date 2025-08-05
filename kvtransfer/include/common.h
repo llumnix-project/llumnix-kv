@@ -139,6 +139,9 @@ public:
   const auto& src_blocks() const noexcept;
   auto dst_inst_id() const noexcept;
   auto dst_worker_id() const noexcept;
+  uint32_t end_tokens() const noexcept {
+    return this->seen_tokens + this->new_tokens;
+  }
 
   // FOR GTEST
   bool operator==(const ReqSendTask& other) const {
