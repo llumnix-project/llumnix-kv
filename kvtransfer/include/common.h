@@ -201,7 +201,7 @@ class RequestInfo {
       this->last_seen_ = seen;
     }
     assert(this->last_seen_ == seen);
-    assert(new_tokens > 0);
+    // assert(new_tokens >= 0);
     this->last_seen_ += new_tokens;
     this->has_last_ = has_last;
 #endif

@@ -226,8 +226,6 @@ class KVTransferClient:
         """
         if not self._inited:
             raise RuntimeError("KVTransferClient not inited")
-        if new_tokens <= 0:
-            return
         submit_delta_send(req_id, seen_tokens, new_tokens, has_last_token)
 
     def start_send_step(self):
