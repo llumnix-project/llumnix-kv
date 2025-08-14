@@ -178,9 +178,12 @@ void KvTransferClient::submit_delta_send(const RequestId &req_id,
                                          uint32_t new_tokens,
                                          bool has_last_token) {
   auto r = reqs_.find(req_id);
-  if (r == reqs_.end() || new_tokens <= 0) {
+  if (r == reqs_.end()) {
     LOG(ERROR) << "KVT client: request(" << req_id << ") not found for delta send;";
     throw KVTransferException(ErrorKind::REQUEST_NOT_FOUND, "request not found;");
+  }
+  if (new_tokens <= 0) {
+    assert(has_last_token);
   }
 
   for (auto &req : r->second) {

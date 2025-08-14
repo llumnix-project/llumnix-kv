@@ -374,17 +374,20 @@ public:
     assert(self.send_blocks.empty());
     assert(!batch.tasks.empty());
     for (const auto& task : batch.tasks) {
-      assert(task.new_tokens > 0);
       assert(task.dst_inst_id() == dst_id);
       assert(task.dst_worker_id() == dst_worker_id);
       if (task.reach_last_token) {
         self.finished_req.emplace_back(&task);
+      }
+      if (task.new_tokens <= 0) {
+        continue;
       }
 
       if (task.state() == ReqState::FAILED) {
         continue;
       }
       assert(task.state() == ReqState::INPROCESS);
+      assert(task.new_tokens > 0);
       self.parse_block(&srcinfo, &dstinfo, &task, self.send_blocks);
     }
 

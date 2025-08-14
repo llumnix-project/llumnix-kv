@@ -152,8 +152,10 @@ TEST(KVTransferClientTest, SendTo1) {
   }
   {
     EXPECT_THROW(client.submit_delta_send("UNKNOWN_REQ_ID", 1, 1, false), KVTransferException);
-    req1.add_send_task(1, 1, true);
-    client.submit_delta_send(req1.req_id, 1, 1, true);
+    req1.add_send_task(1, 1, false);
+    req1.add_send_task(2, 0, true);
+    client.submit_delta_send(req1.req_id, 1, 1, false);
+    client.submit_delta_send(req1.req_id, 2, 0, true);
     auto idx = client.start_send();
     client.notify_event_record(idx);
     client.flush_send(idx);
@@ -197,10 +199,14 @@ TEST(KVTransferClientTest, SendTo2) {
   auto idx35 = client.start_send();
   client.flush_send(idx35);
 
-  req1.add_send_task(1, 1, true);
-  req0.add_send_task(1, 1, true);
-  client.submit_delta_send(req0.req_id, 1, 1, true);
-  client.submit_delta_send(req1.req_id, 1, 1, true);
+  req1.add_send_task(1, 1, false);
+  req1.add_send_task(2, 0, true);
+  req0.add_send_task(1, 1, false);
+  req0.add_send_task(2, 0, true);
+  client.submit_delta_send(req0.req_id, 1, 1, false);
+  client.submit_delta_send(req0.req_id, 2, 0, true);
+  client.submit_delta_send(req1.req_id, 1, 1, false);
+  client.submit_delta_send(req1.req_id, 2, 0, true);
   auto idx33 = client.start_send();
   client.notify_event_record(idx33);
   client.flush_send(idx33);
