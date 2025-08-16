@@ -288,13 +288,6 @@ static bool same_dst(const WorkerInfo& l, const WorkerInfo& r) noexcept {
          l.transfer_protocols == r.transfer_protocols;
 }
 
-void KvSendStub::update_dst_info(WorkerInfo&& new_dst) {
-  auto& self = *this;
-  assert(same_dst(self.dst_info_, new_dst));
-  self.dst_info_.addr = std::move(new_dst.addr);
-  self.dst_info_.other_info = std::move(new_dst.other_info);
-  return ;
-}
 
 static char* expand_vec(std::vector<char>& buf, size_t s) {
   auto old_s = buf.size();
@@ -309,8 +302,6 @@ static constexpr uint32_t SEND_DONE_RESP = 0x91218102ul;
 
 struct KvSendStub::TaskContext {
   KvSendStub* const stub = nullptr;
-  TPKind const tpkind = TPKind::UNKNOWN;
-  ParseBlockFunc* const parse_block = nullptr;
 
   // runtime state
   std::vector<char> send_done_buf;
@@ -318,7 +309,11 @@ struct KvSendStub::TaskContext {
   const sockaddr_in* const send_done_addr = env_send_done_addr();  // OWNER: GLOBAL
   std::string flush_out_buf;
   std::vector<IpcBlock> send_blocks;
+  std::vector<const ReqSendTask *> send_req;
   std::vector<const ReqSendTask *> finished_req;
+  TPKind tpkind = TPKind::UNKNOWN;
+  ParseBlockFunc* parse_block = nullptr;
+  std::optional<WorkerInfo> dstinfo;
   Channel ch;
   uint64_t wait_time_us = 0;
   uint64_t wait_and_send_us = 0;
@@ -345,20 +340,18 @@ private:
   }
 #endif
 public:
-  TaskContext(KvSendStub* s, TPKind k, ParseBlockFunc* p) noexcept
-    : stub(s), tpkind(k), parse_block(p) {
+  TaskContext(KvSendStub* s) noexcept
+    : stub(s) {
 #ifndef NDEBUG
-    this->rng_.seed(std::uint_fast64_t(s->dst_info_.worker_id));
+    this->rng_.seed(std::uint_fast64_t(s->dstworkerid_));
 #endif
   }
 
   void do_task(BatchSendTask& batch) {
     auto& self = *this;
     auto const step_idx = batch.step->step_idx;
-    const auto& srcinfo = self.stub->src_info_;
-    const auto& dstinfo = self.stub->dst_info_;
-    const auto dst_id = dstinfo.inst_id;
-    const auto dst_worker_id = dstinfo.worker_id;
+    const auto& dst_id = self.stub->dstid_;
+    const auto dst_worker_id = self.stub->dstworkerid_;
 
 #ifndef NDEBUG
     // 用于提高 https://aone.alibaba-inc.com/v2/project/664220/req/60815172 复现概率.
@@ -370,6 +363,7 @@ public:
 
     // prepare
     assert(self.flush_out_buf.empty());
+    assert(self.send_req.empty());
     assert(self.finished_req.empty());
     assert(self.send_blocks.empty());
     assert(!batch.tasks.empty());
@@ -388,12 +382,19 @@ public:
       }
       assert(task.state() == ReqState::INPROCESS);
       assert(task.new_tokens > 0);
-      self.parse_block(&srcinfo, &dstinfo, &task, self.send_blocks);
+      self.send_req.emplace_back(&task);
     }
 
-    if (!self.send_blocks.empty()) {
+    if (!self.send_req.empty()) {
       try {
         self.try_create_channel();
+        const auto& srcinfo = self.stub->src_info_;
+        assert(self.parse_block != nullptr);
+        assert(self.tpkind != TPKind::UNKNOWN);
+        for (auto* task : self.send_req) {
+          self.parse_block(&srcinfo, &self.dstinfo.value(), task, self.send_blocks);
+        }
+        assert(!self.send_blocks.empty());
         self.do_send(batch);
       } catch (std::exception& ex) {
         LOG(ERROR) << "KVT tx_stub fail to send data. DstId=" << dst_id
@@ -445,6 +446,7 @@ public:
     auto& self = *this;
     self.flush_out_buf.clear();
     self.send_blocks.clear();
+    self.send_req.clear();
     self.finished_req.clear();
   }
 private:
@@ -505,34 +507,31 @@ private:
     int respsize = 4;
     uint32_t header = SEND_DONE_REQ;
     uint32_t worker_tp_rank = self.stub->src_info_.worker_tp_rank;
-    static constexpr uint32_t HAS_PLEN = 0x80000000u;
+    static constexpr uint32_t HAS_VER2 = 0x40000000u;
+    static constexpr uint32_t CODE_INTERNALERROR = 500;
     assert(worker_tp_rank < 0xffff);
-    worker_tp_rank |= HAS_PLEN;
+    worker_tp_rank |= HAS_VER2;
     uint32_t num_req = reqs.size();
 
     // len('cfb0aa74-6752-9bcd-879e-19d1d1cf368b-ee5d8cdc-57d1-478f-a1d7-5b0c05bd8fb3')
     // == 73 一个典型的 dash reqid 长度.
-    self.send_done_buf.reserve((4 + 4 + 4 + num_req * (4 + 73 + 4)) * 2ul);
+    self.send_done_buf.reserve((4 + 4 + 4 + num_req * (4 + 73 + 4 + 4)) * 2ul);
 
     self.send_done_buf.resize(4 + 4 + 4);
     memcpy(self.send_done_buf.data() + 0, &header, 4);
     memcpy(self.send_done_buf.data() + 4, &worker_tp_rank, 4);
     memcpy(self.send_done_buf.data() + 8, &num_req, 4);
     for (const auto* req : reqs) {
-      // send fail 待处理!
       assert(req->reach_last_token);
-      assert(req->state() == ReqState::OK);
-
+      uint32_t code = (req->state() == ReqState::OK) ? 0 : CODE_INTERNALERROR;
+      uint32_t plen = req->end_tokens();
       const std::string& reqid = req->req_id();
-      uint32_t reqid_s = reqid.size();
-      char* dst = expand_vec(self.send_done_buf, 4 + reqid_s);
-      memcpy(dst, &reqid_s, 4);
-      memcpy(dst + 4, reqid.data(), reqid_s);
-    }
-    for (const auto* req : reqs) {
-      uint32_t reqid_s = req->end_tokens();
-      char* dst = expand_vec(self.send_done_buf, 4);
-      memcpy(dst, &reqid_s, 4);
+      uint32_t rlen = reqid.size();
+      char* dst = expand_vec(self.send_done_buf, 4 + 4 + 4 + rlen);
+      memcpy(dst, &plen, 4);
+      memcpy(dst + 4, &code, 4);
+      memcpy(dst + 8, &rlen, 4);
+      memcpy(dst + 12, reqid.data(), rlen);
     }
 
     if (env_send_done_head_kind() == SEND_SAVE_DONE_HEAD_KIND) {
@@ -603,66 +602,82 @@ private:
 
   void refresh_dst_info() {
     auto& self = *this;
-    const auto& dst_info = self.stub->dst_info_;
-    auto dst_info_opt = self.stub->naming_->get_worker_info(dst_info.inst_id, dst_info.worker_id);
-    if (!dst_info_opt) {
-      LOG(WARNING) << "TaskContext.dst_info: none: use orig_dst_info=" << dst_info.to_string();
+    const auto& dstid = self.stub->dstid_;
+    const auto dstwid = self.stub->dstworkerid_;
+    auto dstinfoopt = self.stub->naming_->get_worker_info(dstid, dstwid);
+    if (!dstinfoopt) {
+      if (self.dstinfo.has_value()) {
+        LOG(WARNING) << "refresh_dst_info:use origdstinfo=" << self.dstinfo->to_string();
+        return;
+      }
+      LOG(ERROR) << "refresh_dst_info:origdstinfo=none dstid=" << dstid
+                 << " dstwid=" << dstwid;
+      throw std::runtime_error("can't find target worker");
+    }
+    if (self.dstinfo.has_value() && !same_dst(*self.dstinfo, *dstinfoopt)) {
+      LOG(WARNING) << "TaskContext.dst_info: invalid dst: orig_dst_info="
+                  << self.dstinfo->to_string()
+                  << "bad_dst_info=" << dstinfoopt->to_string();
       return;
     }
-    if (!same_dst(dst_info, *dst_info_opt)) {
-      LOG(WARNING) << "TaskContext.dst_info: invalid dst: orig_dst_info="
-                   << dst_info.to_string()
-                   << "bad_dst_info=" << dst_info_opt->to_string();
-      return ;
+    if (self.dstinfo.has_value()) {
+      self.dstinfo->addr = std::move(dstinfoopt->addr);
+      self.dstinfo->other_info = std::move(dstinfoopt->other_info);
+      return;
     }
-    self.stub->update_dst_info(std::move(*dst_info_opt));
-    return ;
+    self.dstinfo = dstinfoopt;
+
+    const auto& srcinfo = self.stub->src_info_;
+    assert(self.parse_block == nullptr);
+    assert(self.tpkind == TPKind::UNKNOWN);
+    const int cache_shape = env_cache_shape();
+    if (cache_shape == RAGGED_FLASH_CACHE_SHAPE) {
+      if (srcinfo.tp_size == self.dstinfo->tp_size) {
+        self.parse_block = parse_block_send_p_eq_d;
+        self.tpkind = TPKind::PEQD;
+        return;
+      }
+      if (srcinfo.tp_size > self.dstinfo->tp_size) {
+        self.parse_block = parse_block_send_p_gt_d;
+        self.tpkind = TPKind::PGTD;
+        return;
+      }
+      self.parse_block = parse_block_send_p_lt_d;
+      self.tpkind = TPKind::PLTD;
+      return;
+    }
+    if (cache_shape == FLASH_CACHE_SHAPE) {
+      if (srcinfo.tp_size == self.dstinfo->tp_size) {
+        self.parse_block = vllm_parse_block_send_p_eq_d;
+        self.tpkind = TPKind::PEQD;
+        return;
+      }
+      if (srcinfo.tp_size > self.dstinfo->tp_size) {
+        self.parse_block = vllm_parse_block_send_p_gt_d;
+        self.tpkind = TPKind::PGTD;
+        return;
+      }
+    }
+    throw std::runtime_error("unsupported cache_shape");
   }
 
   void try_create_channel() {
     auto& self = *this;
     if (self.ch) {
+      assert(self.dstinfo.has_value());
       return ;
     }
     self.refresh_dst_info();
-    self.ch = self.stub->channel_factory_->create(self.stub->dst_info_);
-    LOG(INFO) << "create channel. dst=" << self.stub->dst_info_.to_string()
+    assert(self.dstinfo.has_value());
+    self.ch = self.stub->channel_factory_->create(*self.dstinfo);
+    LOG(INFO) << "create channel. dst=" << self.dstinfo->to_string()
               << ";ch=" << self.ch.get();
     return ;
   }
 };
 
 void KvSendStub::start_async() {
-  TPKind tpkind = TPKind::UNKNOWN;
-  ParseBlockFunc* parse_block_send = nullptr;
-  const int cache_shape = env_cache_shape();
-  if (cache_shape == RAGGED_FLASH_CACHE_SHAPE) {
-    if (src_info_.tp_size == dst_info_.tp_size) {
-      parse_block_send = parse_block_send_p_eq_d;
-      tpkind = TPKind::PEQD;
-    } else if (src_info_.tp_size > dst_info_.tp_size) {
-      parse_block_send = parse_block_send_p_gt_d;
-      tpkind = TPKind::PGTD;
-    } else {
-      parse_block_send = parse_block_send_p_lt_d;
-      tpkind = TPKind::PLTD;
-    }
-  } else if (cache_shape == FLASH_CACHE_SHAPE) {
-    if (src_info_.tp_size == dst_info_.tp_size) {
-      parse_block_send = vllm_parse_block_send_p_eq_d;
-      tpkind = TPKind::PEQD;
-    } else if (src_info_.tp_size > dst_info_.tp_size) {
-      parse_block_send = vllm_parse_block_send_p_gt_d;
-      tpkind = TPKind::PGTD;
-    } else {
-      RTCHECK(false);
-    }
-  } else {
-    RTCHECK(false);
-  }
-
-  assert(tpkind != TPKind::UNKNOWN);
-  auto taskctx = TaskContext(this, tpkind, parse_block_send);
+  auto taskctx = TaskContext(this);
 
   for (;;) {
     BatchSendTask batch;
@@ -675,8 +690,8 @@ void KvSendStub::start_async() {
     try {
       taskctx.do_task(batch);
     } catch (const std::exception& ex) {
-      LOG(ERROR) << "do task failed. DstId=" << dst_info_.inst_id
-                  << ",DstWorkerId=" << dst_info_.worker_id
+      LOG(ERROR) << "do task failed. DstId=" << this->dstid_
+                  << ",DstWorkerId=" << this->dstworkerid_
                   << ",StepIdx=" << batch.step->step_idx
                   << ",Ex=" << ex.what();
       state_.store(StubState::POISONED, std::memory_order_release);
@@ -694,7 +709,7 @@ void KvSendStub::start_async() {
   }
 
   LOG(INFO) << "KVT tx_stub: stop to send kv of to worker("
-            << dst_info_.inst_id << ":" << dst_info_.worker_id << ");";
+            << this->dstid_ << ":" << this->dstworkerid_ << ");";
 }
 
 void KvSendStub::start() {
@@ -728,7 +743,7 @@ StubState KvSendStub::check_state() {
 KvSendStub::~KvSendStub() {
   auto state = state_.load(std::memory_order_relaxed);
   if (state != StubState::DISCARD && state != StubState::POISONED) {
-    LOG(WARNING) << "KVT: SendStub(" << dst_info_.inst_id << ":" << dst_info_.worker_id
+    LOG(WARNING) << "KVT: SendStub(" << dstid_ << ":" << dstworkerid_
                  << ") was not been dropped gracefully.";
     send_tasks_.close();
   }
@@ -743,17 +758,8 @@ SendStub KvSendStubFactory::create_stub(const InstanceId& dst_inst_name,
                                         uint32_t start_layer,
                                         uint32_t num_layers,
                                         std::optional<TransferProtocol> proto_opt) {
-
-  auto info_opt = naming_worker_->get_worker_info(dst_inst_name, dst_worker_id);
-  if (!info_opt.has_value()) {
-    LOG(ERROR) << "KVT: can't find worker(" << dst_inst_name << ":" << dst_worker_id << ") from naming service;";
-    throw std::runtime_error("can not find worker(" +
-        dst_inst_name + ":" + std::to_string(dst_worker_id) +
-        ") from naming service;");
-  }
-  auto info = info_opt.value();
   auto channel_factory = std::make_unique<ChannelFactory>(ctx_, proto_opt);
-  return std::make_unique<KvSendStub>(info, ctx_->worker_info(),
+  return std::make_unique<KvSendStub>(dst_inst_name, dst_worker_id, ctx_->worker_info(),
                                       start_layer, num_layers,
                                       std::move(channel_factory),
                                       naming_worker_.get());

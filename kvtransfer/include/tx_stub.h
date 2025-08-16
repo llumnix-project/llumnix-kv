@@ -68,20 +68,21 @@ class ISendStubFactory {
 
 class KvSendStub : public ISendStub, public noncopyable {
  private:
-  // dst_info_.addr/.other_info 可能会在 start_async 线程修改.
-  WorkerInfo dst_info_;
+  const InstanceId dstid_;
+  const WorkerId dstworkerid_;
   const WorkerInfo src_info_;
   // OWNER: KvSendStubFactory.naming_worker_
   INamingWorkerClient* const naming_ = nullptr;
 
   public:
-  KvSendStub(const WorkerInfo &dst_info,
+  KvSendStub(InstanceId dstid, WorkerId dstworkerid,
              const WorkerInfo &src_info,
              uint32_t start_layer,
              uint32_t num_layers,
              std::unique_ptr<IChannelFactory> channel_factory,
              INamingWorkerClient* naming) :
-      dst_info_(dst_info),
+      dstid_(std::move(dstid)),
+      dstworkerid_(dstworkerid),
       src_info_(src_info),
       naming_(naming),
       start_layer_(start_layer),
