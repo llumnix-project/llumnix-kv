@@ -679,6 +679,13 @@ static int get_port() {
 
 // barex listen 实现是 bind INADDR_ANY, 因此我们随便返回一个对外可用的 ip 地址均可.
 static void get_ip(RDMAInfo *out) {
+  const auto* vllm_host_ip = getenv("VLLM_HOST_IP");
+  if (vllm_host_ip != nullptr && vllm_host_ip[0] != '\0') {
+    auto last_idx = sizeof(out->ip) - 1;
+    strncpy(out->ip, vllm_host_ip, sizeof(out->ip));
+    out->ip[last_idx] = '\0';
+    return;
+  }
   // SUSv2 guarantees that "Host names are limited to 255 bytes".
   char hostname[256];
   int status = gethostname(hostname, sizeof(hostname));
@@ -818,6 +825,12 @@ void RDMAChannel::do_init() {
     chs.emplace_back(fut.get());
   }
   assert(!chs.empty());
+
+#ifndef NDEBUG
+  auto delay_ms = env_debug_tx_delay_ms();
+  LOG(INFO) << "RDMAChannel connect: done: delayms=" << delay_ms;
+  usleep(delay_ms * 1000);
+#endif
 
   auto mhfut = self.ctx_->get_mem_handles(chs[0]);
   auto mh = mhfut.get();

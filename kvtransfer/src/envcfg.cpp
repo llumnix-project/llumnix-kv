@@ -83,6 +83,16 @@ int env_debug_tx_failrate() {
   return val;
 }
 
+int env_debug_tx_delay_ms() {
+  static constexpr int DEFVAL = 0;
+  static int val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_DEBUG_TX_DELAYMS", DEFVAL);
+  });
+  return val;
+}
+
 
 // input: IP:PORT
 static void parse_addr(struct sockaddr_in* addr, const char* input) {

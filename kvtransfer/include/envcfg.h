@@ -11,6 +11,7 @@ int env_fsnaming_keepalive_interval_s();
 int env_fsnaming_tolerate_interval_s();
 // tx stub 发送失败率: (RETURN - 1) / 100
 int env_debug_tx_failrate();
+int env_debug_tx_delay_ms();
 
 // RETURN addr 指向着某处全局空间, 不要修改.
 // NULL 意味着不使用 send done 机制.
