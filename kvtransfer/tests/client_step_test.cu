@@ -69,8 +69,14 @@ public:
     throw std::runtime_error("biubiu~");
   }
 
-  std::optional<WorkerInfo> get_worker_info(const InstanceId &, WorkerId) override {
-    return std::nullopt;
+  std::optional<WorkerInfo> get_worker_info(const InstanceId &id, WorkerId wid) override {
+    LOG(INFO) << "fake get_worker_info: id=" << id << " wid=" << wid;
+    WorkerInfo dst_info(id, wid);
+    dst_info.tp_size = 1;
+    dst_info.worker_tp_rank = 0;
+    dst_info.block_size =  16 * KB;
+    dst_info.token_size = KB;
+    return dst_info;
   }
 };
 
@@ -87,12 +93,7 @@ class FakeSendStubFactory : public ISendStubFactory {
                        std::optional<TransferProtocol> p) override {
     LOG(INFO) << "Create SendStub";
     auto cf = std::make_unique<FakeChannelFactory>(ctx, dst_layer, notifies);
-    WorkerInfo dst_info(i, w);
-    dst_info.tp_size = 1;
-    dst_info.worker_tp_rank = 0;
-    dst_info.block_size =  16 * KB;
-    dst_info.token_size = KB;
-    return std::make_unique<KvSendStub>(dst_info, ctx->worker_info(), start_layer, num_layers, std::move(cf), naming_.get());
+    return std::make_unique<KvSendStub>(i, w, ctx->worker_info(), start_layer, num_layers, std::move(cf), naming_.get());
   }
 };
 

@@ -394,8 +394,9 @@ public:
         for (auto* task : self.send_req) {
           self.parse_block(&srcinfo, &self.dstinfo.value(), task, self.send_blocks);
         }
-        assert(!self.send_blocks.empty());
-        self.do_send(batch);
+        if (!self.send_blocks.empty()) {
+          self.do_send(batch);
+        }
       } catch (std::exception& ex) {
         LOG(ERROR) << "KVT tx_stub fail to send data. DstId=" << dst_id
                   << ",DstWorkerId=" << dst_worker_id
