@@ -84,7 +84,7 @@ int env_debug_tx_failrate() {
 }
 
 int env_debug_tx_delay_ms() {
-  static constexpr int DEFVAL = 0;
+  static constexpr int DEFVAL = 1;
   static int val = DEFVAL;
   static std::once_flag flag;
   std::call_once(flag, [] () {

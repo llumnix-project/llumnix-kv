@@ -1006,6 +1006,12 @@ void RDMAChannel::register_data(std::vector<IpcBlock>& data, TPKind kind) {
   return ;
 }
 
+
+static size_t cdiv(size_t a, size_t b) {
+  return (a + (b - 1)) / b;
+}
+
+
 void RDMAChannel::send_data(size_t layer_idx) {
   auto &self = *this;
   assert(layer_idx < self.dst_layer_num_);
@@ -1020,6 +1026,8 @@ void RDMAChannel::send_data(size_t layer_idx) {
   auto datasp = std::make_shared<std::vector<rw_memp_t>>();
   const auto& data = *self.data_;
   assert(!data.empty());
+  size_t const dataperch = cdiv(data.size(), self.chs_.size());
+  assert(dataperch * self.chs_.size() >= data.size());
   for (const auto &[src_offset, dst_offset, len] : data) {
     assert(len > 0);
     assert(src_offset < self.ctx_->layer_blk_size);
@@ -1037,11 +1045,16 @@ void RDMAChannel::send_data(size_t layer_idx) {
     assert(rladdr);
     uint64_t raddr = reinterpret_cast<uint64_t>(rladdr + dst_offset);
     datasp->emplace_back(rw_memp_t{std::move(src_mr), raddr, rkey});
+    if (datasp->size() >= dataperch) {
+      auto fut = WriteBatch(self.ch(), std::move(datasp));
+      self.write_futs_.emplace_back(std::move(fut));
+      datasp = std::make_shared<std::vector<rw_memp_t>>();
+    }
   }
-  assert(!datasp->empty());
-
-  auto fut = WriteBatch(self.ch(), std::move(datasp));
-  self.write_futs_.emplace_back(std::move(fut));
+  if (!datasp->empty()) {
+    auto fut = WriteBatch(self.ch(), std::move(datasp));
+    self.write_futs_.emplace_back(std::move(fut));
+  }
   return;
 }
 
