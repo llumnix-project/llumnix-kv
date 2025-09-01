@@ -874,10 +874,10 @@ void RDMAChannel::do_init() {
   // std::promise<void> pr;
   auto pr = std::make_shared<std::promise<uint64_t>>();
   auto fut = pr->get_future();
-  auto &datas = *datasp;
+  auto datas = datasp;
 
   const auto write_start_ts = SteadyClock::now();
-  auto result = ch->WriteBatch(datas,
+  auto result = ch->WriteBatch(std::move(datas),
                                [pr = std::move(pr), d = std::move(datasp), write_start_ts](Status s) mutable {
                                  // WriteBatch 要求 datasp 直至 callback 中才能回收.
                                  if (!s.IsOk()) {
