@@ -24,13 +24,19 @@ class TimeWatch {
   Timepoint start;
 };
 
+static inline int64_t ielapse_us(Timepoint start, Timepoint end) {
+  auto dur = end - start;
+  auto dur_us = std::chrono::duration_cast<std::chrono::microseconds>(dur);
+  return dur_us.count();
+}
+
 static inline size_t elapse_us(Timepoint start, Timepoint end) {
   if (start >= end) {
     return 0;
   }
-  auto dur = end - start;
-  auto dur_us = std::chrono::duration_cast<std::chrono::microseconds>(dur);
-  return dur_us.count();
+  int64_t ret = ielapse_us(start, end);
+  assert(ret >= 0);
+  return ret;
 }
 
 static inline size_t elapse_ns(Timepoint start, Timepoint end) {

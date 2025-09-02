@@ -46,6 +46,9 @@ docker run --rm -t --user $(id -u):$(id -g) \
   bash -c "export PATH=\${HOME}/.local/bin:\${PATH} \
     && python3 -m pip install gcovr --user --progress-bar off \
     && cd ./kvtransfer/ && mkdir build && cd build \
+    && apt remove -y accl-barex-cuda \
+    && wget https://eflops.oss-cn-beijing.aliyuncs.com/xiaoshi/test/writebatch/v1/accl-barex-cuda12.2-devel-1.5.1-0.deb \
+    && dpkg -i accl-barex-cuda12.2-devel-1.5.1-0.deb \
     && cmake -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON -DBUILD_RDMA=ON .. && cmake --build . \
     && ctest -V \
     && BLLM_KVTRANS_CACHE_SHAPE=2 ctest -R '.*SendStubTest.*' -V \

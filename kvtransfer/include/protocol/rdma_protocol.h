@@ -247,6 +247,7 @@ class RDMAChannel : public IChannel, public noncopyable {
   // write_us
   std::vector<std::future<uint64_t>> write_futs_;
   std::vector<std::future<void>> send_futs_;
+  std::vector<std::vector<ibv_sge>> layer_sges_;
 
   // init by do_init
   std::vector<accl::barex::XChannel *> chs_;   // owner: ctx_.connector_

@@ -46,7 +46,7 @@ Step::~Step() noexcept {
             << ",PythonExecUs=" << elapse_us(self.start_send_ts, self.flush_send_ts)
             << ",WaitLayerQueueUs=" << elapse_us(self.start_send_ts, self.wait_layers_start_ts)
             << ",WaitLayerExecUs=" << elapse_us(self.wait_layers_start_ts, self.wait_layers_end_ts)
-            << ",SendNonoverlapUs=" << elapse_us(self.flush_send_ts, last_send_ts)
+            << ",SendNonoverlapUs=" << ielapse_us(self.flush_send_ts, last_send_ts)
             << ",LastSendFlushTs=" << last_send_ts.time_since_epoch().count();  // send stub id
 }
 

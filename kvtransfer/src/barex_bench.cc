@@ -1,4 +1,4 @@
-#if 0
+#if ENABLE_BAREX_BENCH
 
 #include <accl/barex/barex.h>
 #include <accl/barex/barex_types.h>
@@ -9,6 +9,11 @@
 #include <accl/barex/xsimple_mempool.h>
 #include <accl/barex/xthreadpool.h>
 #include <accl/barex/xtimer.h>
+#ifdef ENABLE_IBVERBS_BENCH
+#include <barex/accl_verbs.h>
+#include <barex/env.h>
+#include <barex/common.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -17,9 +22,9 @@
 #include <assert.h>
 #include <cuda_runtime.h>
 
-
-using namespace accl::barex;
-
+static uint64_t cdiv(uint64_t a, uint64_t b) {
+  return (a + (b - 1)) / b;
+}
 
 #define RTCHECK(expr) do { \
     if (!(expr)) { \
@@ -27,6 +32,657 @@ using namespace accl::barex;
         abort(); \
     } \
 } while (0)
+
+using namespace accl::barex;
+
+#ifdef ENABLE_IBVERBS_BENCH
+class ZYXContext;
+
+class ZYChannel : public XChannel {
+  int local_nic_id_ = -1;
+  int peer_nic_id_ = -1;
+  std::string local_addr_;
+  int local_port_;
+  std::string peer_addr_;
+  int peer_port_;
+  TcpProtoType tcp_type_;
+  std::atomic<uint64_t> lastest_alive_ts_;
+  int traffic_class = 0;
+
+  // not own
+  ZYXContext *ctx_ = nullptr;
+  // not own
+  IbvDevice *ibv_device_ = nullptr;
+  // not own
+  Verbs *verbs_ = nullptr;
+  // not own
+  struct ibv_comp_channel *ibv_cc_ = nullptr;
+  // not own
+  struct ibv_cq *ibv_cq_ = nullptr;
+  ChannelConfig config_;
+  // own
+  struct ibv_qp *ibv_qp_ = nullptr;
+public:
+  auto* qp() const noexcept {
+    return ibv_qp_;
+  }
+
+  const auto& config() const noexcept {
+    return config_;
+  }
+  auto* verbs() const noexcept {
+    return verbs_;
+  }
+
+  ZYChannel(ZYXContext *ctx,
+            IbvDevice *ibv_device,
+            Verbs *verbs,
+            ibv_comp_channel *ibv_cc,
+            ibv_cq *ibv_cq,
+            ChannelConfig config):
+    ctx_(ctx)
+    , ibv_device_(ibv_device)
+    , verbs_(verbs)
+    , ibv_cc_(ibv_cc)
+    , ibv_cq_(ibv_cq)
+    , config_(config) {}
+
+  ~ZYChannel() {
+    abort();
+  }
+
+  uint64_t GetMetric(const std::string &metric) override {
+    abort();
+    return 1;
+  }
+
+  std::shared_ptr<Stats> GetStats() override {
+    abort();
+    return nullptr;
+  }
+
+  BarexResult Send(
+    memp_t data,
+    bool auto_release = true,
+    x_msg_header header = {0},
+    DoneCallback done = [](Status s) {},
+    bool done_inline = true) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+
+  BarexResult WriteSingle(
+    memp_t data,
+    uint64_t remote_addr,
+    uint32_t rkey,
+    bool signal_peer = true,
+    uint32_t imm_data = 0,
+    DoneCallback done = [](Status s) {},
+    bool done_inline = true,
+    uint64_t r_ttl_ms = UINT64_MAX) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+
+  BarexResult WriteBatch(
+    std::vector<rw_memp_t> &datas, DoneCallback done = [](Status s) {}, bool done_inline = true) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+
+  BarexResult WriteBySgList(
+    std::vector<memp_t> &datas,
+    uint64_t remote_addr,
+    uint32_t rkey,
+    bool signal_peer = true,
+    uint32_t imm_data = 0,
+    DoneCallback done = [](Status s) {},
+    bool done_inline = true,
+    uint64_t r_ttl_ms = UINT64_MAX) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+
+  /** 使用RDMA write 探测对方是否活着 */
+  BarexResult WriteHeartbeat(
+    DoneCallback done = [](Status s) {}, bool done_inline = true) override {
+    done(Status::OK());
+    return BAREX_SUCCESS;
+  }
+
+  BarexResult ReadSingle(
+    memp_t data,
+    uint64_t remote_addr,
+    uint32_t rkey,
+    DoneCallback done = [](Status s) {},
+    bool done_inline = true,
+    uint64_t r_ttl_ms = UINT64_MAX) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+
+  BarexResult ReadBatch(
+    std::vector<rw_memp_t> &datas, DoneCallback done = [](Status s) {}, bool done_inline = true) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+
+  BarexResult ReadBySgList(
+    std::vector<memp_t> &datas,
+    uint64_t remote_addr,
+    uint32_t rkey,
+    DoneCallback done = [](Status s) {},
+    bool done_inline = true,
+    uint64_t r_ttl_ms = UINT64_MAX) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+
+  BarexResult Incubate() override {
+    ibv_pd *pd = ibv_device_->GetIbvPd();
+    local_nic_id_ = ibv_device_->GetId();
+    struct ibv_qp_init_attr qp_init_attr;
+    memset(&qp_init_attr, 0, sizeof(qp_init_attr));
+    // send/recv use the same cq
+    qp_init_attr.send_cq = ibv_cq_;
+    qp_init_attr.recv_cq = ibv_cq_;
+    qp_init_attr.cap.max_send_wr = config_.soft_tx_depth;
+    qp_init_attr.cap.max_recv_wr = config_.rx_depth;
+    qp_init_attr.cap.max_send_sge = config_.max_sge;
+    qp_init_attr.sq_sig_all = 0;
+    if (Env::Instance().GetUseErdma()) {
+        qp_init_attr.cap.max_recv_sge = ERDMA_MAX_RECV_SGE;
+        qp_init_attr.cap.max_inline_data = ERDMA_MAX_INLINE_SIZE;
+    } else {
+        qp_init_attr.cap.max_recv_sge = config_.max_sge;
+        qp_init_attr.cap.max_inline_data = BAREX_MAX_INLINE_DATA;
+    }
+    qp_init_attr.qp_type = IBV_QPT_RC;
+    struct ibv_qp *qp = verbs_->IbvCreateQp(pd, &qp_init_attr);
+    ibv_qp_ = qp;
+    printf(">>>>>>> tx_depth=%u soft_tx_depth=%u qp=%p cp=%p\n", config_.tx_depth, config_.soft_tx_depth, qp, ibv_cq_);
+    return BAREX_SUCCESS;
+  }
+
+  BarexResult GetInitData(ChannelInitMeta &out) override {
+    SimpleQpInfo qp_info;
+    qp_info.qp_num = ibv_qp_->qp_num;
+    qp_info.psn = 0;
+    qp_info.lid = ibv_device_->GetIbvPortAttr().lid;
+    ibv_gid gid = ibv_device_->GetIbvGid(tcp_type_);
+
+    memcpy(qp_info.gid, &gid, BAREX_GID_SIZE);
+    qp_info.heartbeat_addr = 0;
+    qp_info.heartbeat_key = 0;
+    qp_info.nic_id = ibv_device_->GetId();
+
+    out.context = (uint64_t)ctx_;
+    // 用父类的指针
+    XChannel *ch = this;
+    out.channel = (uint64_t)ch;
+    out.qp_infos.push_back(qp_info);
+
+    return BAREX_SUCCESS;
+  }
+
+  BarexResult Init(ChannelInitMeta peer_init_meta) override {
+    traffic_class = Env::Instance().GetTrafficClass();
+    if (traffic_class) {
+        LogInfo("XChannelImpl::Init, set traffic_class = %d, %s", traffic_class, ToString().c_str());
+    }
+    SimpleQpInfo &qp_info = peer_init_meta.qp_infos[0];
+    peer_nic_id_ = qp_info.nic_id;
+    uint32_t target_qp_num = qp_info.qp_num;
+    uint16_t target_lid = qp_info.lid;
+    uint8_t *dgid = qp_info.gid;
+
+    int ret = 0;
+    /* change QP state to INIT */
+    struct ibv_qp_attr qp_attr;
+    memset(&qp_attr, 0, sizeof(struct ibv_qp_attr));
+    qp_attr.qp_state = IBV_QPS_INIT;
+    qp_attr.pkey_index = 0;
+    qp_attr.port_num = config_.ib_port;
+    qp_attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
+    ret = verbs_->IbvModifyQp(ibv_qp_, &qp_attr, IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS);
+    RTCHECK(ret == 0);
+    /* Change QP state to RTR */
+    memset(&qp_attr, 0, sizeof(struct ibv_qp_attr));
+    qp_attr.qp_state = IBV_QPS_RTR;
+    qp_attr.path_mtu = config_.mtu;
+    qp_attr.dest_qp_num = target_qp_num;
+    qp_attr.rq_psn = qp_info.psn;
+    qp_attr.max_dest_rd_atomic = config_.max_dest_rd_atomic;
+    qp_attr.min_rnr_timer = config_.min_rnr_timer;
+    if (target_lid == 0) { // RoCE
+        qp_attr.ah_attr.is_global = 1;
+    } else { // IB
+        qp_attr.ah_attr.is_global = 0;
+    }
+    qp_attr.ah_attr.dlid = target_lid;
+    qp_attr.ah_attr.sl = 0;
+    qp_attr.ah_attr.src_path_bits = 0;
+    qp_attr.ah_attr.port_num = config_.ib_port;
+    memcpy(&qp_attr.ah_attr.grh.dgid, dgid, 16);
+    qp_attr.ah_attr.grh.flow_label = 0;
+    qp_attr.ah_attr.grh.hop_limit = 8;
+    qp_attr.ah_attr.grh.sgid_index = ibv_device_->GetIbvGidIndex(tcp_type_);
+    qp_attr.ah_attr.grh.traffic_class = traffic_class;
+
+    ret = verbs_->IbvModifyQp(ibv_qp_,
+                              &qp_attr,
+                              IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN |
+                                  IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER);
+    RTCHECK(ret == 0);
+
+    /* Change QP state to RTS */
+    memset(&qp_attr, 0, sizeof(struct ibv_qp_attr));
+    qp_attr.qp_state = IBV_QPS_RTS;
+    qp_attr.timeout = config_.retransmit_timeout;
+    qp_attr.retry_cnt = config_.retry_cnt;
+    qp_attr.rnr_retry = config_.rnr_retry;
+    qp_attr.sq_psn = 0;
+    qp_attr.max_rd_atomic = config_.max_rd_atomic;
+    ret = verbs_->IbvModifyQp(ibv_qp_,
+                              &qp_attr,
+                              IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN |
+                                  IBV_QP_MAX_QP_RD_ATOMIC);
+    RTCHECK(ret == 0);
+    return BAREX_SUCCESS;
+  }
+
+  BarexResult GetCloseData(ChannelCloseMeta &out) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+
+  BarexResult Close() override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+
+  BarexResult Destroy() override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+
+  bool IsActive() override { return true; }
+
+  XChannel::ChannelState CurrentState() {
+    abort();
+    return XChannel::INIT_SUCCESS;
+  }
+
+  bool IsServerChannel() override {
+    return config_.is_server_channel;
+  }
+
+  std::string ToString() override {
+    return "zyxchannel";
+  }
+
+  XContext *GetContext() override {
+    abort();
+    return nullptr;
+  }
+
+  XSimpleMempool *GetMempool() override {
+    abort();
+    return nullptr;
+  }
+
+  BarexResult
+  AllocBuffer(memp_t &out, uint64_t size, device_type d_type, int device_id = 0, void *attr = nullptr) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+  BarexResult
+  AllocLimitBuffer(memp_t &out, uint64_t size, device_type d_type, int device_id = 0, void *attr = nullptr) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+  BarexResult
+  AllocBuffersAsync(std::vector<mem_config> &mem_configs, std::function<void(std::vector<memp_t>, BarexResult)> done, int device_id = 0, bool limited = true, void *attr = nullptr) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+  BarexResult ReleaseBuffer(void *buf, device_type d_type) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+  BarexResult ReleaseAndDeregBuffer(void *to_free, device_type d_type) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+  BarexResult FindBufferMr(memp_t &out, void *buf, device_type d_type, int nic_id = -1, bool adopt = false) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+  BarexResult RegUserMr(void *buf, uint64_t size, device_type d_type, int device_id = 0) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+  BarexResult RegUserMr(memp_t &out, void *buf, uint64_t size, device_type d_type, int device_id = 0) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+  BarexResult DeregUserMr(void *buf, device_type d_type) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+  void* GetMemptMrAddr(const memp_t& mem) override {
+    abort();
+    return nullptr;
+  }
+  uint32_t GetMemptMrRkey(const memp_t& mem) override {
+    abort();
+    return 0;
+  }
+  bool SetUserData(std::string key, std::shared_ptr<XChannel::UserData> data) override {
+    abort();
+    return false;
+  }
+  std::shared_ptr<XChannel::UserData> GetUserData(std::string key) override {
+    abort();
+    return nullptr;
+  }
+  std::shared_ptr<XChannel::UserData> RemoveUserData(std::string key) override {
+    abort();
+    return nullptr;
+  }
+
+  bool NoInflightWorkRequest() override {
+    abort();
+    return false;
+  }
+
+  void SetLocalAddrAndPort(const std::string &addr, int port) override {
+    local_addr_ = addr;
+    local_port_ = port;
+  }
+
+  void SetPeerAddrAndPort(const std::string &addr, int port) override {
+    peer_addr_ = addr;
+    peer_port_ = port;
+  }
+
+  void SetTcpType(TcpProtoType tcp_type) override {
+    tcp_type_ = tcp_type;
+  }
+
+  TcpProtoType GetTcpType() override {
+    return tcp_type_;
+  }
+
+  std::pair<std::string, int> GetPeerAddrAndPort() override { return std::make_pair<>(peer_addr_, peer_port_); }
+
+  std::pair<std::string, int> GetLocalAddrAndPort() override { return std::make_pair<>(local_addr_, local_port_); }
+
+  void UpdateLastestAliveTime() override { lastest_alive_ts_.store(current_microseconds()); }
+
+  int GetLocalNicId() override { return local_nic_id_; }
+
+  int GetPeerNicId() override { return peer_nic_id_; };
+
+  ConnectedHook GetConnectedHook() override {
+    return nullptr;
+  }
+  bool CheckConfig(ChannelConfig &config) override {
+    abort();
+    return true;
+  }
+};
+
+class ZYXContext : public XContext {
+  ContextConfig config_;
+  // not own
+  IbvDevice *ibv_device_ = nullptr;
+  Verbs *const verbs_ = new RealVerbs();
+  struct ibv_cq *ibv_cq_ = nullptr;
+private:
+
+  void MergeEnvConfig() {
+    Env &env = Env::Instance();
+    uint32_t env_tx_depth = env.GetTxDepth();
+    uint32_t env_soft_tx_depth = env.GetSoftTxDepth();
+    uint32_t env_rx_depth = env.GetRxDepth();
+    uint32_t env_max_sge = env.GetMaxSge();
+    uint32_t env_min_rnr_timer = env.GetMinRnrTimer();
+    uint32_t env_rnr_retry = env.GetRnrRetry();
+    uint32_t env_retransmit_timeout = env.GetRetransmitTimeout();
+    uint32_t env_retry_cnt = env.GetRetryCnt();
+    uint32_t env_small_msg_size = env.GetSmallMsgSize();
+    uint32_t env_ib_port = env.GetIbPort();
+    uint32_t env_cq_entries = env.GetContextCqe();
+    uint32_t env_busy_poll_count = env.GetBusyPollCnt();
+    uint32_t env_post_recv_batch_size = env.GetPostRecvBatchSize();
+    TimerTick env_heartbeat_interval = env.GetHeartbeatInTick();
+    ibv_mtu env_ibv_mtu = env.GetIbvMtu();
+    uint32_t env_max_dest_rd_atomic = env.GetMaxDestRdAtomic();
+    uint32_t env_max_rd_atomic = env.GetMaxRdAtomic();
+
+    if (env.IsTxDepthSet() && env_tx_depth != config_.tx_depth) {
+        LogInfo("replace tx_depth(%u) with env value: %u, %s", config_.tx_depth, env_tx_depth, ToString().c_str());
+        config_.tx_depth = env_tx_depth;
+    }
+    if (env.IsSoftTxDepthSet() && env_soft_tx_depth != config_.soft_tx_depth) {
+        LogInfo("replace soft_tx_depth(%u) with env value: %u, %s", config_.soft_tx_depth, env_soft_tx_depth, ToString().c_str());
+        config_.soft_tx_depth = env_soft_tx_depth;
+    }
+    if (env.IsRxDepthSet() && env_rx_depth != config_.rx_depth) {
+        LogInfo("replace rx_depth(%u) with env value: %u, %s", config_.rx_depth, env_rx_depth, ToString().c_str());
+        config_.rx_depth = env_rx_depth;
+    }
+    if (env.IsMaxSgeSet() && env_max_sge != config_.max_sge) {
+        LogInfo("replace max_sge(%u) with env value: %u, %s", config_.max_sge, env_max_sge, ToString().c_str());
+        config_.max_sge = env_max_sge;
+    }
+    if (env.IsMinRnrTimerSet() && env_min_rnr_timer != config_.min_rnr_timer) {
+        LogInfo("replace min_rnr_timer(%u) with env value: %u, %s",
+                config_.min_rnr_timer,
+                env_min_rnr_timer,
+                ToString().c_str());
+        config_.min_rnr_timer = env_min_rnr_timer;
+    }
+    if (env.IsRnrRetrySet() && env_rnr_retry != config_.rnr_retry) {
+        LogInfo("replace rnr_retry(%u) with env value: %u, %s", config_.rnr_retry, env_rnr_retry, ToString().c_str());
+        config_.rnr_retry = env_rnr_retry;
+    }
+    if (env.IsRetransmitTimeoutSet() && env_retransmit_timeout != config_.retransmit_timeout) {
+        LogInfo("replace retransmit_timeout(%u) with env value: %u, %s",
+                config_.retransmit_timeout,
+                env_retransmit_timeout,
+                ToString().c_str());
+        config_.retransmit_timeout = env_retransmit_timeout;
+    }
+    if (env.IsRetryCntSet() && env_retry_cnt != config_.retry_cnt) {
+        LogInfo("replace retry_cnt(%u) with env value: %u, %s", config_.retry_cnt, env_retry_cnt, ToString().c_str());
+        config_.retry_cnt = env_retry_cnt;
+    }
+    if (env.IsSmallMsgSizeSet() && env_small_msg_size != config_.small_msg_size) {
+        LogInfo("replace small_msg_size(%u) with env value: %u, %s",
+                config_.small_msg_size,
+                env_small_msg_size,
+                ToString().c_str());
+        config_.small_msg_size = env_small_msg_size;
+    }
+    if (env.IsIbPortSet() && env_ib_port != config_.ib_port) {
+        LogInfo("replace ib_port(%u) with env value: %u, %s", config_.ib_port, env_ib_port, ToString().c_str());
+        config_.ib_port = env_ib_port;
+    }
+    if (env.IsContextCqeSet() && env_cq_entries != config_.cq_entries) {
+        LogInfo(
+            "replace cq_entries(%u) with env value: %u, %s", config_.cq_entries, env_cq_entries, ToString().c_str());
+        config_.cq_entries = env_cq_entries;
+    }
+    if (env.IsBusyPollCntSet() && env_busy_poll_count != config_.busy_poll_count) {
+        LogInfo("replace busy_poll_count(%u) with env value: %u, %s",
+                config_.busy_poll_count,
+                env_busy_poll_count,
+                ToString().c_str());
+        config_.busy_poll_count = env_busy_poll_count;
+    }
+    if (env.IsPostRecvBatchSizeSet() && env_post_recv_batch_size != config_.post_recv_batch_size) {
+        LogInfo("replace post_recv_batch_size(%u) with env value: %u, %s",
+                config_.post_recv_batch_size,
+                env_post_recv_batch_size,
+                ToString().c_str());
+        config_.post_recv_batch_size = env_post_recv_batch_size;
+    }
+    if (env.IsHeartbeatTickSet() && env_heartbeat_interval != config_.heartbeat_interval) {
+        LogInfo("replace heartbeat_interval(%u) with env value: %u, %s",
+                config_.heartbeat_interval,
+                env_heartbeat_interval,
+                ToString().c_str());
+        config_.heartbeat_interval = env_heartbeat_interval;
+    }
+    if (env.IsIbvMtuSet() && env_ibv_mtu != config_.mtu) {
+        LogInfo("replace ibv_mtu(%u) with env value: %u, %s",
+                config_.mtu,
+                env_ibv_mtu,
+                ToString().c_str());
+        config_.mtu = env_ibv_mtu;
+    }
+    if (env.IsMaxDestRdAtomicSet() && env_max_dest_rd_atomic != config_.max_dest_rd_atomic) {
+        LogInfo("replace max_dest_rd_atomic(%u) with env value: %u, %s", config_.max_dest_rd_atomic, env_max_dest_rd_atomic, ToString().c_str());
+        config_.max_dest_rd_atomic = env_max_dest_rd_atomic;
+    }
+    if (env.IsMaxRdAtomicSet() && env_max_rd_atomic != config_.max_rd_atomic) {
+        LogInfo("replace max_rd_atomic(%u) with env value: %u, %s", config_.max_rd_atomic, env_max_rd_atomic, ToString().c_str());
+        config_.max_rd_atomic = env_max_rd_atomic;
+    }
+  }
+
+public:
+  ZYXContext(ContextConfig config, IbvDevice* dev): config_(config), ibv_device_(dev) {
+  }
+  BarexResult Init() override {
+    MergeEnvConfig();
+    auto* ibv_ctx = ibv_device_->GetIbvContext();
+    ibv_cq_ = verbs_->IbvCreateCq(ibv_ctx, config_.cq_entries, nullptr, nullptr, 0);
+    return BAREX_SUCCESS;
+  }
+  BarexResult Start() override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+  BarexResult Shutdown() override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+  bool IsStopped() override {
+    abort();
+    return false;
+  }
+  BarexResult WaitStop() override {
+    pause();
+    return BAREX_SUCCESS;
+  }
+  uint64_t GetMetric(const std::string &metric) override {
+    abort();
+    return 0;
+  }
+  BarexResult SpawnChannel(XChannel *&out, bool is_server) override {
+    ChannelConfig ch_config;
+    ch_config.tx_depth = config_.tx_depth;
+    ch_config.soft_tx_depth = config_.soft_tx_depth;
+    ch_config.rx_depth = config_.rx_depth;
+    ch_config.post_recv_batch_size = config_.post_recv_batch_size;
+    ch_config.max_sge = config_.max_sge;
+    ch_config.min_rnr_timer = config_.min_rnr_timer;
+    ch_config.retransmit_timeout = config_.retransmit_timeout;
+    ch_config.retry_cnt = config_.retry_cnt;
+    ch_config.rnr_retry = config_.rnr_retry;
+    ch_config.small_msg_size = config_.small_msg_size;
+    ch_config.ib_port = config_.ib_port;
+    ch_config.max_dest_rd_atomic = config_.max_dest_rd_atomic;
+    ch_config.max_rd_atomic = config_.max_rd_atomic;
+    ch_config.auto_release_recv_buf = config_.auto_release_recv_buf;
+    ch_config.heartbeat_interval = config_.heartbeat_interval;
+    ch_config.mtu = config_.mtu;
+    ch_config.is_server_channel = is_server;
+    auto* channel = new ZYChannel(this, ibv_device_, verbs_, nullptr, ibv_cq_, ch_config);
+    out = channel;
+    return BAREX_SUCCESS;
+  }
+  BarexResult DestroyChannel(XChannel *channel) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+  BarexResult DeleteVirginChannel(XChannel *channel) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+  bool IsValidChannel(XChannel *channel) override {
+    abort();
+    return false;
+  }
+  int ActiveChannelsCount() override {
+    abort();
+    return 0;
+  }
+  int DestroyedChannelsCount() override {
+    abort();
+    return 0;
+  }
+  int GetEventFd() override {
+    abort();
+    return -1;
+  }
+  int ProgressEvents() override {
+    abort();
+    return -1;
+  }
+  XDevice *GetXDevice() override {
+    abort();
+    return nullptr;
+  }
+  XThreadpool *SetThreadpool(XThreadpool *threadpool) override {
+    abort();
+    return nullptr;
+  }
+  XSimpleMempool *GetMempool() override {
+    abort();
+    return nullptr;
+  }
+  BarexResult SetChannelConnectedHook(ConnectedHook hook) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+  BarexResult SetChannelClosedHook(ClosedHook hook) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+  std::string ToString() override {
+    return "zyxcontext";
+  }
+  BarexResult AddTimer(uint64_t &timer_id, TimerTick time, TimerCall call) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+  BarexResult AddRepeatTimer(uint64_t &timer_id, TimerTick time, RepeatTimerCall call) override {
+    abort();
+    return BAREX_SUCCESS;
+  }
+  bool CancelOneTimer(uint64_t timer_id) override {
+    abort();
+    return true;
+  }
+  bool CheckConfig(ContextConfig &config) override {
+    abort();
+    return false;
+  }
+  bool IsActive() override {
+    return true;
+  }
+  auto* cq() const noexcept {
+    return ibv_cq_;
+  }
+  auto* verbs() const noexcept {
+    return verbs_;
+  }
+};
+#endif
 
 struct BarexCtx {
   XDeviceManager *manager = nullptr;
@@ -179,6 +835,14 @@ static std::vector<int> env_src_block_ids() {
   if (start < line.length()) {
     result.push_back(std::stoi(line.substr(start)));
   }
+  RTCHECK(result.size() > 0);
+  if (result.size() == 1) {
+    auto n = result[0];
+    result.clear();
+    for (int i = 0; i < n; ++i) {
+      result.emplace_back(i);
+    }
+  }
   return result;
 }
 
@@ -202,9 +866,9 @@ static std::future<T> make_exp_future(E ex) {
   // std::promise<void> pr;
   auto pr = std::make_shared<std::promise<void>>();
   auto fut = pr->get_future();
-  auto &datas = *datasp;
+  auto datas = datasp;
 
-  auto result = ch->WriteBatch(datas,
+  auto result = ch->WriteBatch(std::move(datas),
                                [pr = std::move(pr), d = std::move(datasp)](Status s) mutable {
                                  // WriteBatch 要求 datasp 直至 callback 中才能回收.
                                  if (!s.IsOk()) {
@@ -323,15 +987,20 @@ BarexCtx BarexCtx::setup() {
   size_t kvcache_size = env_block_size() * env_block_number();
   void* const buf = gpu_allocator->Alloc(kvcache_size, gpuid, nullptr /* attr */, 512 /* align */);
   ret.mp->RegUserMr(ret.mr, buf, kvcache_size, GPU, gpuid);
-  printf("RegUserMr. buf=%p bufsize=%lu gpuid=%d rkey=%u\n", buf, kvcache_size, gpuid, ret.mr.mr->rkey);
+  printf(">>>>>>> RegUserMr. buf=%p bufsize=%lu gpuid=%d rkey=%u\n", buf, kvcache_size, gpuid, ret.mr.mr->rkey);
 
   result = XThreadpool::NewInstance(ret.tp, 4, "tp");
   RTCHECK(result == BAREX_SUCCESS);
 
   ContextConfig config = XConfigUtil::DefaultContextConfig();
+#ifdef ENABLE_IBVERBS_BENCH
+  ret.xctx = new ZYXContext(config, dynamic_cast<IbvDevice *>(ret.nic_dev));
+  ret.xctx->Init();
+#else
   result = XContext::NewInstance(ret.xctx, config, new FackCb(), ret.nic_dev, ret.mp, ret.tp);
   RTCHECK(result == BAREX_SUCCESS);
   ret.xctx->Start();
+#endif
 
   return ret;
 }
@@ -505,36 +1174,282 @@ static std::vector<IpcBlock> parse_block_send_p_lt_d() {
   return send_blocks;
 }
 
+#ifdef ENABLE_IBVERBS_BENCH
+struct RWInfo {
+  ibv_sge local;
+  uint64_t raddr;
+  uint32_t rkey;
+};
+
+class QPState {
+  const std::vector<RWInfo>& rwinfo_;
+  const uint64_t start_;
+  const uint64_t end_;
+  ZYChannel* const ch_;
+  const uint64_t qpid_;
+  uint64_t sent_;  // < sent_ 为已经 post send 的.
+  uint64_t acked_;  // < acked_ 为 post send ack 的.
+  std::vector<ibv_sge> sges_;
+  std::vector<ibv_send_wr> wrs_;
+public:
+
+  QPState(uint64_t qpid, ZYChannel* ch, const std::vector<RWInfo>& rwinfo, uint64_t start, uint64_t end):
+    rwinfo_(rwinfo), start_(start), end_(end), ch_(ch), qpid_(qpid << 48) {
+    size_t wrsize = ch_->config().soft_tx_depth;
+    sges_.resize(wrsize);
+    wrs_.resize(wrsize);
+    assert(qpid < 32);
+    assert(!sges_.empty());
+    memset(wrs_.data(), 0, wrsize * sizeof(ibv_send_wr));
+    memset(sges_.data(), 0, wrsize * sizeof(ibv_sge));
+    size_t i = 0;
+    for (; i + 1 < wrsize; ++i) {
+      wrs_[i].next = &wrs_[i + 1];
+      wrs_[i].sg_list = &sges_[i];
+      wrs_[i].num_sge = 1;
+      wrs_[i].opcode = IBV_WR_RDMA_WRITE;
+    }
+    assert(i == wrsize - 1);
+    wrs_[i].next = nullptr;
+    wrs_[i].sg_list = &sges_[i];
+    wrs_[i].num_sge = 1;
+    wrs_[i].opcode = IBV_WR_RDMA_WRITE;
+    rewind();
+  }
+
+  bool finished() const noexcept {
+    return acked_ >= end_;
+  }
+
+  void rewind() noexcept {
+    sent_ = start_;
+    acked_ = start_;
+  }
+
+  void ack(uint64_t acked) noexcept {
+    assert(acked > start_);
+    assert(acked <= end_);
+    acked_ = acked;
+  }
+
+  void send(uint64_t cap) noexcept {
+    auto& self = *this;
+    const auto& cfg = self.ch_->config();
+    assert(cfg.soft_tx_depth % cfg.tx_depth == 0);
+    assert(cap == cfg.soft_tx_depth || cap == cfg.tx_depth);
+    if (self.sent_ >= self.end_) {
+      return;
+    }
+
+    uint64_t const n = std::min(cap, self.end_ - self.sent_);
+    uint64_t const sent_end = n + self.sent_;
+    assert(sent_end <= self.end_);
+    uint32_t signed_cnt = cdiv(self.end_ - sent_end, cfg.tx_depth);
+    uint32_t signed_wrcnt = 0;
+    size_t start_idx = self.wrs_.size() - n;
+    auto* const start_wr = &self.wrs_[start_idx];
+
+    for (; self.sent_ < sent_end; ++self.sent_, ++start_idx) {
+      auto& wr = self.wrs_[start_idx];
+      const auto& wrinfo = self.rwinfo_[self.sent_];
+      *wr.sg_list = wrinfo.local;
+      wr.wr.rdma.remote_addr = wrinfo.raddr;
+      wr.wr.rdma.rkey = wrinfo.rkey;
+      ++signed_wrcnt;
+      if (signed_wrcnt == cfg.tx_depth && signed_cnt > 0) {
+        --signed_cnt;
+        signed_wrcnt = 0;
+        wr.send_flags = IBV_SEND_SIGNALED;
+        wr.wr_id = self.qpid_ | self.sent_;
+      } else {
+        wr.send_flags = 0;
+      }
+    }
+    assert(start_idx == self.wrs_.size());
+    if (self.sent_ >= self.end_) {
+      auto& wr = self.wrs_.back();
+      wr.send_flags = IBV_SEND_SIGNALED;
+      wr.wr_id = self.qpid_ | self.sent_;
+    }
+
+    struct ibv_send_wr* bad_wr = nullptr;
+    int ret = self.ch_->verbs()->IbvPostSend(self.ch_->qp(), start_wr, &bad_wr);
+    RTCHECK(ret == 0);
+    return;
+  }
+
+  const auto& config() const noexcept {
+    return ch_->config();
+  }
+};
+
+static bool finished(const std::vector<QPState>& qps) noexcept {
+  for (const auto& qp : qps) {
+    if (!qp.finished()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static void do_writebatch(ZYXContext& ctx, std::vector<QPState>& qps) {
+  const auto& cfg = qps.front().config();
+  for (auto& qp : qps) {
+    qp.send(cfg.soft_tx_depth);
+  }
+  uint64_t finished_qp = 0;
+  static constexpr int wccap = 256;
+  struct ibv_wc wcs[wccap];
+  while (true) {
+    int ret = ctx.verbs()->IbvPollCq(ctx.cq(), wccap, wcs);
+    RTCHECK(ret >= 0);
+    for (int wcidx = 0; wcidx < ret; ++wcidx) {
+      const auto& wc = wcs[wcidx];
+      RTCHECK(wc.opcode == IBV_WC_RDMA_WRITE);
+      RTCHECK(wc.status == IBV_WC_SUCCESS);
+      uint64_t qpidx = wc.wr_id >> 48;
+      uint64_t acked = wc.wr_id & ((1ul << 48) - 1);
+      auto& qp = qps[qpidx];
+      qp.ack(acked);
+      if (qp.finished()) {
+        ++finished_qp;
+        if (finished_qp == qps.size()) {
+          return;
+        }
+        continue;
+      }
+      qp.send(cfg.tx_depth);
+    }
+    if (ret < wccap) {
+      sched_yield();
+    }
+  }
+}
+#endif
+
 
 std::tuple<uint64_t, uint64_t, uint64_t> method_writebatch(ClientCtx& ctx, const int rounds, std::vector<IpcBlock>& sb) {
   auto rkey = (uint32_t)env_server_rkey();
   auto rladdr = uint64_t(env_server_addr());
 
+#ifdef ENABLE_IBVERBS_BENCH
+  ZYXContext* zyctx = dynamic_cast<ZYXContext*>(ctx.ctx.xctx);
+
+  std::vector<RWInfo> rwinfos;
+  rwinfos.reserve(sb.size());
+  size_t sb_min = UINT64_MAX, sb_max = 0, sb_total = 0;
+  auto prepare_now = std::chrono::steady_clock::now();
+  for (const auto& sb1 : sb) {
+    sb_min = std::min(sb_min, sb1.length);
+    sb_max = std::max(sb_max, sb1.length);
+    sb_total += sb1.length;
+
+    auto& rwinfo = rwinfos.emplace_back();
+    rwinfo.local.addr = uint64_t(ctx.ctx.mr.buf + sb1.src_offset);
+    rwinfo.local.length = sb1.length;
+    rwinfo.local.lkey = ctx.ctx.mr.mr->lkey;
+    rwinfo.raddr = rladdr + sb1.dst_offset;
+    rwinfo.rkey = rkey;
+  }
+  auto prepare_end = std::chrono::steady_clock::now();
+  uint64_t dur_ns = std::chrono::nanoseconds(prepare_end - prepare_now).count();
+  printf(">>>>>> sb_min=%lu sb_max=%lu sb_total=%lu sb_cnt=%lu dur_ns=%lu\n", sb_min, sb_max, sb_total, sb.size(), dur_ns);
+
+  std::vector<QPState> qps;
+  qps.reserve(ctx.chs().size());
+  uint64_t const qpsize = cdiv(rwinfos.size(), ctx.chs().size());
+  for (uint64_t qpidx = 0; qpidx < ctx.chs().size(); ++qpidx) {
+    uint64_t const rwstart = qpidx * qpsize;
+    assert(rwstart < rwinfos.size());
+    uint64_t const rwcnt = std::min(qpsize, rwinfos.size() - rwstart);
+    auto* zyc = dynamic_cast<ZYChannel*>(ctx.chs()[qpidx]);
+    qps.emplace_back(qpidx, zyc, rwinfos, rwstart, rwstart + rwcnt);
+  }
   uint64_t max = 0;
   uint64_t min = UINT64_MAX;
   uint64_t sum = 0;
   for (int i = 0; i < rounds; ++i) {
     auto now = std::chrono::steady_clock::now();
+    do_writebatch(*zyctx, qps);
+    uint64_t dur_ns = std::chrono::nanoseconds(std::chrono::steady_clock::now() - now).count();
+    max = std::max(max, dur_ns);
+    min = std::min(min, dur_ns);
+    sum += dur_ns;
+
+    for (auto& qp : qps) {
+      qp.rewind();
+    }
+  }
+#else
+  size_t sb_min = UINT64_MAX, sb_max = 0, sb_total = 0;
+  for (const auto& sb1 : sb) {
+    sb_min = std::min(sb_min, sb1.length);
+    sb_max = std::max(sb_max, sb1.length);
+    sb_total += sb1.length;
+  }
+  printf(">>>>>> sb_min=%lu sb_max=%lu sb_total=%lu sb_cnt=%lu\n", sb_min, sb_max, sb_total, sb.size());
+
+  uint64_t max = 0;
+  uint64_t min = UINT64_MAX;
+  uint64_t sum = 0;
+  uint64_t prepare_max = 0;
+  uint64_t prepare_min = UINT64_MAX;
+  uint64_t prepare_sum = 0;
+  size_t const sbperch = cdiv(sb.size(), ctx.chs().size());
+  std::vector<std::future<void>> futs;
+  futs.reserve(ctx.chs().size());
+  std::vector<ibv_sge> sges;
+  sges.reserve(sb.size());
+  for (int i = 0; i < rounds; ++i) {
+    auto now = std::chrono::steady_clock::now();
+
     auto datasp = std::make_shared<std::vector<rw_memp_t>>();
+    datasp->reserve(sbperch);
     for (const auto &[src_offset, dst_offset, len] : sb) {
       if (len <= 0) {
         continue;
       }
 
-      auto src_mr = ctx.ctx.mr;
-      src_mr.buf += src_offset;
-      src_mr.buf_len = len;
-
-      uint64_t raddr = rladdr + dst_offset;
-      datasp->emplace_back(rw_memp_t{std::move(src_mr), raddr, rkey});
+      auto& sge = sges.emplace_back();
+      sge.addr = uintptr_t(ctx.ctx.mr.buf) + src_offset;
+      sge.length = len;
+      sge.lkey = ctx.ctx.mr.mr->lkey;
+      auto rwmemp = rw_memp_t();
+      rwmemp.r_addr = rladdr + dst_offset;
+      rwmemp.r_key = rkey;
+      rwmemp.sg = &sge;
+      datasp->emplace_back(std::move(rwmemp));
+      if (datasp->size() >= sbperch) {
+        auto fut = WriteBatch(ctx.ch(), std::move(datasp));
+        futs.emplace_back(std::move(fut));
+        datasp = std::make_shared<std::vector<rw_memp_t>>();
+        datasp->reserve(sbperch);
+      }
     }
+    if (!datasp->empty()) {
+      auto fut = WriteBatch(ctx.ch(), std::move(datasp));
+      futs.emplace_back(std::move(fut));
+    }
+    auto copy_end = std::chrono::steady_clock::now();
 
-    WriteBatch(ctx.chs(), std::move(datasp));
-    uint64_t dur_ns = std::chrono::nanoseconds(std::chrono::steady_clock::now() - now).count();
+    for (auto& fut : futs) {
+      fut.get();
+    }
+    auto send_end = std::chrono::steady_clock::now();
+    uint64_t dur_ns = std::chrono::nanoseconds(send_end - copy_end).count();
     max = std::max(max, dur_ns);
     min = std::min(min, dur_ns);
     sum += dur_ns;
+    uint64_t prepare_ns = std::chrono::nanoseconds(copy_end - now).count();
+    prepare_max = std::max(prepare_max, prepare_ns);
+    prepare_min = std::min(prepare_min, prepare_ns);
+    prepare_sum += prepare_ns;
+    futs.clear();
+    sges.clear();
   }
+  printf(">>>>>> prepare_min_us=%f prepare_max_us=%f prepare_avg_us=%f\n",
+        prepare_min / 1000.0, prepare_max / 1000.0, prepare_sum / 1000.0 / rounds);
+#endif
 
   return {min, max, sum};
 }
@@ -816,7 +1731,7 @@ std::tuple<uint64_t, uint64_t, uint64_t> method_copygpuwrite(ClientCtx& ctx, con
     sum += dur_ns;
   }
 
-  printf("sync_min_us=%f sync_max_us=%f sync_sum_us=%f, sync_avg_us=%f\n",
+  printf(">>>>>> sync_min_us=%f sync_max_us=%f sync_sum_us=%f, sync_avg_us=%f\n",
     double(sync_min) / 1000,
     double(sync_max) / 1000,
     double(sync_sum) / 1000,
@@ -857,7 +1772,7 @@ void client_main() {
   }
 
   int round = env_rounds();
-  printf("method=%s min_us=%f max_us=%f sum_us=%f, avg_us=%f\n",
+  printf(">>>>>>> method=%s min_us=%f max_us=%f sum_us=%f, avg_us=%f\n",
     method,
     double(min) / 1000,
     double(max) / 1000,
@@ -879,7 +1794,7 @@ int main(int argc, char** argv) {
 
 #if 0
 
-g++ -DCMAKE_INCLUDE barex_bench.cc -O2 -ggdb -DNDEBUG -laccl_barex  -std=gnu++17 -I/usr/local/cuda/targets/x86_64-linux/include /usr/local/cuda-12.4/targets/x86_64-linux/lib/libcudart.so -o kvbench
+g++ -DENABLE_BAREX_BENCH -DCMAKE_INCLUDE barex_bench.cc -O2 -ggdb -DNDEBUG -laccl_barex  -std=gnu++17 -I/usr/local/cuda/targets/x86_64-linux/include /usr/local/cuda-12.8/targets/x86_64-linux/lib/libcudart.so -o kvbench
 
 ZY_IS_SERVER=1 ZY_TOKEN_SIZE=1024 ZY_BLOCK_SIZE=65536 ZY_BLOCK_NUM=128 ZY_GPU_ID=2 ZY_SERVER_PORT=33333 ZY_NIC_DEV=vsolar_1 ./kvbench
 
