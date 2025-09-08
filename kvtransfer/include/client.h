@@ -30,7 +30,8 @@ class KvTransferClient : public noncopyable {
                   const WorkerId &,
                   uint32_t start_layer,
                   uint32_t num_layers,
-                  std::optional<TransferProtocol> = std::nullopt);
+                  std::optional<TransferProtocol> = std::nullopt,
+                  const std::optional<std::string> &dst_worker_info = std::nullopt);
   void remove_target(const InstanceId &, const WorkerId &);
 
   void submit_req_send(const InstanceId &dst_inst,
@@ -40,7 +41,8 @@ class KvTransferClient : public noncopyable {
                        uint32_t new_tokens,
                        bool has_last_token,
                        std::vector<uint32_t> src_block_ids,
-                       std::vector<uint32_t> dst_block_ids);
+                       std::vector<uint32_t> dst_block_ids,
+                       const std::optional<std::string> &dst_worker_info = std::nullopt);
 
   void submit_req_send(const InstanceId &dst_inst,
                        const WorkerId &dst_worker,

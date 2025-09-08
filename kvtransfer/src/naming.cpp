@@ -2,11 +2,9 @@
 #include <mutex>
 #include <sstream>
 #include "naming.h"
-#include "naming/tcpstore_naming.h"
-
-#include "naming/tcpstore_naming.h"
 #include "naming/eas_naming.h"
 #include "naming/filesys_naming.h"
+#include "thrid_party/logging.h"
 namespace blade_llm {
 GeneralNamingClient NamingManager::connect_naming(const InstanceId& myname, const std::string &url) {
   {
@@ -44,14 +42,12 @@ GeneralNamingClient NamingManager::connect_naming(const InstanceId& myname, cons
       ss << p.first << ",";
     }
     ss << "];";
-    throw std::runtime_error(ss.str());
+    LOG(INFO) << ss.str();
+    return GeneralNamingClient();
   }
 }
 NamingManager::NamingManager() {
   if (factories_.empty()) {
-#ifdef ENABLE_TORCH
-    factories_.emplace(TCP_NAMING_SCHEMA, std::make_unique<TCPStoreNamingFactory>());
-#endif
     factories_.emplace(EAS_NAMING_SCHEMA, std::make_unique<EASNamingClientFactory>());
     factories_.emplace(FILESYS_NAMING_SCHEMA, std::make_unique<FileSysNamingClientFactory>());
   }

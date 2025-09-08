@@ -69,14 +69,15 @@ void KvTransferClient::add_target(const InstanceId &inst_name,
                                   const WorkerId &worker_id,
                                   uint32_t start_layer,
                                   uint32_t num_layers,
-                                  std::optional<TransferProtocol> proto_opt) {
+                                  std::optional<TransferProtocol> proto_opt,
+                                  const std::optional<std::string> &worker_info) {
   auto &inst = targets_[inst_name];
   if (inst.size() <= worker_id) {
     inst.resize(worker_id + 1);
   }
   if (inst[worker_id] == nullptr) {
     try {
-      inst[worker_id] = stub_factory_->create_stub(inst_name, worker_id, start_layer, num_layers, proto_opt);
+      inst[worker_id] = stub_factory_->create_stub(inst_name, worker_id, start_layer, num_layers, proto_opt, worker_info);
     } catch (const std::exception &e) {
       LOG(ERROR) << "KVT client: connect target worker(" << inst_name << ":" << worker_id << ") failed: " << e.what();
       throw KVTransferException(ErrorKind::TARGET_CONNOT_CONNECT, e.what());
@@ -133,7 +134,8 @@ void KvTransferClient::submit_req_send(const InstanceId &dst_inst_name,
                                        uint32_t new_tokens,
                                        bool has_last_token,
                                        std::vector<uint32_t> src_block_ids,
-                                       std::vector<uint32_t> dst_block_ids) {
+                                       std::vector<uint32_t> dst_block_ids,
+                                       const std::optional<std::string> &dst_worker_info) {
 
   if (new_tokens <= 0) {
     LOG(ERROR) << "KVT client: invalid new tokens=" << new_tokens << ";";
@@ -146,7 +148,7 @@ void KvTransferClient::submit_req_send(const InstanceId &dst_inst_name,
       LOG(WARNING) << "KVT client: target worker(" << dst_inst_name << ":" << dst_worker_id
                    << ") not connected, try to connect use default transfer config;";
       auto num_layers = ctx_->num_layers();
-      add_target(dst_inst_name, dst_worker_id, 0, num_layers);
+      add_target(dst_inst_name, dst_worker_id, 0, num_layers,std::nullopt,dst_worker_info );
     } else {
       LOG(ERROR) << "KVT client: submit request(" << req_id << ") to unknown target ("
                  << dst_inst_name << ":" << dst_worker_id << "), add it first;";

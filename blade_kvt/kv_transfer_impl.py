@@ -178,9 +178,10 @@ class KVTransferClient:
         has_last_token: bool,
         src_block_ids: List[int],
         dst_block_ids: List[int],
+        dst_worker_info: Optional[str] = None,
     ):
         return self.submit_req_send2(
-            dst_inst_id, dst_worker_id, req_id, 0, new_tokens, has_last_token, src_block_ids, dst_block_ids
+            dst_inst_id, dst_worker_id, req_id, 0, new_tokens, has_last_token, src_block_ids, dst_block_ids, dst_worker_info
         )
 
     def submit_req_send2(
@@ -193,6 +194,7 @@ class KVTransferClient:
         has_last_token: bool,
         src_block_ids: List[int],
         dst_block_ids: List[int],
+        dst_worker_info: Optional[str] = None,
     ):
         """
         Submit requests which need to send kv to remote;
@@ -203,16 +205,18 @@ class KVTransferClient:
             dst_inst_id(int): the id of remote instance;
             dst_worker_id(int): the id of remote worker;
             req_id(str): the id of request, the length of id should be less than 255;
+            seen_tokens(int): number of tokens that have been seen previously;
             new_tokens(int): number of tokens that need to send,
                                 tokens from [seen_tokens, seen_tokens + new_tokens) will be sent;
             has_last_token(bool): indicate whether the last token is included in this send;
             src_block_ids(List[int]): id of blocks of the request on current worker;
             dst_block_ids(List[int]): id of blocks on remote worker the request want to send to;
+            dst_worker_info(Optional[str]): optional worker info for the destination worker;
         """
         if not self._inited:
             raise RuntimeError("KVTransferClient not inited")
         submit_req_send2(
-            dst_inst_id, dst_worker_id, req_id, seen_tokens, new_tokens, has_last_token, src_block_ids, dst_block_ids
+            dst_inst_id, dst_worker_id, req_id, seen_tokens, new_tokens, has_last_token, src_block_ids, dst_block_ids, dst_worker_info
         )
 
     def submit_delta_send(self, req_id: str, seen_tokens: int, new_tokens: int, has_last_token: bool):

@@ -226,10 +226,10 @@ static void test_parse_block_generate(int p_rank, int d_rank) {
   fbc->connect(d_info);
   auto& fbcq = fbc->q;
   auto flush_cnt = fbc->flush_cnt;
-  auto naming = FakeNamingWorkerClient(std::min(p_rank, 2), d_info);
+  auto naming = std::make_shared<FakeNamingWorkerClient>(std::min(p_rank, 2), d_info);
   auto tx = KvSendStub("1", 0, p_info, 0, num_layers,
                        std::make_unique<FakeChannelFactory>(fbc.get()),
-                       &naming);
+                       naming);
   tx.start();
   EXPECT_EQ(tx.check_state(), StubState::WORKING);
 
@@ -436,8 +436,8 @@ static void dgtp_test_parse_block_generate(int p_rank, int d_rank) {
   fbc->connect(d_info);
   auto& fbcq = fbc->q;
   auto flush_cnt = fbc->flush_cnt;
-  auto naming = FakeNamingWorkerClient(2, d_info);
-  auto tx = KvSendStub("1", 0, p_info, 0, num_layers, std::make_unique<FakeChannelFactory>(fbc.get()), &naming);
+  auto naming = std::make_shared<FakeNamingWorkerClient>(2, d_info);
+  auto tx = KvSendStub("1", 0, p_info, 0, num_layers, std::make_unique<FakeChannelFactory>(fbc.get()), naming);
   tx.start();
   EXPECT_EQ(tx.check_state(), StubState::WORKING);
 
@@ -642,8 +642,8 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
   ctx.set_block_params(bs, ts, 8);
   ctx.set_layer_data_address(0, {0, 8 * bs});
   uint32_t num_layers = 2;
-  auto naming = FakeNamingWorkerClient(2, dst_info);
-  auto tx = KvSendStub("1", 0, src_info, 0, num_layers, std::make_unique<FakeChannelFactory>(fbc.get()), &naming);
+  auto naming = std::make_shared<FakeNamingWorkerClient>(2, dst_info);
+  auto tx = KvSendStub("1", 0, src_info, 0, num_layers, std::make_unique<FakeChannelFactory>(fbc.get()), naming);
   tx.start();
   EXPECT_EQ(tx.check_state(), StubState::WORKING);
   {
@@ -926,8 +926,8 @@ TEST(SendStubTest, UseMockChannel) {
   EXPECT_CALL(channel, send_notification(_)).Times(0);
 
   {
-    auto naming = FakeNamingWorkerClient(2, dst_info);
-    auto tx = KvSendStub("1", 0, src_info, 0, num_layers, std::make_unique<FakeChannelFactory>(&channel), &naming);
+    auto naming = std::make_shared<FakeNamingWorkerClient>(2, dst_info);
+    auto tx = KvSendStub("1", 0, src_info, 0, num_layers, std::make_unique<FakeChannelFactory>(&channel), naming);
     tx.start();
     tx.send_batch(std::move(task));
     step_0->notify_layer_ready(num_layers);
@@ -1123,8 +1123,8 @@ TEST(SendStubTest, FaultTolerantTest) {
   uint32_t num_layers = 2;
 
   FTTCF fttcf;
-  auto naming = FakeNamingWorkerClient(2, dst_info);
-  auto tx = std::make_unique<KvSendStub>("1", 0, src_info, 0, num_layers, std::make_unique<ProxyChannelFactory>(&fttcf), &naming);
+  auto naming = std::make_shared<FakeNamingWorkerClient>(2, dst_info);
+  auto tx = std::make_unique<KvSendStub>("1", 0, src_info, 0, num_layers, std::make_unique<ProxyChannelFactory>(&fttcf), naming);
   tx->start();
 
   auto req1p = std::make_shared<RequestInfo>("1", 0, "1", std::vector<uint32_t>{10, 11, 12}, std::vector<uint32_t>{14, 15, 16});
@@ -1209,8 +1209,8 @@ TEST(SendStubTest, CreateChannelFaultTolerantTest) {
   uint32_t num_layers = 2;
 
   FTTCF fttcf;
-  auto naming = FakeNamingWorkerClient(3, dst_info);
-  auto tx = std::make_unique<KvSendStub>("1", 0, src_info, 0, num_layers, std::make_unique<ProxyChannelFactory>(&fttcf), &naming);
+  auto naming = std::make_shared<FakeNamingWorkerClient>(3, dst_info);
+  auto tx = std::make_unique<KvSendStub>("1", 0, src_info, 0, num_layers, std::make_unique<ProxyChannelFactory>(&fttcf), naming);
   tx->start();
 
   auto req1p = std::make_shared<RequestInfo>("1", 0, "1", std::vector<uint32_t>{10, 11, 12}, std::vector<uint32_t>{14, 15, 16});

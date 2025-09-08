@@ -85,15 +85,15 @@ class FakeSendStubFactory : public ISendStubFactory {
   const std::vector<uint64_t> dst_layer;
   Context *ctx;
   std::queue<std::string> *notifies;
-  std::unique_ptr<FakeNamingWorkerClient> naming_ = std::make_unique<FakeNamingWorkerClient>();
+  std::shared_ptr<FakeNamingWorkerClient> naming_ = std::make_shared<FakeNamingWorkerClient>();
 
   FakeSendStubFactory(Context *ctx, const std::vector<uint64_t> &dst, std::queue<std::string> &n):
     ctx(ctx), dst_layer(dst), notifies(&n) {}
   SendStub create_stub(const InstanceId& i, WorkerId w, uint32_t start_layer, uint32_t num_layers,
-                       std::optional<TransferProtocol> p) override {
+                       std::optional<TransferProtocol> p, const std::optional<std::string> &) override {
     LOG(INFO) << "Create SendStub";
     auto cf = std::make_unique<FakeChannelFactory>(ctx, dst_layer, notifies);
-    return std::make_unique<KvSendStub>(i, w, ctx->worker_info(), start_layer, num_layers, std::move(cf), naming_.get());
+    return std::make_unique<KvSendStub>(i, w, ctx->worker_info(), start_layer, num_layers, std::move(cf), naming_);
   }
 };
 

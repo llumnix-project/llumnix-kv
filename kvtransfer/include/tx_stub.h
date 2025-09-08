@@ -62,7 +62,8 @@ class ISendStubFactory {
                                WorkerId,
                                uint32_t start_layer,
                                uint32_t num_layers,
-                               std::optional<TransferProtocol> ) = 0;
+                               std::optional<TransferProtocol> ,
+                               const std::optional<std::string> &) = 0;
   virtual ~ISendStubFactory() = default;
 };
 
@@ -71,8 +72,8 @@ class KvSendStub : public ISendStub, public noncopyable {
   const InstanceId dstid_;
   const WorkerId dstworkerid_;
   const WorkerInfo src_info_;
-  // OWNER: KvSendStubFactory.naming_worker_
-  INamingWorkerClient* const naming_ = nullptr;
+  // OWNER: shared ownership with KvSendStubFactory
+  std::shared_ptr<INamingWorkerClient> naming_ = nullptr;
 
   public:
   KvSendStub(InstanceId dstid, WorkerId dstworkerid,
@@ -80,11 +81,11 @@ class KvSendStub : public ISendStub, public noncopyable {
              uint32_t start_layer,
              uint32_t num_layers,
              std::unique_ptr<IChannelFactory> channel_factory,
-             INamingWorkerClient* naming) :
+             std::shared_ptr<INamingWorkerClient> naming) :
       dstid_(std::move(dstid)),
       dstworkerid_(dstworkerid),
       src_info_(src_info),
-      naming_(naming),
+      naming_(std::move(naming)),
       start_layer_(start_layer),
       num_layers_(num_layers),
       channel_factory_(std::move(channel_factory)) {};
@@ -112,17 +113,19 @@ class KvSendStubFactory : public ISendStubFactory, public noncopyable {
   KvSendStubFactory(Context *ctx, GeneralNamingClient &&naming) :
       ctx_(ctx),
       naming_(std::move(naming)) {
-    naming_worker_ = naming_.create_naming_worker_client();
+    auto unique_naming_worker = naming_.create_naming_worker_client();
+    naming_worker_ = std::shared_ptr<INamingWorkerClient>(std::move(unique_naming_worker));
   }
 
   SendStub create_stub(const InstanceId& dst_inst_name,
                        WorkerId dst_worker_id,
                        uint32_t start_layer,
                        uint32_t num_layers,
-                       std::optional<TransferProtocol>) override;
+                       std::optional<TransferProtocol>,
+                       const std::optional<std::string> &) override;
  private:
   Context *ctx_;
-  std::unique_ptr<INamingWorkerClient> naming_worker_;
+  std::shared_ptr<INamingWorkerClient> naming_worker_;
   GeneralNamingClient naming_;
 };
 }

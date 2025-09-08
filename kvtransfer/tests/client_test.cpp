@@ -107,7 +107,7 @@ class FakeStubFactory : public ISendStubFactory {
 
   FakeStubFactory() = default;
   SendStub create_stub(const InstanceId &dst_inst, WorkerId dst_worker, uint32_t, uint32_t,
-                       std::optional<TransferProtocol> p) override {
+                       std::optional<TransferProtocol> p, const std::optional<std::string> &) override {
     for (size_t i = 0; i < stubs.size(); ++i) {
       if (stubs[i] != nullptr) {
         if (stubs[i]->dst_inst == dst_inst && stubs[i]->dst_worker == dst_worker) {

@@ -4,6 +4,7 @@
 #include "utils/socket_helper.h"
 #include "channel.h"
 #include "envcfg.h"
+#include "naming/fake_naming.h"
 #include <string.h>
 #include <unistd.h>
 #include <random>
@@ -758,11 +759,18 @@ SendStub KvSendStubFactory::create_stub(const InstanceId& dst_inst_name,
                                         WorkerId dst_worker_id,
                                         uint32_t start_layer,
                                         uint32_t num_layers,
-                                        std::optional<TransferProtocol> proto_opt) {
+                                        std::optional<TransferProtocol> proto_opt,
+                                        const std::optional<std::string> &dst_info) {
   auto channel_factory = std::make_unique<ChannelFactory>(ctx_, proto_opt);
+  std::shared_ptr<INamingWorkerClient> naming_worker;
+  if (dst_info) {
+    naming_worker = std::make_shared<FakeNamingWorkerClient>(dst_info.value());
+  } else {
+    naming_worker = naming_worker_;
+  }
   return std::make_unique<KvSendStub>(dst_inst_name, dst_worker_id, ctx_->worker_info(),
                                       start_layer, num_layers,
                                       std::move(channel_factory),
-                                      naming_worker_.get());
+                                      std::move(naming_worker));
 }
 }

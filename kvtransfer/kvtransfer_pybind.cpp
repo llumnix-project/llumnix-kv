@@ -83,7 +83,8 @@ void submit_req_send2(const std::string &dst_inst_name,
                       uint32_t new_tokens,
                       bool has_last_token,
                       std::vector<uint32_t> src_block_ids,
-                      std::vector<uint32_t> dst_block_ids) {
+                      std::vector<uint32_t> dst_block_ids,
+                      std::optional<std::string> dst_worker_info = std::nullopt) {
   if (KV_CLIENT != nullptr) {
     KV_CLIENT->submit_req_send(dst_inst_name,
                                dst_worker_id,
@@ -92,7 +93,8 @@ void submit_req_send2(const std::string &dst_inst_name,
                                new_tokens,
                                has_last_token,
                                std::move(src_block_ids),
-                               std::move(dst_block_ids));
+                               std::move(dst_block_ids),
+                               std::move(dst_worker_info));
   } else {
     throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv client is not initialized");
   }
