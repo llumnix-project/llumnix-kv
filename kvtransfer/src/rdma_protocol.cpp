@@ -843,11 +843,6 @@ void RDMAChannel::do_init() {
             << ",dsthandles_n=" << self.dst_handles_.size();
   assert(!self.chs_.empty());
   assert(self.dst_handles_.size() == self.dst_layer_num_);
-
-  self.layer_sges_.resize(self.ctx_->layer_mr().size());
-  for (auto& sges : self.layer_sges_) {
-    sges.reserve(80000 * 2);
-  }
   return;
 }
 
@@ -1036,9 +1031,6 @@ void RDMAChannel::send_data(size_t layer_idx) {
   auto datasp = std::make_shared<std::vector<rw_memp_t>>();
   datasp->reserve(dataperch);
   const auto& src_mr_temp = self.ctx_->layer_mr()[layer_idx].mr();
-  auto& sges = self.layer_sges_[layer_idx];
-  sges.clear();
-  sges.reserve(data.size());
   for (const auto &[src_offset, dst_offset, len] : data) {
     assert(len > 0);
     assert(src_offset < self.ctx_->layer_blk_size);
@@ -1047,16 +1039,14 @@ void RDMAChannel::send_data(size_t layer_idx) {
     assert(dst_offset < self.dst_layer_blk_size_);
     assert(dst_offset + len <= self.dst_layer_blk_size_);
 
-    auto& sge = sges.emplace_back();
-    sge.addr = uint64_t(src_mr_temp.buf) + src_offset;
-    sge.length = len;
-    sge.lkey = src_mr_temp.mr->lkey;
     auto *rladdr = reinterpret_cast<char *>(dst_layer_handle.ptr);
     assert(rladdr);
     auto rwmemp = rw_memp_t();
     rwmemp.r_addr = reinterpret_cast<uint64_t>(rladdr + dst_offset);
     rwmemp.r_key = dst_layer_handle.rkey;
-    rwmemp.sg = &sge;
+    rwmemp.sg.addr = uint64_t(src_mr_temp.buf) + src_offset;
+    rwmemp.sg.length = len;
+    rwmemp.sg.lkey = src_mr_temp.mr->lkey;
     datasp->emplace_back(std::move(rwmemp));
     if (datasp->size() >= dataperch) {
       auto fut = WriteBatch(self.ch(), std::move(datasp));

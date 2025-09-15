@@ -1398,8 +1398,6 @@ std::tuple<uint64_t, uint64_t, uint64_t> method_writebatch(ClientCtx& ctx, const
   size_t const sbperch = cdiv(sb.size(), ctx.chs().size());
   std::vector<std::future<void>> futs;
   futs.reserve(ctx.chs().size());
-  std::vector<ibv_sge> sges;
-  sges.reserve(sb.size());
   for (int i = 0; i < rounds; ++i) {
     auto now = std::chrono::steady_clock::now();
 
@@ -1410,14 +1408,12 @@ std::tuple<uint64_t, uint64_t, uint64_t> method_writebatch(ClientCtx& ctx, const
         continue;
       }
 
-      auto& sge = sges.emplace_back();
-      sge.addr = uintptr_t(ctx.ctx.mr.buf) + src_offset;
-      sge.length = len;
-      sge.lkey = ctx.ctx.mr.mr->lkey;
       auto rwmemp = rw_memp_t();
       rwmemp.r_addr = rladdr + dst_offset;
       rwmemp.r_key = rkey;
-      rwmemp.sg = &sge;
+      rwmemp.sg.addr = uintptr_t(ctx.ctx.mr.buf) + src_offset;
+      rwmemp.sg.length = len;
+      rwmemp.sg.lkey = ctx.ctx.mr.mr->lkey;
       datasp->emplace_back(std::move(rwmemp));
       if (datasp->size() >= sbperch) {
         auto fut = WriteBatch(ctx.ch(), std::move(datasp));
@@ -1445,7 +1441,6 @@ std::tuple<uint64_t, uint64_t, uint64_t> method_writebatch(ClientCtx& ctx, const
     prepare_min = std::min(prepare_min, prepare_ns);
     prepare_sum += prepare_ns;
     futs.clear();
-    sges.clear();
   }
   printf(">>>>>> prepare_min_us=%f prepare_max_us=%f prepare_avg_us=%f\n",
         prepare_min / 1000.0, prepare_max / 1000.0, prepare_sum / 1000.0 / rounds);
