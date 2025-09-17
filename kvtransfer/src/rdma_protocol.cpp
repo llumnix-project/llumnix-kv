@@ -421,6 +421,23 @@ static void BarexCtxMain(XContext *ctx, std::atomic<bool> *stop_flag) {
   return;
 }
 
+static void mp_reserve(XSimpleMempool* mp) {
+  std::map<uint64_t, int> reserve_map;
+  const auto* reserve_vec = env_reserve();
+  for (auto [size, cnt] : *reserve_vec) {
+    reserve_map[size] = cnt;
+    LOG(INFO) << "mp reserve: size=" << size << ";cnt=" << cnt;
+  }
+  if (reserve_map.empty()) {
+    return;
+  }
+  auto ret = mp->Reserve(CPU, reserve_map);
+  if (ret != accl::barex::BAREX_SUCCESS) {
+    LOG(ERROR) << "mp reserve. ret=" << ret;
+  }
+  return;
+}
+
 BarexCtx::BarexCtx(std::string mp_name,
                    std::string tp_name,
                    int tpcnt,
@@ -429,6 +446,7 @@ BarexCtx::BarexCtx(std::string mp_name,
   auto &self = *this;
   auto [nic_dev, mp] = g_mp_manager.get_gpu_ctx(ctx->device_id());
   self.mp_ = mp;
+  mp_reserve(mp);
 
   const auto &layer_ptr = ctx->layer_data_address();
   // accl.barex 注册 MR 个数最大为 65536, 即要求 layer_ptr.size <= 65536.

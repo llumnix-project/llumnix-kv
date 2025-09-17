@@ -1,6 +1,7 @@
 #pragma once
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <vector>
 
 namespace blade_llm {
 
@@ -27,5 +28,10 @@ int env_cache_shape();
 constexpr int SEND_DONE_HEAD_KIND = 1;
 constexpr int SEND_SAVE_DONE_HEAD_KIND = 2;
 int env_send_done_head_kind();
+
+// RETURN addr 指向着某处全局空间, 不要修改.
+// 示例: "4096,8000;8192,1000;" 意味着预先分配 8000 个 4096byte 的内存, 1000 个 8192 byte 的内存.
+const std::vector<std::pair<uint64_t, int>>* env_reserve();
+
 
 }  // namespace blade_llm {

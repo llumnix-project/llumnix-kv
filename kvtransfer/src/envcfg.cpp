@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <string>
 #include <string.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 namespace blade_llm {
@@ -44,7 +45,7 @@ int env_ctx_tpsize() {
 
 
 int env_conn_tpsize() {
-  static constexpr int DEFVAL = 2;
+  static constexpr int DEFVAL = 4;
   static int val = DEFVAL;
   static std::once_flag flag;
   std::call_once(flag, [] () {
@@ -148,6 +149,42 @@ int env_send_done_head_kind() {
     val = env2posint("BLLM_KVTRANS_SDH_KIND", DEFVAL);
   });
   return val;
+}
+
+static void parse_reserve(std::vector<std::pair<uint64_t, int>>* out, const char* inputval) {
+  auto input = std::string(inputval);
+  size_t start = 0;
+  size_t end = 0;
+  while ((end = input.find(';', start)) != std::string::npos) {
+    assert(end >= start);
+    auto part = input.substr(start, end - start);
+    start = end + 1;
+    auto idx = part.find(',');
+    if (idx == std::string::npos) {
+      continue;
+    }
+    uint64_t mrsize = std::stoul(part.substr(0, idx - 0));
+    int mrcnt = std::stoi(part.substr(idx + 1));
+    out->emplace_back(mrsize, mrcnt);
+  }
+  return;
+}
+
+const std::vector<std::pair<uint64_t, int>>* env_reserve() {
+  static std::vector<std::pair<uint64_t, int>> val;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    auto* valenv = getenv("BLLM_KVTRANS_RESERVE");
+    if (valenv == nullptr) {
+      return;
+    }
+    try {
+      parse_reserve(&val, valenv);
+    } catch (const std::exception& e) {
+      fprintf(stderr, "env_reserve: bad input=%s;ex=%s\n", valenv, e.what());
+    }
+  });
+  return &val;
 }
 
 }  // namespace blade_llm {
