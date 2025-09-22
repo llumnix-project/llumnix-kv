@@ -33,5 +33,6 @@ int env_send_done_head_kind();
 // 示例: "4096,8000;8192,1000;" 意味着预先分配 8000 个 4096byte 的内存, 1000 个 8192 byte 的内存.
 const std::vector<std::pair<uint64_t, int>>* env_reserve();
 
+int env_rpc_timeout_s();
 
 }  // namespace blade_llm {

@@ -73,6 +73,34 @@ struct XConnectorDeleter {
   void operator()(accl::barex::XConnector *mp);
 };
 
+class BarexChannel {
+  // OWNER: CliBarexCtx.connector_
+  accl::barex::XConnector* const connector_;
+  // may be nullptr.
+  accl::barex::XChannel* channel_;
+public:
+  BarexChannel(accl::barex::XConnector* conn, accl::barex::XChannel* ch) noexcept;
+
+  BarexChannel(BarexChannel&& other) noexcept:
+    connector_(other.connector_),
+    channel_(other.channel_) {
+    other.channel_ = nullptr;
+  }
+
+  ~BarexChannel() noexcept;
+
+  auto* ch() const noexcept {
+    assert(this->channel_ != nullptr);
+    return this->channel_;
+  }
+
+private:
+  void destory();
+
+  BarexChannel(const BarexChannel&) = delete;
+  BarexChannel& operator=(BarexChannel&&) = delete;
+};
+
 class BarexMRGuard : public noncopyable {
   accl::barex::memp_t mr_;
   accl::barex::XSimpleMempool *mp_ = nullptr; // owner: BarexCtx
@@ -249,7 +277,7 @@ class RDMAChannel : public IChannel, public noncopyable {
   std::vector<std::future<void>> send_futs_;
 
   // init by do_init
-  std::vector<accl::barex::XChannel *> chs_;   // owner: ctx_.connector_
+  std::vector<BarexChannel> chs_;
   std::vector<RDMAMemHandle> dst_handles_;
 };
 
@@ -267,7 +295,7 @@ class RDMAServer : public ITransferServer {
     void OnRecvCall(accl::barex::XChannel *channel,
                     char *in_buf,
                     size_t len,
-                    accl::barex::x_msg_header header) override;
+                    accl::barex::x_msg_header header) noexcept override;
    private:
     static bool is_mem_handles_req(char *in_buf, size_t len) noexcept;
     void resp_mem_handles(accl::barex::XChannel *channel, char *in_buf, size_t len);

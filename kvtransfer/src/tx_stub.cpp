@@ -7,7 +7,7 @@
 #include "naming/fake_naming.h"
 #include <string.h>
 #include <unistd.h>
-#include <random>
+#include "fault_inject.h"
 
 namespace blade_llm {
 
@@ -322,30 +322,9 @@ struct KvSendStub::TaskContext {
   Timepoint iter_start_ts;
   Timepoint send_finish_ts;
 
-private:
-#ifdef NDEBUG
-  void fault_inject() {}
-#else
-  static constexpr uint64_t SCALE = 100000;
-  std::mt19937_64 rng_;
-  std::uniform_int_distribution<uint64_t> dst_{0, 100 * SCALE - 1};
-
-  void fault_inject() {
-    auto& self = *this;
-    uint64_t rate = (env_debug_tx_failrate() - 1) * SCALE;
-    uint64_t rnd = self.dst_(self.rng_);
-    if (rnd >= rate) {
-      return ;
-    }
-    throw std::runtime_error("biubiu");
-  }
-#endif
 public:
   TaskContext(KvSendStub* s) noexcept
     : stub(s) {
-#ifndef NDEBUG
-    this->rng_.seed(std::uint_fast64_t(s->dstworkerid_));
-#endif
   }
 
   void do_task(BatchSendTask& batch) {
@@ -595,7 +574,7 @@ private:
       // NOTE: write 可能是异步的! write 返回并不意味着数据发送了!
       self.ch->send_data(i);
     }
-    self.fault_inject();
+    fault_inject_throw();
     self.ch->flush(self.flush_out_buf);
     self.send_finish_ts = SteadyClock::now();
     self.wait_and_send_us = elapse_us(self.iter_start_ts, self.send_finish_ts);

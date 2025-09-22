@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <mutex>
 #include <numeric>
+#include "fault_inject.h"
 
 #ifdef ENABLE_TORCH
 #include <c10/core/Storage.h>
@@ -192,6 +193,39 @@ void XConnectorDeleter::operator()(accl::barex::XConnector *tp) {
   delete tp;
 }
 
+BarexChannel::BarexChannel(accl::barex::XConnector* conn, accl::barex::XChannel* ch) noexcept:
+    connector_(conn), channel_(ch) {
+  LOG(INFO) << "BarexChannel new: connector=" << conn << ";channel=" << ch;
+}
+
+void BarexChannel::destory() {
+  auto& self = *this;
+  auto ret = self.connector_->CloseChannel(self.channel_, [conn=self.connector_, ch=self.channel_] (Status s) noexcept {
+    std::string destroy_ret;
+    try {
+      auto res = ch->Destroy();
+      RTCHECK_EX_EQ(res, BAREX_SUCCESS);
+    } catch (const std::exception& ex) {
+      destroy_ret = ex.what();
+    }
+    LOG(INFO) << "BarexChannel close:connector=" << conn << ";ch=" << ch
+              << ";close_ret=" << s.ErrMsg() << ";destroy_ret=" << destroy_ret;
+  });
+  RTCHECK_EX_EQ(ret, accl::barex::BAREX_SUCCESS);
+  return;
+}
+
+BarexChannel::~BarexChannel() noexcept {
+  if (this->channel_ == nullptr) {
+    return;
+  }
+  try {
+    this->destory();
+  } catch (const std::exception& ex) {
+    LOG(ERROR) << "BarexChannel close:connector=" << this->connector_
+               << ";ch=" << this->channel_ << ";ex=" << ex.what();
+  }
+}
 
 // Send will release sdata
 // cb is invoked after sdata is freed.
@@ -236,7 +270,7 @@ static void Send(XChannel *ch, memp_t sdata, DoneCallback cb) {
 static memp_t AllocCPUBuffer(XChannel* ch, uint64_t size) {
   memp_t bufmr;
   auto result = ch->AllocBuffer(bufmr, size, CPU);
-  RTCHECK(result == accl::barex::BAREX_SUCCESS);
+  RTCHECK_EX_EQ(result, accl::barex::BAREX_SUCCESS);
   return bufmr;
 }
 
@@ -641,6 +675,8 @@ void RDMAServer::CtxCallback::resp_mem_handles(accl::barex::XChannel *channel, c
   memcpy(bufmr.buf, inbuf, RPC_HEADER);
   memcpy(bufmr.buf + RPC_HEADER, handles.data(), msglen);
 
+  fault_inject_throw();
+
   return Send(channel, std::move(bufmr), [] (Status s) {
     if (s.IsOk()) {
       return ;
@@ -649,9 +685,16 @@ void RDMAServer::CtxCallback::resp_mem_handles(accl::barex::XChannel *channel, c
   });
 }
 
-void RDMAServer::CtxCallback::OnRecvCall(XChannel *ch, char *in_buf, size_t len, x_msg_header _header) {
+void RDMAServer::CtxCallback::OnRecvCall(XChannel *ch, char *in_buf, size_t len, x_msg_header _header) noexcept {
   if (is_mem_handles_req(in_buf, len)) {
-    return this->resp_mem_handles(ch, in_buf, len);
+    try {
+      this->resp_mem_handles(ch, in_buf, len);
+    } catch (const std::exception& ex) {
+      auto [_, reqid] = deser_rpc_header(in_buf);
+      LOG(ERROR) << "resp mem handle: error=" << ex.what() << ";ch=" << ch->ToString()
+                 << ";reqid=" << reqid;
+    }
+    return;
   }
 
   InstanceId inst_id;
@@ -797,25 +840,25 @@ void RDMAChannel::connect(const WorkerInfo &dst_info) {
   assert(self.dst_layer_num_ == self.ctx_->layer_mr().size());
 }
 
-[[nodiscard]] static std::future<XChannel *> Connect(XConnector &self, std::string server_addr, int port) {
+[[nodiscard]] static std::future<BarexChannel> Connect(XConnector &self, std::string server_addr, int port) {
   // std::promise<XChannel*> pr;
-  auto pr = std::make_shared<std::promise<XChannel *>>();
+  auto pr = std::make_shared<std::promise<BarexChannel>>();
   auto fut = pr->get_future();
 
   auto result = self.Connect(std::move(server_addr), port,
-                             [pr = std::move(pr)](XChannel *res, Status s) mutable {
+                             [pr = std::move(pr), conn=&self](XChannel *res, Status s) mutable {
                                if (!s.IsOk()) {
                                  auto ex = std::make_exception_ptr(std::runtime_error("Connect ERR: " + s.ErrMsg()));
                                  pr->set_exception(std::move(ex));
                                  return;
                                }
-                               pr->set_value(res);
+                               pr->set_value(BarexChannel(conn, res));
                              }
   );
 
   if (result != BAREX_SUCCESS) {
     auto ex = std::runtime_error("Connect Submit Err: " + Status(result).ErrMsg());
-    return make_exp_future<XChannel *>(std::move(ex));
+    return make_exp_future<BarexChannel>(std::move(ex));
   }
   return fut;
 }
@@ -829,14 +872,15 @@ void RDMAChannel::do_init() {
   const int sp = env_send_parallel();
   assert(sp > 0);
 
-  auto chs = std::vector<accl::barex::XChannel*>();
+  auto& chs = self.chs_;
   chs.reserve(sp);
-  auto futs = std::vector<std::future<XChannel *>>();
+  auto futs = std::vector<std::future<BarexChannel>>();
   futs.reserve(sp);
   auto conn = self.ctx_->connector();
   assert(conn != nullptr);
   for (int i = 0; i < sp; ++i) {
     auto fut = Connect(*conn, self.ip_, self.port_);
+    fault_inject_throw();
     futs.emplace_back(std::move(fut));
   }
 
@@ -851,11 +895,13 @@ void RDMAChannel::do_init() {
   usleep(delay_ms * 1000);
 #endif
 
-  auto mhfut = self.ctx_->get_mem_handles(chs[0]);
+  auto mhfut = self.ctx_->get_mem_handles(chs[0].ch());
+  fault_inject_throw();
+  auto mhstate = mhfut.wait_for(std::chrono::seconds(env_rpc_timeout_s()));
+  RTCHECK_EX_EQ(int(mhstate), int(std::future_status::ready));
   auto mh = mhfut.get();
 
   self.dst_handles_ = std::move(mh);
-  self.chs_ = std::move(chs);
   LOG(INFO) << "RDMAChannel connect. dstip=" << self.ip_
             << ",dstport=" << self.port_
             << ",dsthandles_n=" << self.dst_handles_.size();
@@ -921,7 +967,7 @@ accl::barex::XChannel *RDMAChannel::ch() noexcept {
   auto &self = *this;
   int n = self.chs_.size();
   int idx = (++self.prev_ch_idx_) % n;
-  return self.chs_[idx];
+  return self.chs_[idx].ch();
 }
 
 

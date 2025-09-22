@@ -187,4 +187,15 @@ const std::vector<std::pair<uint64_t, int>>* env_reserve() {
   return &val;
 }
 
+int env_rpc_timeout_s() {
+  static constexpr int DEFVAL = 7;
+  static int val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_RPC_TIMEOUT_S", DEFVAL);
+  });
+  return val;
+}
+
+
 }  // namespace blade_llm {

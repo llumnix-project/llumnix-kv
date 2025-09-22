@@ -39,6 +39,19 @@ class FdGuard {
 } while (0)
 
 
+#define RTCHECK_EX_EQ(left, right) do { \
+    const auto& left_val = (left);  \
+    const auto& right_val = (right); \
+    if (left_val != right_val) { \
+        std::stringstream ss; \
+        ss << "AssertFailed: loc=" << __FILE__ << ':' << __LINE__ \
+           << ";left=" << #left << ";leftval=" << left_val \
+           << ";right=" << #right << ";rightval=" << right_val; \
+        throw std::runtime_error(std::move(ss).str()); \
+    } \
+} while (0)
+
+
 namespace blade_llm {
 
 class noncopyable {
