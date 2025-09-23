@@ -204,14 +204,14 @@ void BarexChannel::destory() {
     std::string destroy_ret;
     try {
       auto res = ch->Destroy();
-      RTCHECK_EX_EQ(res, BAREX_SUCCESS);
+      RTCHECK_EQ(res, BAREX_SUCCESS);
     } catch (const std::exception& ex) {
       destroy_ret = ex.what();
     }
     LOG(INFO) << "BarexChannel close:connector=" << conn << ";ch=" << ch
               << ";close_ret=" << s.ErrMsg() << ";destroy_ret=" << destroy_ret;
   });
-  RTCHECK_EX_EQ(ret, accl::barex::BAREX_SUCCESS);
+  RTCHECK_EQ(ret, accl::barex::BAREX_SUCCESS);
   return;
 }
 
@@ -270,7 +270,7 @@ static void Send(XChannel *ch, memp_t sdata, DoneCallback cb) {
 static memp_t AllocCPUBuffer(XChannel* ch, uint64_t size) {
   memp_t bufmr;
   auto result = ch->AllocBuffer(bufmr, size, CPU);
-  RTCHECK_EX_EQ(result, accl::barex::BAREX_SUCCESS);
+  RTCHECK_EQ(result, accl::barex::BAREX_SUCCESS);
   return bufmr;
 }
 
@@ -285,7 +285,7 @@ BarexMRGuard::~BarexMRGuard() {
   } else {
     result = self.mp_->DeregUserMr(self.mr_.buf, self.mr_.d_type);
   }
-  RTCHECK(result == accl::barex::BAREX_SUCCESS);
+  RTASSERT(result == accl::barex::BAREX_SUCCESS);
 }
 
 // GPU 0 对应 NIC: RET[0]
@@ -416,15 +416,15 @@ std::pair<XDevice*, XSimpleMempool*> MpManager::get_gpu_ctx(int gpu_id) const {
   GPUCtx ctx;
   XDeviceManager *manager = nullptr;
   auto result = XDeviceManager::Singleton(manager);
-  RTCHECK(result == accl::barex::BAREX_SUCCESS);
+  RTASSERT(result == accl::barex::BAREX_SUCCESS);
   auto all_nic_devs = manager->AllDevices();
-  RTCHECK(!all_nic_devs.empty());
+  RTASSERT(!all_nic_devs.empty());
   ctx.lovely_nic = choose_nic(all_nic_devs, gpu_id);
 
   XSimpleMempool *mempool = nullptr;
   std::string mpname = "mp-" + std::to_string(gpu_id);
   result = XSimpleMempool::NewInstance(mempool, std::move(mpname), {ctx.lovely_nic});
-  RTCHECK(result == accl::barex::BAREX_SUCCESS);
+  RTASSERT(result == accl::barex::BAREX_SUCCESS);
   ctx.mp.reset(mempool);
 
   auto [iter2, ok] = self.map_.emplace(gpu_id, std::move(ctx));
@@ -444,7 +444,7 @@ static void BarexCtxMain(XContext *ctx, std::atomic<bool> *stop_flag) {
     if (ret == -1 && errno == EINTR) {
       continue;
     }
-    RTCHECK(ret >= 0);
+    RTASSERT(ret >= 0);
 
     while (ctx->ProgressEvents() > 0) {
       // pass
@@ -485,7 +485,7 @@ BarexCtx::BarexCtx(std::string mp_name,
   const auto &layer_ptr = ctx->layer_data_address();
   // accl.barex 注册 MR 个数最大为 65536, 即要求 layer_ptr.size <= 65536.
   // 考虑到 LAYER_NUM_MAX 远小于 65536, 所以只需要 LAYER_NUM_MAX 限制即可.
-  RTCHECK(layer_ptr.size() <= LAYER_NUM_MAX);
+  RTASSERT(layer_ptr.size() <= LAYER_NUM_MAX);
   // 每个 mr 默认大小限制为 1GB.
   size_t max_mr_size = 1L * 1024 * 1024 * 1024;
   const char *max_mr_gb_str = getenv("ACCL_MAX_USER_MR_GB");
@@ -498,7 +498,7 @@ BarexCtx::BarexCtx(std::string mp_name,
   auto layer_blk_size = ctx->block_size() * ctx->layer_num_blocks();
   LOG(INFO) << "layer size(layer_blk_size) = " << layer_blk_size << ", max_mr_size = " << max_mr_size;
   // 如果这里跪了, 需要配置环境变量 ACCL_MAX_USER_MR_GB
-  RTCHECK(layer_blk_size <= max_mr_size);
+  RTASSERT(layer_blk_size <= max_mr_size);
 
   self.layer_mr_.reserve(layer_ptr.size());
   for (auto layer_p : layer_ptr) {
@@ -506,9 +506,9 @@ BarexCtx::BarexCtx(std::string mp_name,
     auto layer_blk_p = reinterpret_cast<void *>(layer_p);
     // 虽然注释上提到 RegUserMr 要求对齐. 但钉钉确认了, 只要是 cudaMalloc 返回的地址都可以.
     auto result = self.mp_->RegUserMr(out, layer_blk_p, layer_blk_size, GPU, ctx->device_id());
-    RTCHECK(result == accl::barex::BAREX_SUCCESS);
-    RTCHECK(out.d_type == GPU);
-    RTCHECK(out.device_id == ctx->device_id());
+    RTASSERT(result == accl::barex::BAREX_SUCCESS);
+    RTASSERT(out.d_type == GPU);
+    RTASSERT(out.device_id == ctx->device_id());
     LOG(INFO) << "RegUserMr. layer_blk_p=" << layer_blk_p << ", layer_blk_size=" << layer_blk_size
               << ", gpuid=" << ctx->device_id();
     self.layer_mr_.emplace_back(BarexMRGuard::DeregGuard(std::move(out), self.mp()));
@@ -516,14 +516,14 @@ BarexCtx::BarexCtx(std::string mp_name,
 
   XThreadpool *threadpool = nullptr;
   auto result = XThreadpool::NewInstance(threadpool, tpcnt, std::move(tp_name));
-  RTCHECK(result == accl::barex::BAREX_SUCCESS);
+  RTASSERT(result == accl::barex::BAREX_SUCCESS);
   self.tp_.reset(threadpool);
 
   XContext *context = nullptr;
   ContextConfig config = XConfigUtil::DefaultContextConfig();
   result = XContext::NewInstance(context, config, ctxcb.get(), nic_dev, self.mp(), threadpool);
   ctxcb.release();
-  RTCHECK(result == accl::barex::BAREX_SUCCESS);
+  RTASSERT(result == accl::barex::BAREX_SUCCESS);
   self.xctx_.reset(context);
 
   context->Start();
@@ -542,7 +542,7 @@ CliBarexCtx::CliBarexCtx(std::string mp_name,
     layer_blk_size(ctx->layer_num_blocks() * ctx->block_size()) {
   XConnector *connector = nullptr;
   auto result = XConnector::NewInstance(connector, env_conn_tpsize(), TIMER_3S, {this->xctx()});
-  RTCHECK(result == accl::barex::BAREX_SUCCESS);
+  RTASSERT(result == accl::barex::BAREX_SUCCESS);
   this->connector_.reset(connector);
   return;
 }
@@ -750,7 +750,7 @@ static void get_ip(RDMAInfo *out) {
   // SUSv2 guarantees that "Host names are limited to 255 bytes".
   char hostname[256];
   int status = gethostname(hostname, sizeof(hostname));
-  RTCHECK(status == 0);
+  RTASSERT(status == 0);
 
   struct addrinfo *res = nullptr;
   struct addrinfo hints;
@@ -758,14 +758,14 @@ static void get_ip(RDMAInfo *out) {
   hints.ai_family = AF_INET;
   hints.ai_socktype = SOCK_STREAM;
   status = getaddrinfo(hostname, NULL, &hints, &res);
-  RTCHECK(status == 0);
+  RTASSERT(status == 0);
   auto guard = std::unique_ptr<struct addrinfo, decltype(&freeaddrinfo)>(res, freeaddrinfo);
 
   assert(res->ai_family == AF_INET);
   assert(res->ai_addr->sa_family == AF_INET);
   auto *ipaddr = (struct sockaddr_in *) res->ai_addr;
   auto *ret = inet_ntop(ipaddr->sin_family, &ipaddr->sin_addr, out->ip, sizeof(out->ip));
-  RTCHECK(ret != nullptr);
+  RTASSERT(ret != nullptr);
   return;
 }
 
@@ -804,7 +804,7 @@ void RDMAServer::start_server(ITransferService *service, Context *ctx) {
 
   get_ip(&info);
   info.port = get_port();
-  RTCHECK(info.port > 0);
+  RTASSERT(info.port > 0);
 
   std::stringstream ss;
   ss << info.ip << ":" << info.port;
@@ -816,10 +816,10 @@ void RDMAServer::start_server(ITransferService *service, Context *ctx) {
     LOG(ERROR) << "xctx is nullptr";
   }
   auto result = XListener::NewInstance(listener, env_conn_tpsize(), info.port, TIMER_3S, {xctx});
-  RTCHECK(result == accl::barex::BAREX_SUCCESS);
+  RTASSERT(result == accl::barex::BAREX_SUCCESS);
   self.listener_.reset(listener);
   result = self.listener_->Listen();
-  RTCHECK(result == accl::barex::BAREX_SUCCESS);
+  RTASSERT(result == accl::barex::BAREX_SUCCESS);
   LOG(INFO) << "RDMAServer.start_server: ip=" << info.ip << " port=" << info.port << " layer_num_blocks="
             << layer_num_blocks;
 }
@@ -898,7 +898,7 @@ void RDMAChannel::do_init() {
   auto mhfut = self.ctx_->get_mem_handles(chs[0].ch());
   fault_inject_throw();
   auto mhstate = mhfut.wait_for(std::chrono::seconds(env_rpc_timeout_s()));
-  RTCHECK_EX_EQ(int(mhstate), int(std::future_status::ready));
+  RTCHECK_EQ(int(mhstate), int(std::future_status::ready));
   auto mh = mhfut.get();
 
   self.dst_handles_ = std::move(mh);
@@ -1430,16 +1430,16 @@ static void DataPtrCtxDeleter(void* rctx) noexcept {
 
 // def alloc_phy_cont_mem(size, device: torch.device) -> torch.UntypedStorage
 PyObject* alloc_phy_cont_mem(size_t size, PyObject* device) {
-  RTCHECK(THPDevice_Check(device));
+  RTASSERT(THPDevice_Check(device));
   auto* dev = reinterpret_cast<THPDevice*>(device);
-  RTCHECK(dev->device.type() == c10::DeviceType::CUDA);
-  RTCHECK(dev->device.has_index());
+  RTASSERT(dev->device.type() == c10::DeviceType::CUDA);
+  RTASSERT(dev->device.has_index());
   int gpu_id = dev->device.index();
 
   XAllocator* gpu_allocator = nullptr;
   auto [_, mp] = g_mp_manager.get_gpu_ctx(gpu_id);
   auto result = mp->GetXAllocator(gpu_allocator, GPU);
-  RTCHECK(result == accl::barex::BAREX_SUCCESS);
+  RTASSERT(result == accl::barex::BAREX_SUCCESS);
   // cudaMalloc 至少 256 对齐. align 在 PPU 上不生效, 即 PPU 上 kvcache 不保证对齐.
   void* const buf = gpu_allocator->Alloc(size, gpu_id, nullptr /* attr */, 512 /* align */);
 

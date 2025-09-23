@@ -99,7 +99,7 @@ int env_debug_tx_delay_ms() {
 static void parse_addr(struct sockaddr_in* addr, const char* input) {
   auto addr_str = std::string(input);
   size_t colon_pos = addr_str.find(':');
-  RTCHECK(colon_pos != std::string::npos);
+  RTASSERT(colon_pos != std::string::npos);
 
   std::string ip_str = addr_str.substr(0, colon_pos);
   std::string port_str = addr_str.substr(colon_pos + 1);
@@ -110,7 +110,7 @@ static void parse_addr(struct sockaddr_in* addr, const char* input) {
   addr->sin_port = htons(port);
 
   auto inet_ok = inet_pton(AF_INET, ip_str.c_str(), &addr->sin_addr);
-  RTCHECK(inet_ok == 1);
+  RTASSERT(inet_ok == 1);
   return ;
 }
 

@@ -31,7 +31,7 @@ class FdGuard {
 };
 
 
-#define RTCHECK(expr) do { \
+#define RTASSERT(expr) do { \
     if (!(expr)) { \
         fprintf(stderr, "Runtime error: Assertion failed in %s on line %d: %s\n", __FILE__, __LINE__, #expr); \
         abort(); \
@@ -39,7 +39,7 @@ class FdGuard {
 } while (0)
 
 
-#define RTCHECK_EX_EQ(left, right) do { \
+#define RTCHECK_EQ(left, right) do { \
     const auto& left_val = (left);  \
     const auto& right_val = (right); \
     if (left_val != right_val) { \

@@ -35,6 +35,10 @@ def is_erdma() -> bool:
 
 
 def set_envs():
+    os.environ.setdefault('BLLM_KVTRANS_FSNAMING_KEEPALIVE_S', '36000')
+    os.environ.setdefault('BLLM_KVTRANS_FSNAMING_TOLERATE_S', '360000')
+
+    os.environ.setdefault('BLLM_KVTRANS_RDMA_SP', '2')
     os.environ.setdefault('ACCL_TCP_TIMEOUT_MS', '1500')
     os.environ.setdefault('ACCL_MAX_USER_MR_GB', '10')
     os.environ.setdefault('ACCL_WRITEBATCH_OPT', '2')

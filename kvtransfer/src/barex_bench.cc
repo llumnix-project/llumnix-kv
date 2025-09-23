@@ -26,7 +26,7 @@ static uint64_t cdiv(uint64_t a, uint64_t b) {
   return (a + (b - 1)) / b;
 }
 
-#define RTCHECK(expr) do { \
+#define RTASSERT(expr) do { \
     if (!(expr)) { \
         fprintf(stderr, "Runtime error: Assertion failed in %s on line %d: %s\n", __FILE__, __LINE__, #expr); \
         abort(); \
@@ -245,7 +245,7 @@ public:
     qp_attr.port_num = config_.ib_port;
     qp_attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
     ret = verbs_->IbvModifyQp(ibv_qp_, &qp_attr, IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS);
-    RTCHECK(ret == 0);
+    RTASSERT(ret == 0);
     /* Change QP state to RTR */
     memset(&qp_attr, 0, sizeof(struct ibv_qp_attr));
     qp_attr.qp_state = IBV_QPS_RTR;
@@ -273,7 +273,7 @@ public:
                               &qp_attr,
                               IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN |
                                   IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER);
-    RTCHECK(ret == 0);
+    RTASSERT(ret == 0);
 
     /* Change QP state to RTS */
     memset(&qp_attr, 0, sizeof(struct ibv_qp_attr));
@@ -287,7 +287,7 @@ public:
                               &qp_attr,
                               IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN |
                                   IBV_QP_MAX_QP_RD_ATOMIC);
-    RTCHECK(ret == 0);
+    RTASSERT(ret == 0);
     return BAREX_SUCCESS;
   }
 
@@ -711,76 +711,76 @@ static int get_send_parallel() {
 
 static size_t env_token_size() {
   const char* envval = getenv("ZY_TOKEN_SIZE");
-  RTCHECK(envval != nullptr);
+  RTASSERT(envval != nullptr);
   int ret = atoi(envval);
-  RTCHECK(ret > 0);
+  RTASSERT(ret > 0);
   return ret;
 }
 
 
 static size_t env_block_size() {
   const char* envval = getenv("ZY_BLOCK_SIZE");
-  RTCHECK(envval != nullptr);
+  RTASSERT(envval != nullptr);
   auto ret = atol(envval);
-  RTCHECK(ret > 0);
+  RTASSERT(ret > 0);
   return ret;
 }
 
 
 static size_t env_srv_token_size() {
   const char* envval = getenv("ZY_SRV_TOKEN_SIZE");
-  RTCHECK(envval != nullptr);
+  RTASSERT(envval != nullptr);
   int ret = atoi(envval);
-  RTCHECK(ret > 0);
+  RTASSERT(ret > 0);
   return ret;
 }
 
 
 static size_t env_srv_block_size() {
   const char* envval = getenv("ZY_SRV_BLOCK_SIZE");
-  RTCHECK(envval != nullptr);
+  RTASSERT(envval != nullptr);
   auto ret = atol(envval);
-  RTCHECK(ret > 0);
+  RTASSERT(ret > 0);
   return ret;
 }
 
 
 static size_t env_block_number() {
   const char* envval = getenv("ZY_BLOCK_NUM");
-  RTCHECK(envval != nullptr);
+  RTASSERT(envval != nullptr);
   auto ret = atol(envval);
-  RTCHECK(ret > 0);
+  RTASSERT(ret > 0);
   return ret;
 }
 
 
 static int env_gpu_id() {
   const char* envval = getenv("ZY_GPU_ID");
-  RTCHECK(envval != nullptr);
+  RTASSERT(envval != nullptr);
   int ret = atoi(envval);
-  RTCHECK(ret >= 0);
+  RTASSERT(ret >= 0);
   return ret;
 }
 
 
 static int env_server_port() {
   const char* envval = getenv("ZY_SERVER_PORT");
-  RTCHECK(envval != nullptr);
+  RTASSERT(envval != nullptr);
   int ret = atoi(envval);
-  RTCHECK(ret > 0);
+  RTASSERT(ret > 0);
   return ret;
 }
 
 
 static const char* env_server_ip() {
   const char* envval = getenv("ZY_SERVER_IP");
-  RTCHECK(envval != nullptr);
+  RTASSERT(envval != nullptr);
   return envval;
 }
 
 static int env_is_server() {
   const char* envval = getenv("ZY_IS_SERVER");
-  RTCHECK(envval != nullptr);
+  RTASSERT(envval != nullptr);
   int ret = atoi(envval);
   return ret;
 }
@@ -788,41 +788,41 @@ static int env_is_server() {
 
 static int env_rounds() {
   const char* envval = getenv("ZY_ROUNDS");
-  RTCHECK(envval != nullptr);
+  RTASSERT(envval != nullptr);
   int ret = atoi(envval);
-  RTCHECK(ret > 0);
+  RTASSERT(ret > 0);
   return ret;
 }
 
 
 static const char* env_method() {
   const char* envval = getenv("ZY_METHOD");
-  RTCHECK(envval != nullptr);
+  RTASSERT(envval != nullptr);
   return envval;
 }
 
 
 static long env_server_addr() {
   const char* envval = getenv("ZY_SERVER_ADDR");
-  RTCHECK(envval != nullptr);
+  RTASSERT(envval != nullptr);
   auto ret = strtol(envval, (char **)NULL, 0);
-  RTCHECK(ret > 0);
+  RTASSERT(ret > 0);
   return ret;
 }
 
 
 static long env_server_rkey() {
   const char* envval = getenv("ZY_SERVER_RKEY");
-  RTCHECK(envval != nullptr);
+  RTASSERT(envval != nullptr);
   auto ret = strtol(envval, (char **)NULL, 0);
-  RTCHECK(ret >= 0);
+  RTASSERT(ret >= 0);
   return ret;
 }
 
 
 static std::vector<int> env_src_block_ids() {
   const char* envval = getenv("ZY_BLOCK_IDS");
-  RTCHECK(envval != nullptr);
+  RTASSERT(envval != nullptr);
   std::string line(envval);
 
   std::vector<int> result;
@@ -835,7 +835,7 @@ static std::vector<int> env_src_block_ids() {
   if (start < line.length()) {
     result.push_back(std::stoi(line.substr(start)));
   }
-  RTCHECK(result.size() > 0);
+  RTASSERT(result.size() > 0);
   if (result.size() == 1) {
     auto n = result[0];
     result.clear();
@@ -960,37 +960,37 @@ class FackCb : public XChannelCallback {
 BarexCtx BarexCtx::setup() {
   BarexCtx ret;
   auto result = XDeviceManager::Singleton(ret.manager);
-  RTCHECK(result == BAREX_SUCCESS);
+  RTASSERT(result == BAREX_SUCCESS);
 
   const auto& all_nic_devs = ret.manager->AllDevices();
-  RTCHECK(!all_nic_devs.empty());
+  RTASSERT(!all_nic_devs.empty());
   const char* nicdev_name = getenv("ZY_NIC_DEV");
-  RTCHECK(nicdev_name != nullptr);
+  RTASSERT(nicdev_name != nullptr);
   for (const auto& dev : all_nic_devs) {
     if (dev->GetName() == nicdev_name) {
       ret.nic_dev = dev;
       break;
     }
   }
-  RTCHECK(ret.nic_dev != nullptr);
+  RTASSERT(ret.nic_dev != nullptr);
 
   result = XSimpleMempool::NewInstance(ret.mp, "mp", {ret.nic_dev});
-  RTCHECK(result == BAREX_SUCCESS);
+  RTASSERT(result == BAREX_SUCCESS);
 
   int gpuid = env_gpu_id();
   auto cuda_rt = cudaSetDevice(gpuid);
-  RTCHECK(cuda_rt == cudaSuccess);
+  RTASSERT(cuda_rt == cudaSuccess);
 
   XAllocator* gpu_allocator = nullptr;
   result = ret.mp->GetXAllocator(gpu_allocator, GPU);
-  RTCHECK(result == BAREX_SUCCESS);
+  RTASSERT(result == BAREX_SUCCESS);
   size_t kvcache_size = env_block_size() * env_block_number();
   void* const buf = gpu_allocator->Alloc(kvcache_size, gpuid, nullptr /* attr */, 512 /* align */);
   ret.mp->RegUserMr(ret.mr, buf, kvcache_size, GPU, gpuid);
   printf(">>>>>>> RegUserMr. buf=%p bufsize=%lu gpuid=%d rkey=%u\n", buf, kvcache_size, gpuid, ret.mr.mr->rkey);
 
   result = XThreadpool::NewInstance(ret.tp, 4, "tp");
-  RTCHECK(result == BAREX_SUCCESS);
+  RTASSERT(result == BAREX_SUCCESS);
 
   ContextConfig config = XConfigUtil::DefaultContextConfig();
 #ifdef ENABLE_IBVERBS_BENCH
@@ -998,7 +998,7 @@ BarexCtx BarexCtx::setup() {
   ret.xctx->Init();
 #else
   result = XContext::NewInstance(ret.xctx, config, new FackCb(), ret.nic_dev, ret.mp, ret.tp);
-  RTCHECK(result == BAREX_SUCCESS);
+  RTASSERT(result == BAREX_SUCCESS);
   ret.xctx->Start();
 #endif
 
@@ -1019,9 +1019,9 @@ ServerCtx ServerCtx::setup() {
   ret.ctx = BarexCtx::setup();
   int p = env_server_port();
   auto result = XListener::NewInstance(ret.listener, 2, p, TIMER_3S, {ret.ctx.xctx});
-  RTCHECK(result == BAREX_SUCCESS);
+  RTASSERT(result == BAREX_SUCCESS);
   result = ret.listener->Listen();
-  RTCHECK(result == BAREX_SUCCESS);
+  RTASSERT(result == BAREX_SUCCESS);
   printf("ServerCtx.setup. p=%d\n", p);
   return ret;
 }
@@ -1058,25 +1058,25 @@ ClientCtx ClientCtx::setup() {
   int gpuid = env_gpu_id();
 
   auto cuda_rt = cudaStreamCreateWithFlags(&ret.cpy_stream, cudaStreamNonBlocking);
-  RTCHECK(cuda_rt == cudaSuccess);
+  RTASSERT(cuda_rt == cudaSuccess);
 
   XAllocator* cpu_alloc = nullptr;
   auto result = ret.ctx.mp->GetXAllocator(cpu_alloc, CPU);
-  RTCHECK(result == BAREX_SUCCESS);
+  RTASSERT(result == BAREX_SUCCESS);
   size_t cpu_size = env_srv_block_size() * env_block_number();
   auto* cpu_buf = cpu_alloc->Alloc(cpu_size);
   result = ret.ctx.mp->RegUserMr(ret.cpu_mr, cpu_buf, cpu_size, CPU);
-  RTCHECK(result == BAREX_SUCCESS);
+  RTASSERT(result == BAREX_SUCCESS);
 
   XAllocator* gpu_allocator = nullptr;
   result = ret.ctx.mp->GetXAllocator(gpu_allocator, GPU);
-  RTCHECK(result == BAREX_SUCCESS);
+  RTASSERT(result == BAREX_SUCCESS);
   void* const buf = gpu_allocator->Alloc(cpu_size, gpuid, nullptr /* attr */, 512 /* align */);
   result = ret.ctx.mp->RegUserMr(ret.gpu_mr, buf, cpu_size, GPU, gpuid);
-  RTCHECK(result == BAREX_SUCCESS);
+  RTASSERT(result == BAREX_SUCCESS);
 
   result = XConnector::NewInstance(ret.connector, 2, TIMER_3S, {ret.ctx.xctx});
-  RTCHECK(result == BAREX_SUCCESS);
+  RTASSERT(result == BAREX_SUCCESS);
 
   const int sp = get_send_parallel();
   assert(sp > 0);
@@ -1274,7 +1274,7 @@ public:
 
     struct ibv_send_wr* bad_wr = nullptr;
     int ret = self.ch_->verbs()->IbvPostSend(self.ch_->qp(), start_wr, &bad_wr);
-    RTCHECK(ret == 0);
+    RTASSERT(ret == 0);
     return;
   }
 
@@ -1302,11 +1302,11 @@ static void do_writebatch(ZYXContext& ctx, std::vector<QPState>& qps) {
   struct ibv_wc wcs[wccap];
   while (true) {
     int ret = ctx.verbs()->IbvPollCq(ctx.cq(), wccap, wcs);
-    RTCHECK(ret >= 0);
+    RTASSERT(ret >= 0);
     for (int wcidx = 0; wcidx < ret; ++wcidx) {
       const auto& wc = wcs[wcidx];
-      RTCHECK(wc.opcode == IBV_WC_RDMA_WRITE);
-      RTCHECK(wc.status == IBV_WC_SUCCESS);
+      RTASSERT(wc.opcode == IBV_WC_RDMA_WRITE);
+      RTASSERT(wc.status == IBV_WC_SUCCESS);
       uint64_t qpidx = wc.wr_id >> 48;
       uint64_t acked = wc.wr_id & ((1ul << 48) - 1);
       auto& qp = qps[qpidx];
@@ -1610,7 +1610,7 @@ std::tuple<uint64_t, uint64_t, uint64_t> method_copywrite(ClientCtx& ctx, const 
           blk.length,
           cudaMemcpyDeviceToHost,
           ctx.cpy_stream);
-        RTCHECK(cuda_rt == cudaSuccess);
+        RTASSERT(cuda_rt == cudaSuccess);
         src_end += blk.length;
         continue;
       }
@@ -1639,7 +1639,7 @@ std::tuple<uint64_t, uint64_t, uint64_t> method_copywrite(ClientCtx& ctx, const 
     });
 
     auto cuda_rt = cudaStreamSynchronize(ctx.cpy_stream);
-    RTCHECK(cuda_rt == cudaSuccess);
+    RTASSERT(cuda_rt == cudaSuccess);
 
     WriteBatch(ctx.chs(), std::move(datasp));
 
@@ -1683,7 +1683,7 @@ std::tuple<uint64_t, uint64_t, uint64_t> method_copygpuwrite(ClientCtx& ctx, con
           blk.length,
           cudaMemcpyDeviceToDevice,
           ctx.cpy_stream);
-        RTCHECK(cuda_rt == cudaSuccess);
+        RTASSERT(cuda_rt == cudaSuccess);
         src_end += blk.length;
         continue;
       }
@@ -1712,7 +1712,7 @@ std::tuple<uint64_t, uint64_t, uint64_t> method_copygpuwrite(ClientCtx& ctx, con
     });
 
     auto cuda_rt = cudaStreamSynchronize(ctx.cpy_stream);
-    RTCHECK(cuda_rt == cudaSuccess);
+    RTASSERT(cuda_rt == cudaSuccess);
     uint64_t sync_dur_ns = std::chrono::nanoseconds(std::chrono::steady_clock::now() - now).count();
     sync_max = std::max(sync_max, sync_dur_ns);
     sync_min = std::min(sync_min, sync_dur_ns);

@@ -223,7 +223,7 @@ size_t KvTransferClient::start_send() {
 
       assert(workers_stub.size() > worker_id);
       auto& stub = *workers_stub[worker_id];
-      RTCHECK(stub.check_state() == StubState::WORKING);
+      RTASSERT(stub.check_state() == StubState::WORKING);
       // TODO(zhanyi.ww): 增加容错处理.
       stub.send_batch(std::move(worker_tasks));
     }
