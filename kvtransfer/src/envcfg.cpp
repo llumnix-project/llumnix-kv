@@ -13,6 +13,8 @@ namespace blade_llm {
 static int env2posint(const char* env, int def) {
   assert(def > 0);
   const char *valstr = getenv(env);
+  fprintf(stdout, "kvtenv: env=%s val=%s def=%d\n", env, (valstr == nullptr ? "NULL" : valstr), def);
+  fflush(stdout);
   if (valstr == nullptr) {
     return def;
   }
@@ -120,6 +122,8 @@ const struct sockaddr_in* env_send_done_addr() {
   static std::once_flag flag;
   std::call_once(flag, [] () {
     auto* addr_env = getenv("BLLM_KVTRANS_SEND_DONE_ADDR");
+    fprintf(stdout, "kvtenv: env=BLLM_KVTRANS_SEND_DONE_ADDR val=%s\n", (addr_env == nullptr ? "NULL" : addr_env));
+    fflush(stdout);
     if (addr_env == nullptr) {
       return ;
     }
@@ -175,6 +179,8 @@ const std::vector<std::pair<uint64_t, int>>* env_reserve() {
   static std::once_flag flag;
   std::call_once(flag, [] () {
     auto* valenv = getenv("BLLM_KVTRANS_RESERVE");
+    fprintf(stdout, "kvtenv: env=BLLM_KVTRANS_RESERVE val=%s\n", (valenv == nullptr ? "NULL" : valenv));
+    fflush(stdout);
     if (valenv == nullptr) {
       return;
     }
