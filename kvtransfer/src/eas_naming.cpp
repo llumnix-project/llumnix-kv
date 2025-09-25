@@ -90,9 +90,9 @@ void EASNamingClient::store(const std::string &k, const std::string &v) {
   }
   std::stringstream ss;
   ss << R"({")" << k << R"(":")" << v << R"("})";
-  auto value = ss.str();
+  auto value = std::move(ss).str();
   LOG(INFO) << "KVT: eas naming store " << value << " size=" << value.size() << " to " << pod_name_;
-  http_client_->post(EAS_POST_PATH, ss.str());
+  http_client_->post(EAS_POST_PATH, value);
 }
 
 std::optional<std::string> EASNamingClient::get(const InstanceId& inst, const std::string &k) {

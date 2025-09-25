@@ -21,6 +21,7 @@
 #include "thrid_party/logging.h"
 
 #ifdef ENABLE_RDMA
+#include "utils/gdr.h"
 #include <accl/barex/barex.h>
 #include <accl/barex/barex_types.h>
 #include <accl/barex/xconfig_util.h>
@@ -145,6 +146,10 @@ struct BarexCtx : public noncopyable {
     return this->layer_mr_;
   }
 
+  const auto& layer_gdrcpy_mem() const noexcept {
+    return this->layer_gdrcpy_mem_;
+  }
+
   auto *xctx() const noexcept {
     return this->xctx_.get();
   }
@@ -161,6 +166,8 @@ struct BarexCtx : public noncopyable {
   std::unique_ptr<accl::barex::XContext> xctx_;
 
   std::vector<BarexMRGuard> layer_mr_;
+  // may be null
+  std::vector<std::unique_ptr<GdrMemDesc>> layer_gdrcpy_mem_;
 };
 
 // RDMAMemHandle 可以 memcpy.
@@ -182,7 +189,8 @@ struct CliBarexCtx : public BarexCtx {
   }
 
   // rpc
-  std::future<std::vector<RDMAMemHandle>> get_mem_handles(accl::barex::XChannel* dst) const;
+  std::vector<RDMAMemHandle> get_mem_handles(accl::barex::XChannel* dst) const;
+  uint32_t get_remote_crc(accl::barex::XChannel* dst, const std::vector<IpcBlock>* data, uint32_t lcrc);
 
  private:
    struct RpcCtxCb : public accl::barex::XChannelCallback {
@@ -272,6 +280,8 @@ class RDMAChannel : public IChannel, public noncopyable {
   size_t sb_size_min_ = 0;
   size_t sb_size_max_ = 0;
   size_t sb_size_total_ = 0;
+  uint32_t crc_ = 0;
+  bool enable_crc_ = false;
   // write_us
   std::vector<std::future<uint64_t>> write_futs_;
   std::vector<std::future<void>> send_futs_;
@@ -297,11 +307,12 @@ class RDMAServer : public ITransferServer {
                     size_t len,
                     accl::barex::x_msg_header header) noexcept override;
    private:
-    static bool is_mem_handles_req(char *in_buf, size_t len) noexcept;
-    void resp_mem_handles(accl::barex::XChannel *channel, char *in_buf, size_t len);
+    void resp_mem_handles(accl::barex::XChannel *channel, uint64_t reqid, char *in_buf, size_t len);
+    void resp_remote_crc(accl::barex::XChannel *channel, uint64_t reqid, char *in_buf, size_t len);
   };
  private:
   RDMAInfo info_;
+  BarexCtx* ctx_ = nullptr;  // OWNER: KvTransferService.ctx_
   std::unique_ptr<accl::barex::XListener, XListenerDeleter> listener_;
 };
 

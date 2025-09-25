@@ -42,7 +42,7 @@ GeneralNamingClient NamingManager::connect_naming(const InstanceId& myname, cons
       ss << p.first << ",";
     }
     ss << "];";
-    LOG(INFO) << ss.str();
+    LOG(INFO) << std::move(ss).str();
     return GeneralNamingClient();
   }
 }

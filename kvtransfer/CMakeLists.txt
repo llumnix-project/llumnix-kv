@@ -24,7 +24,7 @@ set(FIND_LIBRARY_PATHS "/usr/lib/" "/usr/lib/x86_64-linux-gnu/" "/usr/local/lib/
 
 find_package(CUDAToolkit)
 set(TARGET_INCLUDE_DIRS include ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-set(TARGET_LINK_LIBS pthread CUDA::cudart)
+set(TARGET_LINK_LIBS pthread CUDA::cudart z)
 
 if (BUILD_RDMA)
     find_library(ACCL_BAREX_LIBRARY accl_barex PATHS ${FIND_LIBRARY_PATHS} ENV ACCL_BAREX_INSTALL_PATH REQUIRED)

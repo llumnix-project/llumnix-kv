@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <mutex>
 #include <numeric>
+#include <zlib.h>
 #include "fault_inject.h"
 
 #ifdef ENABLE_TORCH
@@ -51,6 +52,17 @@ static void ser_rpc_header(char* buf, uint32_t magic, uint64_t reqid) noexcept {
   memcpy(buf + sizeof(magic), &reqid, sizeof(reqid));
   return;
 }
+
+
+// req:
+// +--------+---------+--------+--------+--------+--------+
+//    crc       cnt       off1     len1    off2     len2
+// crc: uint32_t.
+// cnt: uint32_t 指定了后续 off/len 个数.
+// off, len; uint64_t.
+// resp:
+// crc: uint32_t
+static constexpr uint32_t REMOTE_CRC_REQ_MAGIC = 0x20250924;
 
 
 static constexpr uint32_t SEND_MAGIC = 0x53456e64;  /* SEnd */
@@ -242,9 +254,13 @@ static void Send(XChannel *ch, memp_t sdata, DoneCallback cb) {
   struct x_msg_header header = {0};
 #pragma GCC diagnostic pop
 
-  auto result = ch->Send(std::move(sdata), /* auto_release */ false, header, wrapped_cb);
-  if (result != BAREX_SUCCESS) {
-    wrapped_cb(Status(result));
+  try {
+    auto result = ch->Send(std::move(sdata), /* auto_release */ false, header, wrapped_cb);
+    RTCHECK_EQ(result, BAREX_SUCCESS);
+    fault_inject_throw();
+  } catch (const std::exception& ex) {
+    LOG(ERROR) << "Send error: ch=" << ch->ToString() << " ex=" << ex.what();
+    wrapped_cb(Status(BAREX_ERR_INTERNAL));
   }
 
   return ;
@@ -501,6 +517,7 @@ BarexCtx::BarexCtx(std::string mp_name,
   RTASSERT(layer_blk_size <= max_mr_size);
 
   self.layer_mr_.reserve(layer_ptr.size());
+  self.layer_gdrcpy_mem_.reserve(layer_ptr.size());
   for (auto layer_p : layer_ptr) {
     memp_t out;
     auto layer_blk_p = reinterpret_cast<void *>(layer_p);
@@ -509,9 +526,16 @@ BarexCtx::BarexCtx(std::string mp_name,
     RTASSERT(result == accl::barex::BAREX_SUCCESS);
     RTASSERT(out.d_type == GPU);
     RTASSERT(out.device_id == ctx->device_id());
+    RTASSERT(out.buf == layer_blk_p);
+    RTASSERT(out.buf_len == layer_blk_size);
     LOG(INFO) << "RegUserMr. layer_blk_p=" << layer_blk_p << ", layer_blk_size=" << layer_blk_size
               << ", gpuid=" << ctx->device_id();
     self.layer_mr_.emplace_back(BarexMRGuard::DeregGuard(std::move(out), self.mp()));
+
+    if (env_crc()) {
+      auto desc = gdrcpy_mmap(layer_blk_p, layer_blk_size);
+      self.layer_gdrcpy_mem_.emplace_back(std::move(desc));
+    }
   }
 
   XThreadpool *threadpool = nullptr;
@@ -565,36 +589,40 @@ void CliBarexCtx::RpcCtxCb::OnRecvCall(accl::barex::XChannel *_ch,
 }
 
 struct GetMemHandles {
+private:
   using Promise = std::promise<std::vector<RDMAMemHandle>>;
 private:
-#ifndef NDEBUG
+  XChannel* const ch_ = nullptr;
   uint64_t const reqid_;
-#endif
   std::shared_ptr<Promise> pr_;
 
 public:
-  GetMemHandles(uint64_t r, std::shared_ptr<Promise> pr) noexcept:
-#ifndef NDEBUG
+  GetMemHandles(XChannel* ch, uint64_t r) noexcept:
+    ch_(ch),
     reqid_(r),
-#endif
-    pr_(std::move(pr)) {}
+    pr_(std::make_shared<Promise>()) {}
+
+  auto future() {
+    return this->pr_->get_future();
+  }
 
   void operator()(Status s, char* buf, size_t len) {
     auto& self = *this;
     if (!s.IsOk()) {
-      auto ex = std::make_exception_ptr(std::runtime_error("GetMemHandles ERR: " + s.ErrMsg()));
+      std::stringstream ss;
+      ss << "GetMemHandles error: ex=" << s.ErrMsg() << " reqid=" << self.reqid_ << " ch=" << self.ch_->ToString();
+      auto ex = std::make_exception_ptr(std::runtime_error(std::move(ss).str()));
       self.pr_->set_exception(std::move(ex));
       return ;
     }
-#ifndef NDEBUG
-    assert(len >= RPC_HEADER);
+    RTASSERT(len >= RPC_HEADER);
     auto [magic, reqid] = deser_rpc_header(buf);
-    assert(magic == MEM_HANDLES_REQ_MAGIC);
-    assert(reqid == self.reqid_);
-#endif
+    RTASSERT(magic == MEM_HANDLES_REQ_MAGIC);
+    RTASSERT(reqid == self.reqid_);
+
     buf += RPC_HEADER;
     len -= RPC_HEADER;
-    assert(len % sizeof(RDMAMemHandle) == 0);
+    RTASSERT(len % sizeof(RDMAMemHandle) == 0);
     size_t handle_n = len / sizeof(RDMAMemHandle);
     auto vec = std::vector<RDMAMemHandle>(handle_n);
     memcpy(vec.data(), buf, handle_n * sizeof(RDMAMemHandle));
@@ -603,16 +631,16 @@ public:
   }
 };
 
-std::future<std::vector<RDMAMemHandle>> CliBarexCtx::get_mem_handles(XChannel* dst) const {
+std::vector<RDMAMemHandle> CliBarexCtx::get_mem_handles(XChannel* dst) const {
   auto& self = *this;
   uint32_t magic = MEM_HANDLES_REQ_MAGIC;
   uint64_t reqid = new_id();
   memp_t bufmr = AllocCPUBuffer(dst, sizeof(magic) + sizeof(reqid));
   ser_rpc_header(bufmr.buf, magic, reqid);
 
-  auto pr = std::make_shared<GetMemHandles::Promise>();
-  auto fut = pr->get_future();
-  self.push(reqid, GetMemHandles(reqid, std::move(pr)));
+  auto memhandles = GetMemHandles(dst, reqid);
+  auto fut = memhandles.future();
+  self.push(reqid, std::move(memhandles));
 
   Send(dst, std::move(bufmr), [this, reqid] (Status s) {
     // this owner: KV_CLIENT.ctx_
@@ -621,7 +649,12 @@ std::future<std::vector<RDMAMemHandle>> CliBarexCtx::get_mem_handles(XChannel* d
     }
     this->on_send_error(std::move(s), reqid);
   });
-  return fut;
+
+  auto futstate = fut.wait_for(std::chrono::seconds(env_rpc_timeout_s()));
+  if (futstate != std::future_status::ready) {
+    this->on_send_error(Status(BAREX_ERR_TIMEOUT), reqid);
+  }
+  return fut.get();
 }
 
 void CliBarexCtx::push(uint64_t reqid, OnRespF on_resp) const {
@@ -647,6 +680,156 @@ auto CliBarexCtx::pop(uint64_t reqid) const -> OnRespF {
   return handle;
 }
 
+
+struct RemoteCrc {
+private:
+  using Promise = std::promise<uint32_t>;
+private:
+  XChannel* const ch_ = nullptr;
+  uint64_t const reqid_;
+  std::shared_ptr<Promise> pr_;
+
+public:
+  RemoteCrc(XChannel* ch, uint64_t r) noexcept:
+    ch_(ch),
+    reqid_(r),
+    pr_(std::make_shared<Promise>()) {}
+
+  auto future() {
+    return this->pr_->get_future();
+  }
+
+  void operator()(Status s, char* buf, size_t len) {
+    auto& self = *this;
+    if (!s.IsOk()) {
+      std::stringstream ss;
+      ss << "RemoteCrc error: ex=" << s.ErrMsg() << " reqid=" << self.reqid_ << " ch=" << self.ch_->ToString();
+      auto ex = std::make_exception_ptr(std::runtime_error(std::move(ss).str()));
+      self.pr_->set_exception(std::move(ex));
+      return ;
+    }
+    RTASSERT(len >= RPC_HEADER);
+    auto [magic, reqid] = deser_rpc_header(buf);
+    RTASSERT(magic == REMOTE_CRC_REQ_MAGIC);
+    RTASSERT(reqid == self.reqid_);
+
+    buf += RPC_HEADER;
+    len -= RPC_HEADER;
+    RTASSERT(len >= sizeof(uint32_t));
+    uint32_t crc = 0;
+    memcpy(&crc, buf, sizeof(uint32_t));
+    self.pr_->set_value(crc);
+    return;
+  }
+};
+
+uint32_t CliBarexCtx::get_remote_crc(XChannel* dst, const std::vector<IpcBlock>* data, uint32_t lcrc) {
+  assert(!data->empty());
+  auto& self = *this;
+  uint64_t const reqid = new_id();
+  const uint32_t bodycnt = data->size();
+  RTASSERT_EQ(uint64_t(bodycnt), data->size());
+  const auto bodysize = data->size() * (sizeof(uint64_t) + sizeof(uint64_t));
+  memp_t bufmr = AllocCPUBuffer(dst, RPC_HEADER + sizeof(uint32_t) + sizeof(uint32_t) + bodysize);
+  ser_rpc_header(bufmr.buf, REMOTE_CRC_REQ_MAGIC, reqid);
+  char* bufstart = bufmr.buf + RPC_HEADER;
+  const char* const bufend = bufmr.buf + bufmr.buf_len;
+  memcpy(bufstart, &lcrc, sizeof(uint32_t));
+  bufstart += sizeof(uint32_t);
+  memcpy(bufstart, &bodycnt, sizeof(uint32_t));
+  bufstart += sizeof(uint32_t);
+  for (const auto& sb : *data) {
+    RTASSERT((bufend - bufstart) >= 16 /* sizeof(uint64_t) * 2 */);
+    memcpy(bufstart, &sb.dst_offset, sizeof(uint64_t));
+    bufstart += sizeof(uint64_t);
+    memcpy(bufstart, &sb.length, sizeof(uint64_t));
+    bufstart += sizeof(uint64_t);
+  }
+
+  auto req = RemoteCrc(dst, reqid);
+  auto fut = req.future();
+  self.push(reqid, std::move(req));
+
+  Send(dst, std::move(bufmr), [this, reqid] (Status s) {
+    // this owner: KV_CLIENT.ctx_
+    if (s.IsOk()) {
+      return ;
+    }
+    this->on_send_error(std::move(s), reqid);
+  });
+
+  auto futstate = fut.wait_for(std::chrono::seconds(env_rpc_timeout_s()));
+  if (futstate != std::future_status::ready) {
+    this->on_send_error(Status(BAREX_ERR_TIMEOUT), reqid);
+  }
+  return fut.get();
+}
+
+void RDMAServer::CtxCallback::resp_remote_crc(accl::barex::XChannel *channel, uint64_t reqid, char *inbuf, size_t inlen) {
+  const auto tp1 = SteadyClock::now();
+  const auto& layer_descs = this->server_->ctx_->layer_gdrcpy_mem();
+  const char* const inbuf_bak = inbuf;
+  const char* const inbuf_end = inbuf + inlen;
+  RTASSERT(inlen > RPC_HEADER + sizeof(uint32_t) + sizeof(uint32_t));
+  inbuf += RPC_HEADER;
+  uint32_t local_crc, offlencnt;
+  memcpy(&local_crc, inbuf, sizeof(uint32_t));
+  inbuf += sizeof(uint32_t);
+  memcpy(&offlencnt, inbuf, sizeof(uint32_t));
+  inbuf += sizeof(uint32_t);
+  std::vector<std::pair<uint64_t, uint64_t>> offlens;
+  offlens.reserve(offlencnt);
+  for (uint32_t i = 0; i < offlencnt; ++i) {
+    RTASSERT((inbuf_end - inbuf) >= 16 /* sizeof(uint64_t) * 2 */);
+    uint64_t off, len;
+    memcpy(&off, inbuf, sizeof(uint64_t));
+    inbuf += sizeof(uint64_t);
+    memcpy(&len, inbuf, sizeof(uint64_t));
+    inbuf += sizeof(uint64_t);
+    offlens.emplace_back(off, len);
+  }
+  const auto tp2 = SteadyClock::now();
+
+  bool crc_enabled = !layer_descs.empty();
+  uint32_t remote_crc = crc32_z(0L, Z_NULL, 0);
+  for (const auto& layer_desc : layer_descs) {
+    if (!layer_desc) {
+      crc_enabled = false;
+      break;
+    }
+    const Bytef* const layer_cpu_ptr = (Bytef*)layer_desc->cpu_ptr();
+    for (const auto& [off, len] : offlens) {
+      remote_crc = crc32_z(remote_crc, layer_cpu_ptr + off, len);
+    }
+  }
+  const auto tp3 = SteadyClock::now();
+
+  if (!crc_enabled) {
+    LOG(WARNING) << "crc not enabled. use BLLM_KVTRANS_CRC=1";
+    remote_crc = local_crc;
+  }
+
+  auto bufmr = AllocCPUBuffer(channel, RPC_HEADER + sizeof(uint32_t));
+  memcpy(bufmr.buf, inbuf_bak, RPC_HEADER);
+  memcpy(bufmr.buf + RPC_HEADER, &remote_crc, sizeof(uint32_t));
+  Send(channel, std::move(bufmr), [channel, reqid, remote_crc, local_crc] (Status s) {
+    RTASSERT_EQ(local_crc, remote_crc);
+    if (s.IsOk()) {
+      return ;
+    }
+    LOG(ERROR) << "resp_remote_crc err=" << s.ErrMsg() << " reqid=" << reqid
+               << " ch=" << channel->ToString();
+  });
+  const auto tp4 = SteadyClock::now();
+
+  LOG(INFO) << "remote crc: reqid=" << reqid << " localcrc=" << local_crc << " remotecrc=" << remote_crc
+            << " inlen=" << inlen
+            << " parsedur_us=" << elapse_us(tp1, tp2)
+            << " crcdur_us=" << elapse_us(tp2, tp3)
+            << " senddur_us=" << elapse_us(tp3, tp4);
+  return;
+}
+
 void CliBarexCtx::on_send_error(accl::barex::Status s, uint64_t reqid) const {
   auto& self = *this;
   auto handle = self.pop(reqid);
@@ -658,15 +841,7 @@ void CliBarexCtx::on_send_error(accl::barex::Status s, uint64_t reqid) const {
   return handle(std::move(s), nullptr, 0);
 }
 
-bool RDMAServer::CtxCallback::is_mem_handles_req(char *in_buf, size_t len) noexcept {
-  if (len != RPC_HEADER) {
-    return false;
-  }
-  auto [magic, _] = deser_rpc_header(in_buf);
-  return magic == MEM_HANDLES_REQ_MAGIC;
-}
-
-void RDMAServer::CtxCallback::resp_mem_handles(accl::barex::XChannel *channel, char *inbuf, size_t inlen) {
+void RDMAServer::CtxCallback::resp_mem_handles(accl::barex::XChannel *channel, uint64_t reqid, char *inbuf, size_t inlen) {
   assert(inlen == RPC_HEADER);
   auto& self = *this;
   auto& handles = self.server_->info_.handles;
@@ -677,24 +852,37 @@ void RDMAServer::CtxCallback::resp_mem_handles(accl::barex::XChannel *channel, c
 
   fault_inject_throw();
 
-  return Send(channel, std::move(bufmr), [] (Status s) {
+  return Send(channel, std::move(bufmr), [channel, reqid] (Status s) {
     if (s.IsOk()) {
       return ;
     }
-    LOG(ERROR) << "resp_mem_handles err=" << s.ErrMsg();
+    LOG(ERROR) << "resp_mem_handles err=" << s.ErrMsg() << " reqid=" << reqid
+               << " ch=" << channel->ToString();
   });
 }
 
 void RDMAServer::CtxCallback::OnRecvCall(XChannel *ch, char *in_buf, size_t len, x_msg_header _header) noexcept {
-  if (is_mem_handles_req(in_buf, len)) {
-    try {
-      this->resp_mem_handles(ch, in_buf, len);
-    } catch (const std::exception& ex) {
-      auto [_, reqid] = deser_rpc_header(in_buf);
-      LOG(ERROR) << "resp mem handle: error=" << ex.what() << ";ch=" << ch->ToString()
-                 << ";reqid=" << reqid;
+  if (len >= RPC_HEADER) {
+    const auto [magic, reqid] = deser_rpc_header(in_buf);
+    if (magic == MEM_HANDLES_REQ_MAGIC) {
+      try {
+        this->resp_mem_handles(ch, reqid, in_buf, len);
+      } catch (const std::exception& ex) {
+        LOG(ERROR) << "resp mem handle: error=" << ex.what() << ";ch=" << ch->ToString()
+                  << ";reqid=" << reqid;
+      }
+      return;
     }
-    return;
+
+    if (magic == REMOTE_CRC_REQ_MAGIC) {
+      try {
+        this->resp_remote_crc(ch, reqid, in_buf, len);
+      } catch (const std::exception& ex) {
+        LOG(ERROR) << "resp remote crc: error=" << ex.what() << ";ch=" << ch->ToString()
+                  << ";reqid=" << reqid;
+      }
+      return;
+    }
   }
 
   InstanceId inst_id;
@@ -790,6 +978,8 @@ void RDMAServer::start_server(ITransferService *service, Context *ctx) {
     throw std::runtime_error("KVT server: rdma context not register.");
   }
   auto barex_ctx = proto_ctx->barex_ctx();
+  assert(self.ctx_ == nullptr);
+  self.ctx_ = barex_ctx;
 
   info.handles.reserve(layer_ptr.size());
   for (size_t idx = 0; idx < layer_ptr.size(); ++idx) {
@@ -806,10 +996,11 @@ void RDMAServer::start_server(ITransferService *service, Context *ctx) {
   info.port = get_port();
   RTASSERT(info.port > 0);
 
-  std::stringstream ss;
-  ss << info.ip << ":" << info.port;
-  winfo->addr = ss.str();
-
+  {
+    std::stringstream ss;
+    ss << info.ip << ":" << info.port;
+    winfo->addr = std::move(ss).str();
+  }
   XListener *listener = nullptr;
   auto xctx = barex_ctx->xctx();
   if (xctx == nullptr) {
@@ -835,7 +1026,7 @@ void RDMAChannel::connect(const WorkerInfo &dst_info) {
   self.ip_ = addr.substr(0, pos);
   auto port_str = addr.substr(pos + 1, addr.size());
   self.port_ = std::stoi(port_str);
-  dst_layer_blk_size_ = dst_info.layer_num_blocks * dst_info.block_size;
+  dst_layer_blk_size_ = dst_info.layer_num_blocks * size_t(dst_info.block_size);
   dst_layer_num_ = dst_info.num_layers;
   assert(self.dst_layer_num_ == self.ctx_->layer_mr().size());
 }
@@ -869,6 +1060,7 @@ void RDMAChannel::do_init() {
     assert(self.dst_handles_.size() == self.dst_layer_num_);
     return;
   }
+  auto init_time = TimeWatch();
   const int sp = env_send_parallel();
   assert(sp > 0);
 
@@ -895,14 +1087,9 @@ void RDMAChannel::do_init() {
   usleep(delay_ms * 1000);
 #endif
 
-  auto mhfut = self.ctx_->get_mem_handles(chs[0].ch());
-  fault_inject_throw();
-  auto mhstate = mhfut.wait_for(std::chrono::seconds(env_rpc_timeout_s()));
-  RTCHECK_EQ(int(mhstate), int(std::future_status::ready));
-  auto mh = mhfut.get();
-
-  self.dst_handles_ = std::move(mh);
+  self.dst_handles_ = self.ctx_->get_mem_handles(chs[0].ch());
   LOG(INFO) << "RDMAChannel connect. dstip=" << self.ip_
+            << ",init_us=" << init_time.get_elapse_us()
             << ",dstport=" << self.port_
             << ",dsthandles_n=" << self.dst_handles_.size();
   assert(!self.chs_.empty());
@@ -1031,6 +1218,11 @@ void RDMAChannel::register_data(std::vector<IpcBlock>& data, TPKind kind) {
   self.data_ = &data;
   self.kind_ = kind;
 
+  self.enable_crc_ = env_crc();
+  if (self.enable_crc_) {
+    self.crc_ = crc32_z(0L, Z_NULL, 0);
+  }
+
 #ifndef NDEBUG
   size_t total_len_debug = std::accumulate(data.begin(), data.end(), 0, [] (size_t acc, const IpcBlock& item) {
     return acc + item.length;
@@ -1076,6 +1268,16 @@ static size_t cdiv(size_t a, size_t b) {
   return (a + (b - 1)) / b;
 }
 
+// may be nullptr
+static const Bytef* get_layer_cpu_ptr(CliBarexCtx* ctx, size_t layer_idx) {
+  const auto& layer_descs = ctx->layer_gdrcpy_mem();
+  if (layer_idx >= layer_descs.size()) {
+    return nullptr;
+  }
+  const auto& desc = layer_descs[layer_idx];
+  return desc ? (Bytef*)desc->cpu_ptr() : (Bytef*)nullptr;
+}
+
 
 void RDMAChannel::send_data(size_t layer_idx) {
   auto &self = *this;
@@ -1095,6 +1297,11 @@ void RDMAChannel::send_data(size_t layer_idx) {
   auto datasp = std::make_shared<std::vector<rw_memp_t>>();
   datasp->reserve(dataperch);
   const auto& src_mr_temp = self.ctx_->layer_mr()[layer_idx].mr();
+  const Bytef* const layer_cpu_ptr = get_layer_cpu_ptr(self.ctx_, layer_idx);
+  if (layer_cpu_ptr == nullptr && self.enable_crc_) {
+    LOG(WARNING) << "disable crc check. layer_idx=" << layer_idx;
+    self.enable_crc_ = false;
+  }
   for (const auto &[src_offset, dst_offset, len] : data) {
     assert(len > 0);
     assert(src_offset < self.ctx_->layer_blk_size);
@@ -1117,6 +1324,11 @@ void RDMAChannel::send_data(size_t layer_idx) {
       self.write_futs_.emplace_back(std::move(fut));
       datasp = std::make_shared<std::vector<rw_memp_t>>();
       datasp->reserve(dataperch);
+    }
+    if (self.enable_crc_) {
+      assert(layer_cpu_ptr);
+      auto* src_addr = layer_cpu_ptr + src_offset;
+      self.crc_ = crc32_z(self.crc_, src_addr, len);
     }
   }
   if (!datasp->empty()) {
@@ -1280,7 +1492,6 @@ static void when_all_succeed(std::vector<std::future<void>> &futs) {
 
 void RDMAChannel::flush(std::string& outstr) {
   auto &self = *this;
-  self.data_ = nullptr;
 
   const auto inflyn = self.write_futs_.size();
   auto out = std::ostringstream();
@@ -1290,6 +1501,7 @@ void RDMAChannel::flush(std::string& outstr) {
       << ",SbSizeMin=" << self.sb_size_min_
       << ",SbSizeMax=" << self.sb_size_max_
       << ",SbSizeTotal=" << self.sb_size_total_
+      << ",CRC32=" << self.crc_
       << ",InflyWrite=" << inflyn;
 
   uint64_t send_us_min = UINT64_MAX;
@@ -1313,8 +1525,18 @@ void RDMAChannel::flush(std::string& outstr) {
   out << ",SendUsMin=" << send_us_min
       << ",SendUsMax=" << send_us_max
       << ",SendUsAvg=" << send_us_total / float(inflyn);
-  outstr = std::move(out).str();
 
+  if (self.enable_crc_) {
+    auto crcrt = TimeWatch();
+    assert(!self.chs_.empty());
+    auto rcrc = self.ctx_->get_remote_crc(self.chs_[0].ch(), self.data_, self.crc_);
+    auto crc_dus_us = crcrt.get_elapse_us();
+    out << ",CrcDurUs=" << crc_dus_us;
+    RTASSERT_EQ(rcrc, self.crc_);
+  }
+
+  self.data_ = nullptr;
+  outstr = std::move(out).str();
   return;
 }
 

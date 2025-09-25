@@ -39,6 +39,18 @@ class FdGuard {
 } while (0)
 
 
+#define RTASSERT_EQ(left, right) do { \
+    const auto& left_val = (left);  \
+    const auto& right_val = (right); \
+    if (left_val != right_val) { \
+        std::cerr << "AssertFailed: loc=" << __FILE__ << ':' << __LINE__ \
+           << ";left=" << #left << ";leftval=" << left_val \
+           << ";right=" << #right << ";rightval=" << right_val; \
+        abort(); \
+    } \
+} while (0)
+
+
 #define RTCHECK_EQ(left, right) do { \
     const auto& left_val = (left);  \
     const auto& right_val = (right); \
@@ -47,6 +59,16 @@ class FdGuard {
         ss << "AssertFailed: loc=" << __FILE__ << ':' << __LINE__ \
            << ";left=" << #left << ";leftval=" << left_val \
            << ";right=" << #right << ";rightval=" << right_val; \
+        throw std::runtime_error(std::move(ss).str()); \
+    } \
+} while (0)
+
+
+#define RTCHECK(expr) do { \
+    if (!(expr)) { \
+        std::stringstream ss; \
+        ss << "AssertFailed: loc=" << __FILE__ << ':' << __LINE__ \
+           << ";expr=" << #expr; \
         throw std::runtime_error(std::move(ss).str()); \
     } \
 } while (0)

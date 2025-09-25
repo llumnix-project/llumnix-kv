@@ -35,4 +35,6 @@ const std::vector<std::pair<uint64_t, int>>* env_reserve();
 
 int env_rpc_timeout_s();
 
+int env_crc();
+
 }  // namespace blade_llm {

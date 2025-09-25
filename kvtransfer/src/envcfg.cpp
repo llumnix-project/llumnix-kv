@@ -11,7 +11,6 @@
 namespace blade_llm {
 
 static int env2posint(const char* env, int def) {
-  assert(def > 0);
   const char *valstr = getenv(env);
   fprintf(stdout, "kvtenv: env=%s val=%s def=%d\n", env, (valstr == nullptr ? "NULL" : valstr), def);
   fflush(stdout);
@@ -203,5 +202,14 @@ int env_rpc_timeout_s() {
   return val;
 }
 
+int env_crc() {
+  static constexpr int DEFVAL = 0;
+  static int val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_CRC", DEFVAL);
+  });
+  return val;
+}
 
 }  // namespace blade_llm {

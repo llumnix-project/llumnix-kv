@@ -129,7 +129,7 @@ std::string WorkerInfo::to_string() const {
     }
     ss << "," << base64_encode(other_info);
   }
-  return ss.str();
+  return std::move(ss).str();
 }
 
 WorkerInfo WorkerInfo::from_string(const std::string &src) {
