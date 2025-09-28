@@ -33,19 +33,21 @@ class FdGuard {
 
 #define RTASSERT(expr) do { \
     if (!(expr)) { \
-        fprintf(stderr, "Runtime error: Assertion failed in %s on line %d: %s\n", __FILE__, __LINE__, #expr); \
+        std::cerr << "AssertFailed: loc=" << __FILE__ << ':' << __LINE__ \
+                  << ";errno=" << errno \
+                  << ";expr=" << #expr << std::endl; \
         abort(); \
     } \
 } while (0)
-
 
 #define RTASSERT_EQ(left, right) do { \
     const auto& left_val = (left);  \
     const auto& right_val = (right); \
     if (left_val != right_val) { \
         std::cerr << "AssertFailed: loc=" << __FILE__ << ':' << __LINE__ \
+           << ";errno=" << errno \
            << ";left=" << #left << ";leftval=" << left_val \
-           << ";right=" << #right << ";rightval=" << right_val; \
+           << ";right=" << #right << ";rightval=" << right_val << std::endl; \
         abort(); \
     } \
 } while (0)
@@ -57,6 +59,7 @@ class FdGuard {
     if (left_val != right_val) { \
         std::stringstream ss; \
         ss << "AssertFailed: loc=" << __FILE__ << ':' << __LINE__ \
+           << ";errno=" << errno \
            << ";left=" << #left << ";leftval=" << left_val \
            << ";right=" << #right << ";rightval=" << right_val; \
         throw std::runtime_error(std::move(ss).str()); \
@@ -68,6 +71,7 @@ class FdGuard {
     if (!(expr)) { \
         std::stringstream ss; \
         ss << "AssertFailed: loc=" << __FILE__ << ':' << __LINE__ \
+           << ";errno=" << errno \
            << ";expr=" << #expr; \
         throw std::runtime_error(std::move(ss).str()); \
     } \

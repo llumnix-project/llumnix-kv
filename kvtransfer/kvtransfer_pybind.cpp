@@ -13,6 +13,8 @@ namespace py = pybind11;
 
 namespace blade_llm {
 
+void monitor_init();
+
 static std::unique_ptr<KvTransferClient> KV_CLIENT = nullptr;
 static ITransferServer *KV_SERVER = nullptr;
 static KvTransferService *KV_SERVICE = nullptr;
@@ -62,6 +64,7 @@ void init_kv_transfer_client(const std::string &inst_name,
     worker_info->transfer_protocols = ctx->support_protocols().value();
     LOG(INFO) << "init_kv_transfer_client. worker_info=" << worker_info->to_string();
   }
+  monitor_init();
 }
 
 void add_target(const std::string &inst_name,
@@ -216,6 +219,7 @@ void init_kv_transfer_server(const std::string &inst_name,
     worker_info->transfer_protocols = ctx->support_protocols().value();
     LOG(INFO) << "init_kv_transfer_server. worker_info=" << worker_info->to_string();
   }
+  monitor_init();
 }
 
 void submit_req_recv(const std::string &src_inst_name,

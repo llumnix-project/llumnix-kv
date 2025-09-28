@@ -24,6 +24,16 @@ static int env2posint(const char* env, int def) {
   return ret;
 }
 
+int env_heap_prof() {
+  static constexpr int DEFVAL = 0;
+  static int val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_HEAP_PROF", DEFVAL);
+  });
+  return val;
+}
+
 int env_send_parallel() {
   static constexpr int DEFVAL = 1;
   static int val = DEFVAL;

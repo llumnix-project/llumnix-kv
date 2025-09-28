@@ -5,6 +5,8 @@
 
 namespace blade_llm {
 
+int env_heap_prof();
+
 int env_send_parallel();
 int env_ctx_tpsize();
 int env_conn_tpsize();
