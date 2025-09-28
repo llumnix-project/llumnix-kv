@@ -95,8 +95,8 @@ struct WorkerInfo {
   WorkerId worker_id;
   uint32_t tp_size;
   uint32_t worker_tp_rank;
-  uint32_t block_size;
-  uint32_t token_size;
+  size_t block_size;
+  size_t token_size;
   uint32_t layer_num_blocks{1};
   uint32_t num_layers{1};
   uint8_t transfer_protocols{0};

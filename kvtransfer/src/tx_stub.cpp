@@ -333,10 +333,7 @@ public:
     const auto& dst_id = self.stub->dstid_;
     const auto dst_worker_id = self.stub->dstworkerid_;
 
-#ifndef NDEBUG
-    // 用于提高 https://aone.alibaba-inc.com/v2/project/664220/req/60815172 复现概率.
-    usleep(300 * 1000);  // sleep 300ms
-#endif
+    fault_inject_sleep(300 * 1000);
 
     self.iter_start_ts = SteadyClock::now();  // iterator begin;
     auto const queue_us = elapse_us(batch.step->start_send_ts, self.iter_start_ts);

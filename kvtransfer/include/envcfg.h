@@ -37,4 +37,6 @@ int env_rpc_timeout_s();
 
 int env_crc();
 
+int env_port_base();
+
 }  // namespace blade_llm {

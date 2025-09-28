@@ -993,7 +993,7 @@ void RDMAServer::start_server(ITransferService *service, Context *ctx) {
   assert(info.handles.size() == layer_ptr.size());
 
   get_ip(&info);
-  info.port = get_port();
+  info.port = env_port_base() + winfo->worker_id;
   RTASSERT(info.port > 0);
 
   {
@@ -1006,13 +1006,13 @@ void RDMAServer::start_server(ITransferService *service, Context *ctx) {
   if (xctx == nullptr) {
     LOG(ERROR) << "xctx is nullptr";
   }
+  LOG(INFO) << "RDMAServer.start_server: ip=" << info.ip << " port=" << info.port << " layer_num_blocks="
+            << layer_num_blocks;
   auto result = XListener::NewInstance(listener, env_conn_tpsize(), info.port, TIMER_3S, {xctx});
   RTASSERT(result == accl::barex::BAREX_SUCCESS);
   self.listener_.reset(listener);
   result = self.listener_->Listen();
   RTASSERT(result == accl::barex::BAREX_SUCCESS);
-  LOG(INFO) << "RDMAServer.start_server: ip=" << info.ip << " port=" << info.port << " layer_num_blocks="
-            << layer_num_blocks;
 }
 
 void RDMAChannel::connect(const WorkerInfo &dst_info) {

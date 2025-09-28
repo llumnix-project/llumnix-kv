@@ -8,6 +8,8 @@
 namespace blade_llm {
 
 std::vector<uint8_t> WorkerInfo::to_bytes() const {
+  RTASSERT_EQ(block_size, uint32_t(block_size));
+  RTASSERT_EQ(token_size, uint32_t(token_size));
   uint32_t tmp[11];
   tmp[0] = htobe32(worker_id);
   tmp[1] = htobe32(tp_size);

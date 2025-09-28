@@ -15,9 +15,7 @@ class NoCudaBarrier : public ICUDABarrier {
 };
 
 void CudaEventBarrier::wait(uint32_t layer_idx) {
-  if (layer_idx < event_addrs_.size()) {
-    cuda_wait_event(event_addrs_[layer_idx]);
-  }
+  cuda_wait_event(event_addrs_.at(layer_idx));
 }
 
 Context::Context(const InstanceId &inst, const WorkerId &worker) :

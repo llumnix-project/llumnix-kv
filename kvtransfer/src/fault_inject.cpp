@@ -8,8 +8,6 @@
 namespace blade_llm {
 
 #ifdef NDEBUG
-void fault_inject_throw() {
-}
 #else
 static constexpr uint64_t SCALE = 100000;
 static thread_local std::mt19937_64 t_rng{(unsigned long) gettid()};
@@ -21,8 +19,19 @@ void fault_inject_throw() {
   if (rnd >= rate) {
     return ;
   }
+  LOG(INFO) << "fault_inject_throw: hint!";
   throw std::runtime_error("fault inject");
-  // this->rng_.seed(std::uint_fast64_t(s->dstworkerid_));
+}
+
+void fault_inject_sleep(int dur_us) {
+  uint64_t rate = (env_debug_tx_failrate() - 1) * SCALE;
+  uint64_t rnd = t_random_dist(t_rng);
+  if (rnd >= rate) {
+    return ;
+  }
+  LOG(INFO) << "fault_inject_sleep: dur_us=" << dur_us;
+  usleep(dur_us);
+  return;
 }
 #endif
 

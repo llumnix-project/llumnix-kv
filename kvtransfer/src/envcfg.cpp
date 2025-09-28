@@ -212,4 +212,14 @@ int env_crc() {
   return val;
 }
 
+int env_port_base() {
+  static constexpr int DEFVAL = 31218;
+  static int val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_PORT_BASE", DEFVAL);
+  });
+  return val;
+}
+
 }  // namespace blade_llm {
