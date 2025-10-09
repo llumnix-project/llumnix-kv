@@ -26,6 +26,7 @@ static void do_parse_block_send_p_eq_d(
   const auto &src_blocks = task->src_blocks();
   const auto &dst_blocks = task->dst_blocks();
   // assert(src_blocks.size() == dst_blocks.size());
+  send_blocks.reserve(send_blocks.size() + left_tokens / src_ntpb + 3);
 
   while (left_tokens > 0) {
     auto src_block_idx = wrote_tokens / src_ntpb;
@@ -88,6 +89,7 @@ static void vllm_parse_block_send_p_eq_d(
   do_parse_block_send_p_eq_d(k_block_size, k_token_size, task, send_blocks);
   size_t const sb_end_idx = send_blocks.size();
 
+  send_blocks.reserve(send_blocks.size() + sb_end_idx - sb_idx);
   for (; sb_idx < sb_end_idx; ++sb_idx) {
     auto sb = send_blocks[sb_idx];
     sb.src_offset += src_layer_size;
@@ -111,6 +113,7 @@ static void parse_block_send_gt(
   const size_t p_block_size = p_token_size * ntpb;
   const size_t d_block_size = d_token_size * ntpb;
 
+  send_blocks.reserve(send_blocks.size() + left_tokens);
   while (left_tokens > 0) {
     const uint32_t block_idx = wrote_tokens / ntpb;
     assert(block_idx < p_blocks.size() && block_idx < d_blocks.size());
@@ -171,6 +174,7 @@ static void do_parse_block_send(
     p_blocks, d_blocks, wrote_tokens, left_tokens, send_blocks);
   const size_t sbsize_after = send_blocks.size();
 
+  send_blocks.reserve(send_blocks.size() + sbsize_after - sbsize);
   for (size_t idx = sbsize; idx < sbsize_after; ++idx) {
     const auto& sb = send_blocks[idx];
     const size_t pv_token_off = sb.src_offset + p_k_size;
@@ -219,6 +223,7 @@ static void vllm_parse_block_send_p_gt_d(
 
   size_t const pk_layer_size = ntpb * p_k_size * p_info->layer_num_blocks;
   size_t const dk_layer_size = ntpb * d_k_size * d_info->layer_num_blocks;
+  send_blocks.reserve(send_blocks.size() + sb_end_idx - sb_idx);
   for (; sb_idx < sb_end_idx; ++sb_idx) {
     auto sb = send_blocks[sb_idx];
     sb.src_offset += pk_layer_size;
@@ -327,12 +332,13 @@ public:
     : stub(s) {
   }
 
-  void do_task(BatchSendTask& batch) {
+  void do_task(BatchSendTask& batch) noexcept {
     auto& self = *this;
     auto const step_idx = batch.step->step_idx;
     const auto& dst_id = self.stub->dstid_;
     const auto dst_worker_id = self.stub->dstworkerid_;
 
+    // 用于提高 https://aone.alibaba-inc.com/v2/project/664220/req/60815172 复现概率.
     fault_inject_sleep(300 * 1000);
 
     self.iter_start_ts = SteadyClock::now();  // iterator begin;
@@ -424,6 +430,7 @@ public:
     auto& self = *this;
     self.flush_out_buf.clear();
     self.send_blocks.clear();
+    self.send_blocks.shrink_to_fit();
     self.send_req.clear();
     self.finished_req.clear();
   }
@@ -537,7 +544,7 @@ private:
     } catch (const std::exception& ex) {
       LOG(ERROR) << "do_rpc_send_done failed. ex=" << ex.what();
       self.send_done_sock.reset();
-      throw;
+      // throw;
     }
     return ;
 }
@@ -654,82 +661,27 @@ private:
   }
 };
 
-void KvSendStub::start_async() {
-  auto taskctx = TaskContext(this);
-
-  for (;;) {
-    BatchSendTask batch;
-    send_tasks_.pop(batch);
-    if (batch.step == nullptr) {
-      assert(send_tasks_.is_closed());
-      break;
-    }
-
-    try {
-      taskctx.do_task(batch);
-    } catch (const std::exception& ex) {
-      LOG(ERROR) << "do task failed. DstId=" << this->dstid_
-                  << ",DstWorkerId=" << this->dstworkerid_
-                  << ",StepIdx=" << batch.step->step_idx
-                  << ",Ex=" << ex.what();
-      state_.store(StubState::POISONED, std::memory_order_release);
-      break;
-    }
-
-    taskctx.clear();
-  }
-
-  auto state = state_.load(std::memory_order_relaxed);
-  if (state == StubState::STOPPING) {
-    if (!state_.compare_exchange_strong(state, StubState::DISCARD, std::memory_order_seq_cst)) {
-      state_.store(StubState::POISONED, std::memory_order_seq_cst);
-    }
-  }
-
-  LOG(INFO) << "KVT tx_stub: stop to send kv of to worker("
-            << this->dstid_ << ":" << this->dstworkerid_ << ");";
-}
-
-void KvSendStub::start() {
-  auto state = state_.load(std::memory_order_relaxed);
-  if (state == StubState::INIT) {
-    if (state_.compare_exchange_strong(state, StubState::WORKING, std::memory_order_seq_cst)) {
-      send_backend_.emplace(&KvSendStub::start_async, this);
-    }
-  }
-}
-
-void KvSendStub::send_batch(BatchSendTask batch) {
+void KvSendStub::send_batch(BatchSendTask batch) noexcept {
   assert(!batch.tasks.empty());
-  send_tasks_.push(std::move(batch));
+  auto& ctx = *this->taskctx_;
+  ctx.do_task(batch);
+  ctx.clear();
+  return;
 }
 
-void KvSendStub::stop() {
-  auto state = state_.load(std::memory_order_relaxed);
-  while (state == StubState::WORKING || state == StubState::INIT) {
-    if (state_.compare_exchange_weak(state, StubState::STOPPING, std::memory_order_seq_cst)) {
-      send_tasks_.close();
-      break;
-    }
-  }
-}
-
-StubState KvSendStub::check_state() {
-  return state_.load(std::memory_order_relaxed);
-}
-
-KvSendStub::~KvSendStub() {
-  auto state = state_.load(std::memory_order_relaxed);
-  if (state != StubState::DISCARD && state != StubState::POISONED) {
-    LOG(WARNING) << "KVT: SendStub(" << dstid_ << ":" << dstworkerid_
-                 << ") was not been dropped gracefully.";
-    send_tasks_.close();
-  }
-  if (send_backend_.has_value()) {
-    send_backend_->join();
-  }
-  send_backend_.reset();
-}
+KvSendStub::KvSendStub(InstanceId dstid, WorkerId dstworkerid,
+             const WorkerInfo &src_info,
+             uint32_t start_layer,
+             uint32_t num_layers,
+             std::unique_ptr<IChannelFactory> channel_factory,
+             std::shared_ptr<INamingWorkerClient> naming) :
+      ISendStub(std::move(dstid), dstworkerid),
+      src_info_(src_info),
+      naming_(std::move(naming)),
+      start_layer_(start_layer),
+      num_layers_(num_layers),
+      channel_factory_(std::move(channel_factory)),
+      taskctx_(std::make_unique<TaskContext>(this)) {};
 
 SendStub KvSendStubFactory::create_stub(const InstanceId& dst_inst_name,
                                         WorkerId dst_worker_id,
@@ -749,4 +701,5 @@ SendStub KvSendStubFactory::create_stub(const InstanceId& dst_inst_name,
                                       std::move(channel_factory),
                                       std::move(naming_worker));
 }
+
 }

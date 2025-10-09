@@ -10,12 +10,130 @@
 
 namespace blade_llm {
 
+void KvTransferClient::TargetMgr::try_create(
+  const InstanceId& inst_id, WorkerId worker_id,
+  uint32_t start_layer, uint32_t num_layers,
+  const std::optional<std::string>& worker_info) {
+  auto& self = *this;
+  auto iter = self.peek(inst_id, worker_id);
+  if (iter != self.targets_.end()) {
+    return;
+  }
+
+  self.create(inst_id, worker_id, start_layer, num_layers, worker_info);
+  return;
+}
+
+auto KvTransferClient::TargetMgr::get(const InstanceId& inst_id, WorkerId worker_id) -> Target* {
+  auto& self = *this;
+  auto iter = self.peek(inst_id, worker_id);
+  if (iter == self.targets_.end()) {
+    return nullptr;
+  }
+  self.targets_.splice(self.targets_.begin(), self.targets_, iter);
+  return &*iter;
+}
+
+void KvTransferClient::TargetMgr::try_shrink() {
+  auto& self = *this;
+  if (self.targets_.size() <= (size_t)env_txstub_cap()) {
+    return;
+  }
+  self.shrink();
+  return;
+}
+
+auto KvTransferClient::TargetMgr::peek(const InstanceId& inst_id, WorkerId worker_id) -> std::list<Target>::iterator {
+  auto& self = *this;
+  auto iter = self.target_map_.find(inst_id);
+  if (iter == self.target_map_.end()) {
+    return self.targets_.end();
+  }
+  if (worker_id >= iter->second.size()) {
+    return self.targets_.end();
+  }
+  const auto& targetiter = iter->second[worker_id];
+  if (!targetiter.has_value()) {
+    return self.targets_.end();
+  }
+  return *targetiter;
+}
+
+
+void KvTransferClient::TargetMgr::shrink() {
+  auto& self = *this;
+  const size_t cap = env_txstub_cap();
+  while (self.targets_.size() > cap) {
+    auto& target = self.targets_.back();
+    auto inflycnt = target.inflycnt.load(std::memory_order_relaxed);
+    assert(inflycnt >= 0);
+    if (inflycnt > 0) {
+      break;
+    }
+    const auto& dstid = target.stub->dstid();
+    const auto dwid = target.stub->dstworkerid();
+    const auto popret = self.try_pop_map(dstid, dwid);
+
+    LOG(INFO) << "TargetMgr.shrink: instid=" << dstid << " wid=" << dwid
+              << " target=" << &target << " popret=" << popret;
+    self.targets_.pop_back();
+  }
+}
+
+int KvTransferClient::TargetMgr::try_pop_map(const InstanceId& dstid, WorkerId dwid) {
+  auto& self = *this;
+  auto targetiters_iter = self.target_map_.find(dstid);
+  if (targetiters_iter == self.target_map_.end()) {
+    return 0;
+  }
+  auto& targetiters = targetiters_iter->second;
+  if (dwid >= targetiters.size()) {
+    return 0;
+  }
+  assert(targetiters[dwid].has_value());
+  targetiters[dwid] = std::nullopt;
+
+  for (const auto& iteropt : targetiters) {
+    if (iteropt.has_value()) {
+      return 1;
+    }
+  }
+  self.target_map_.erase(targetiters_iter);
+  return 2;
+}
+
+void KvTransferClient::TargetMgr::create(
+  const InstanceId& inst_id, WorkerId worker_id,
+  uint32_t start_layer, uint32_t num_layers,
+  const std::optional<std::string>& worker_info) {
+  auto& self = *this;
+  auto stub = self.stub_factory_->create_stub(inst_id, worker_id,
+    start_layer, num_layers,
+    std::nullopt, worker_info);
+  self.targets_.emplace_front(std::move(stub));
+  auto newiter = self.targets_.begin();
+  auto& targets = self.target_map_[inst_id];
+  if (worker_id >= targets.size()) {
+    targets.resize(worker_id + 1);
+  }
+  assert(!targets.at(worker_id).has_value());
+  targets[worker_id] = newiter;
+  LOG(INFO) << "TargetMgr.create: instid=" << inst_id << " wid=" << worker_id
+            << " worker_info=" << (worker_info ? worker_info->c_str() : "NULL")
+            << " target=" << &*newiter;
+  return;
+}
+
 KvTransferClient::KvTransferClient(std::unique_ptr<Context> &&ctx,
                                    std::unique_ptr<ISendStubFactory> &&factory) :
     auto_remove_req_(env_send_done_addr() != nullptr),
     ctx_(std::move(ctx)),
-    stub_factory_(std::move(factory)),
-    single_thd_(4) {}
+    single_thd_(4),
+    mgr_(std::move(factory)) {
+  auto result = accl::barex::XThreadpool::NewInstance(this->target_thdpool_, env_send_tpsize(), "clisend");
+  RTASSERT_EQ(result, accl::barex::BAREX_SUCCESS);
+  return;
+}
 
 std::unique_ptr<KvTransferClient> KvTransferClient::create(std::unique_ptr<Context> &&ctx,
                                                            const std::vector<TransferProtocol> &protocols,
@@ -71,38 +189,11 @@ void KvTransferClient::add_target(const InstanceId &inst_name,
                                   uint32_t num_layers,
                                   std::optional<TransferProtocol> proto_opt,
                                   const std::optional<std::string> &worker_info) {
-  auto &inst = targets_[inst_name];
-  if (inst.size() <= worker_id) {
-    inst.resize(worker_id + 1);
-  }
-  if (inst[worker_id] == nullptr) {
-    try {
-      inst[worker_id] = stub_factory_->create_stub(inst_name, worker_id, start_layer, num_layers, proto_opt, worker_info);
-    } catch (const std::exception &e) {
-      LOG(ERROR) << "KVT client: connect target worker(" << inst_name << ":" << worker_id << ") failed: " << e.what();
-      throw KVTransferException(ErrorKind::TARGET_CONNOT_CONNECT, e.what());
-    }
-    inst[worker_id]->start();
-  }
-  auto state = inst[worker_id]->check_state();
-  if (state != StubState::WORKING) {
-    throw KVTransferException(ErrorKind::TARGET_DISCONNECTED, "target worker disconnected");
-  }
+  RTASSERT(false);
 }
 
 void KvTransferClient::remove_target(const InstanceId &inst_name, const WorkerId &worker_id) {
-  auto &inst = targets_[inst_name];
-  while (inst.size() <= worker_id) {
-    return;
-  }
-
-  if (inst[worker_id] != nullptr) {
-    inst[worker_id]->stop();
-    auto state = inst[worker_id]->check_state();
-    if (state == StubState::DISCARD) {
-      inst[worker_id].reset(nullptr);
-    }
-  }
+  RTASSERT(false);
 }
 
 void KvTransferClient::add_send_task(std::shared_ptr<RequestInfo> req, uint32_t seen, uint32_t new_tokens, bool has_last) {
@@ -142,25 +233,7 @@ void KvTransferClient::submit_req_send(const InstanceId &dst_inst_name,
     throw KVTransferException(ErrorKind::INVALID_REQUEST_PARAM, "invalid new tokens;");
   }
 
-  auto &inst = targets_[dst_inst_name];
-  if (inst.size() <= dst_worker_id || inst[dst_worker_id] == nullptr) {
-    if (auto_connect_) {
-      LOG(WARNING) << "KVT client: target worker(" << dst_inst_name << ":" << dst_worker_id
-                   << ") not connected, try to connect use default transfer config;";
-      auto num_layers = ctx_->num_layers();
-      add_target(dst_inst_name, dst_worker_id, 0, num_layers,std::nullopt,dst_worker_info );
-    } else {
-      LOG(ERROR) << "KVT client: submit request(" << req_id << ") to unknown target ("
-                 << dst_inst_name << ":" << dst_worker_id << "), add it first;";
-      throw KVTransferException(ErrorKind::TARGET_NOT_FOUND, "target worker not connect;");
-    }
-  }
-  if (inst[dst_worker_id]->check_state() == StubState::POISONED) {
-    LOG(ERROR) << "KVT client: detect stub to worker(" << dst_inst_name << ":" << dst_worker_id
-               << ") disconnected because of error, try to reset; ";
-    LOG(ERROR) << "KVT client: fail to submit request(" << req_id << ") because target worker disconnected.";
-    throw KVTransferException(ErrorKind::TARGET_DISCONNECTED, "target worker disconnected;");
-  }
+  mgr_.try_create(dst_inst_name, dst_worker_id, 0, ctx_->num_layers(), dst_worker_info);
   auto req_info = std::make_shared<RequestInfo>(dst_inst_name,
                                                 dst_worker_id,
                                                 req_id,
@@ -211,9 +284,6 @@ size_t KvTransferClient::start_send() {
   auto step = std::make_shared<Step>(step_id_++);
 
   for (auto& [inst_id, workers_task] : targets_tasks_buf_) {
-    auto& workers_stub = targets_[inst_id];
-    assert(!workers_stub.empty());
-
     assert(!workers_task.empty());
     for (auto& [worker_id, worker_tasks] : workers_task) {
       assert(!worker_tasks.step);
@@ -221,11 +291,18 @@ size_t KvTransferClient::start_send() {
       assert(worker_tasks.step.get() == step.get());
       assert(!worker_tasks.tasks.empty());
 
-      assert(workers_stub.size() > worker_id);
-      auto& stub = *workers_stub[worker_id];
-      RTASSERT(stub.check_state() == StubState::WORKING);
-      // TODO(zhanyi.ww): 增加容错处理.
-      stub.send_batch(std::move(worker_tasks));
+      auto* target = mgr_.get(inst_id, worker_id);
+      assert(target != nullptr);
+      auto cnt = target->inflycnt.fetch_add(1, std::memory_order_acquire);
+      if (cnt == 0) {
+        target->thread_hint = ++thread_hint_;
+      }
+      target_thdpool_->Submit([target, batch=std::move(worker_tasks)] () mutable {
+        // std::function will COPY batch!
+        target->stub->send_batch(std::move(batch));
+        auto ncnt = target->inflycnt.fetch_sub(1, std::memory_order_release);
+        assert(ncnt > 0);
+      }, target->thread_hint);
     }
   }
   targets_tasks_buf_.clear();
@@ -265,6 +342,9 @@ void KvTransferClient::flush_send(size_t step_id) {
   last_step_guard_->step()->flush_send_ts = SteadyClock::now();
 
   last_step_guard_.reset();
+
+  // 最合适的调用地方是某处可以与 gpu overlap 的地方, 后续 kvconnector 应该增加这种接口
+  mgr_.try_shrink();
 }
 
 ReqState KvTransferClient::check_transfer_done(const RequestId &req_id) {

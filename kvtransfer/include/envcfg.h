@@ -41,4 +41,8 @@ int env_crc();
 
 int env_port_base();
 
+int env_send_tpsize();
+
+int env_txstub_cap();
+
 }  // namespace blade_llm {

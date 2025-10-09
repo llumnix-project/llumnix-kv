@@ -14,6 +14,8 @@
 #include "utils/semaphore.h"
 #include "utils/thread_pool.h"
 #include "error.h"
+#include <accl/barex/xthreadpool.h>
+#include <list>
 
 namespace blade_llm {
 
@@ -73,19 +75,61 @@ class KvTransferClient : public noncopyable {
  private:
   void add_send_task(std::shared_ptr<RequestInfo> reqinfo, uint32_t seen, uint32_t new_tokens, bool has_last);
  private:
+  struct Target {
+    std::atomic<int> inflycnt {0};
+    int thread_hint = 0;
+    SendStub stub;
+  public:
+    Target(SendStub s) noexcept:
+      stub(std::move(s)) {}
+  };
+
+  class TargetMgr {
+    std::unique_ptr<ISendStubFactory> stub_factory_;
+    // head is newer~
+    std::list<Target> targets_;
+    std::unordered_map<InstanceId, std::vector<std::optional<std::list<Target>::iterator>>> target_map_;
+  public:
+    TargetMgr(std::unique_ptr<ISendStubFactory> s) noexcept:
+      stub_factory_(std::move(s)) {}
+
+    void try_create(const InstanceId& inst_id, WorkerId worker_id,
+                    uint32_t start_layer, uint32_t num_layers,
+                    const std::optional<std::string>& worker_info);
+
+    Target* get(const InstanceId& inst_id, WorkerId worker_id);
+
+    void try_shrink();
+  private:
+    // RETURN self.targets_.end() means not found
+    std::list<Target>::iterator peek(const InstanceId& inst_id, WorkerId worker_id);
+
+    void shrink();
+
+    int try_pop_map(const InstanceId& inst_id, WorkerId worker_id);
+
+    void create(const InstanceId& inst_id, WorkerId worker_id,
+                uint32_t start_layer, uint32_t num_layers,
+                const std::optional<std::string>& worker_info);
+
+    TargetMgr(TargetMgr&&) = delete;
+    TargetMgr(const TargetMgr&) = delete;
+  };
+ private:
   const bool auto_remove_req_;
   bool auto_connect_{false};
   size_t step_id_{0};
   std::unique_ptr<Context> ctx_;
   std::unordered_map<RequestId, std::vector<std::shared_ptr<RequestInfo>>> reqs_;
-  std::unordered_map<InstanceId, std::vector<SendStub>> targets_;
   // 用来临时暂存 submit_req_send/submit_delta_send 创建的 send task.
   // start_send() 会清空该字段.
   // targets_tasks_buf_ value 长度一般是 p_info->tp_size / d_info->tp_size; 约 1/2/4.
   std::unordered_map<InstanceId, std::vector<std::pair<WorkerId, BatchSendTask>>> targets_tasks_buf_;
   std::shared_ptr<StepGuard> last_step_guard_;  // may be null.
-  std::unique_ptr<ISendStubFactory> stub_factory_;
   ThreadPool single_thd_;
+  TargetMgr mgr_;
+  accl::barex::XThreadpool* target_thdpool_ = nullptr;
+  int thread_hint_ = 0;
 };
 }
 #endif //KVTRANSFER_INCLUDE_CLIENT_H_

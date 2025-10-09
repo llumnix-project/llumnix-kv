@@ -232,4 +232,27 @@ int env_port_base() {
   return val;
 }
 
+
+int env_send_tpsize() {
+  static constexpr int DEFVAL = 16;
+  static int val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_SEND_TPSIZE", DEFVAL);
+  });
+  return val;
+}
+
+
+int env_txstub_cap() {
+  static constexpr int DEFVAL = 640;
+  static int val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_TXSTUB_CAP", DEFVAL);
+  });
+  return val;
+}
+
+
 }  // namespace blade_llm {
