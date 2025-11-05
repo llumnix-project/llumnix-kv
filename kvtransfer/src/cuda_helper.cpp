@@ -51,10 +51,10 @@ bool cuda_check_ipc_support(int device_id) {
   }
   // This sample requires two processes accessing each device, so we need
   // to ensure exclusive or prohibited mode is not set
-  if (prop.computeMode != cudaComputeModeDefault) {
-    printf("Device %d is in an unsupported compute mode for this sample\n", device_id);
-    return false;
-  }
+  // if (prop.computeMode != cudaComputeModeDefault) {
+  //   printf("Device %d is in an unsupported compute mode for this sample\n", device_id);
+  //   return false;
+  // }
 
   int dev_count;
   checkCudaErrors(cudaGetDeviceCount(&dev_count));
