@@ -6,6 +6,7 @@
 #include "protocol/cuda_ipc.h"
 #include "protocol/rdma_protocol.h"
 #include "envcfg.h"
+#include <accl/barex/xthreadpool.h>
 
 
 namespace blade_llm {

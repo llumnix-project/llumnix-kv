@@ -14,8 +14,13 @@
 #include "utils/semaphore.h"
 #include "utils/thread_pool.h"
 #include "error.h"
-#include <accl/barex/xthreadpool.h>
 #include <list>
+
+namespace accl {
+namespace barex {
+class XThreadpool;
+}
+}
 
 namespace blade_llm {
 

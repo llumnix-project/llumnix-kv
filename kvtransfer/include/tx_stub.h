@@ -75,6 +75,7 @@ class KvSendStub : public ISendStub, public noncopyable {
              std::unique_ptr<IChannelFactory> channel_factory,
              std::shared_ptr<INamingWorkerClient> naming);
   KvSendStub(KvSendStub &&other) = delete;
+  ~KvSendStub();
   void send_batch(BatchSendTask) noexcept override;
  private:
   struct TaskContext;

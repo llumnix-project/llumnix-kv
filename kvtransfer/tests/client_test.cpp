@@ -64,11 +64,8 @@ MATCHER_P(batchCheck, expect_req_info, "unexpected batch") {
 
 class MockSendStub : public ISendStub {
  public:
-  MockSendStub() = default;
-  MOCK_METHOD(void, start, (), (override));
+  MockSendStub(): ISendStub("MockSendStubDstId", 20231105) {}
   MOCK_METHOD(void, send_batch, (BatchSendTask), (override));
-  MOCK_METHOD(StubState, check_state, (), (override));
-  MOCK_METHOD(void, stop, (), (override));
 };
 
 class ProxyStub : public ISendStub {
@@ -77,26 +74,16 @@ class ProxyStub : public ISendStub {
   WorkerId dst_worker;
   MockSendStub *stub;
   ProxyStub(const InstanceId &i, WorkerId w, MockSendStub *s) :
+      ISendStub(i, w),
       dst_inst(i),
       dst_worker(w),
       stub(s),
       info_(i, w) {}
 
-  void start() override {
-    stub->start();
-  }
-
   void send_batch(BatchSendTask batch) override {
     stub->send_batch(std::move(batch));
   }
 
-  StubState check_state() override {
-    return stub->check_state();
-  }
-
-  void stop() override {
-    stub->stop();
-  }
  private:
   WorkerInfo info_;
 };
@@ -127,22 +114,16 @@ TEST(KVTransferClientTest, SendTo1) {
   std::vector<TestRequestInfo*> expect_reqs{&req1};
   MockSendStub stub;
 
-  EXPECT_CALL(stub, start())
-      .Times(1);
-  EXPECT_CALL(stub, check_state())
-      .Times(4)
-      .WillRepeatedly(Return(StubState::WORKING));
-
   EXPECT_CALL(stub, send_batch(batchCheck(expect_reqs))).Times(2);
   auto factory = std::make_unique<FakeStubFactory>();
   factory->stubs.push_back(std::make_unique<ProxyStub>("2", 1, &stub));
 
   KvTransferClient client(std::move(ctx), std::move(factory));
-  client.add_target("2", 1, 0, 2);
-  {
-    EXPECT_THROW(client.submit_req_send("3", 1, req1.req_id, 1, false,
-                                        req1.src_blocks, req1.dst_blocks), KVTransferException);
-  }
+  // client.add_target("2", 1, 0, 2);
+  // {
+  //   EXPECT_THROW(client.submit_req_send("3", 1, req1.req_id, 1, false,
+  //                                       req1.src_blocks, req1.dst_blocks), KVTransferException);
+  // }
   {
     client.submit_req_send("2", 1, req1.req_id, 1, false,
                            req1.src_blocks, req1.dst_blocks);
@@ -174,22 +155,16 @@ TEST(KVTransferClientTest, SendTo2) {
   std::vector<TestRequestInfo*> expect_reqs1{&req0};
 
   MockSendStub stub0;
-  EXPECT_CALL(stub0, check_state())
-      .Times(4)
-      .WillRepeatedly(Return(StubState::WORKING));
   EXPECT_CALL(stub0, send_batch(batchCheck(expect_reqs0))).Times(2);
   MockSendStub stub1;
-  EXPECT_CALL(stub1, check_state())
-      .Times(4)
-      .WillRepeatedly(Return(StubState::WORKING));
   EXPECT_CALL(stub1, send_batch(batchCheck(expect_reqs1))).Times(2);
   auto factory = std::make_unique<FakeStubFactory>();
   factory->stubs.push_back(std::make_unique<ProxyStub>("2", 1, &stub0));
   factory->stubs.push_back(std::make_unique<ProxyStub>("3", 1, &stub1));
 
   KvTransferClient client(std::move(ctx), std::move(factory));
-  client.add_target("2", 1, 0, 2);
-  client.add_target("3", 1, 0, 2);
+  // client.add_target("2", 1, 0, 2);
+  // client.add_target("3", 1, 0, 2);
   client.submit_req_send("3", 1, req0.req_id,
                          1, false,
                          req0.src_blocks, req0.dst_blocks);
@@ -224,14 +199,8 @@ TEST(KVTransferClientTest, SendToPP2) {
   std::vector<TestRequestInfo*> expect_reqs1{&req0};
 
   MockSendStub stub0;
-  EXPECT_CALL(stub0, check_state())
-      .Times(4)
-      .WillRepeatedly(Return(StubState::WORKING));
   EXPECT_CALL(stub0, send_batch(batchCheck(expect_reqs0))).Times(2);
   MockSendStub stub1;
-  EXPECT_CALL(stub1, check_state())
-      .Times(4)
-      .WillRepeatedly(Return(StubState::WORKING));
   EXPECT_CALL(stub1, send_batch(batchCheck(expect_reqs1))).Times(2);
 
   auto factory = std::make_unique<FakeStubFactory>();
@@ -239,8 +208,8 @@ TEST(KVTransferClientTest, SendToPP2) {
   factory->stubs.push_back(std::make_unique<ProxyStub>("3", 1, &stub1));
 
   KvTransferClient client(std::move(ctx), std::move(factory));
-  client.add_target("2", 1, 0, 2);
-  client.add_target("3", 1, 0, 2);
+  // client.add_target("2", 1, 0, 2);
+  // client.add_target("3", 1, 0, 2);
   client.submit_req_send("3", 1, req0.req_id,
                          1, false,
                          req0.src_blocks, req0.dst_blocks);

@@ -230,8 +230,6 @@ static void test_parse_block_generate(int p_rank, int d_rank) {
   auto tx = KvSendStub("1", 0, p_info, 0, num_layers,
                        std::make_unique<FakeChannelFactory>(fbc.get()),
                        naming);
-  tx.start();
-  EXPECT_EQ(tx.check_state(), StubState::WORKING);
 
   {
     auto step_0 = std::make_shared<Step>(0);
@@ -244,8 +242,8 @@ static void test_parse_block_generate(int p_rank, int d_rank) {
     task.tasks.emplace_back(req0p, 0, 8, false);
     reqs.push_back(&req0);
 
-    tx.send_batch(std::move(task));
     step_0->notify_layer_ready(num_layers);
+    tx.send_batch(std::move(task));
     while (flush_cnt->load() < 1) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
@@ -438,8 +436,6 @@ static void dgtp_test_parse_block_generate(int p_rank, int d_rank) {
   auto flush_cnt = fbc->flush_cnt;
   auto naming = std::make_shared<FakeNamingWorkerClient>(2, d_info);
   auto tx = KvSendStub("1", 0, p_info, 0, num_layers, std::make_unique<FakeChannelFactory>(fbc.get()), naming);
-  tx.start();
-  EXPECT_EQ(tx.check_state(), StubState::WORKING);
 
   {
     auto step_0 = std::make_shared<Step>(0);
@@ -452,8 +448,8 @@ static void dgtp_test_parse_block_generate(int p_rank, int d_rank) {
     task.tasks.emplace_back(req0p, 0, 8, false);
     reqs.push_back(&req0);
 
-    tx.send_batch(std::move(task));
     step_0->notify_layer_ready(num_layers);
+    tx.send_batch(std::move(task));
     while (flush_cnt->load() < 1) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
@@ -644,8 +640,6 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
   uint32_t num_layers = 2;
   auto naming = std::make_shared<FakeNamingWorkerClient>(2, dst_info);
   auto tx = KvSendStub("1", 0, src_info, 0, num_layers, std::make_unique<FakeChannelFactory>(fbc.get()), naming);
-  tx.start();
-  EXPECT_EQ(tx.check_state(), StubState::WORKING);
   {
     auto step_0 = std::make_shared<Step>(0);
     BatchSendTask task(step_0);
@@ -657,8 +651,8 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
     task.tasks.emplace_back(req0p, 0, 8, false);
     reqs.push_back(&req0);
 
-    tx.send_batch(std::move(task));
     step_0->notify_layer_ready(num_layers);
+    tx.send_batch(std::move(task));
     while (flush_cnt->load() < 1) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
@@ -735,8 +729,8 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
     auto& req1 = *req1p;
     task.tasks.emplace_back(req1p, 0, 17, false);
     reqs.push_back(&req1);
-    tx.send_batch(std::move(task));
     step_1->notify_layer_ready(num_layers);
+    tx.send_batch(std::move(task));
     while (flush_cnt->load() < 2) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
@@ -810,8 +804,8 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
     auto& req3 = *req3p;
     task.tasks.emplace_back(req3p, 17, 16, true);
     reqs.push_back(&req3);
-    tx.send_batch(std::move(task));
     step_2->notify_layer_ready(num_layers);
+    tx.send_batch(std::move(task));
     while (flush_cnt->load() < 3) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
@@ -928,9 +922,8 @@ TEST(SendStubTest, UseMockChannel) {
   {
     auto naming = std::make_shared<FakeNamingWorkerClient>(2, dst_info);
     auto tx = KvSendStub("1", 0, src_info, 0, num_layers, std::make_unique<FakeChannelFactory>(&channel), naming);
-    tx.start();
-    tx.send_batch(std::move(task));
     step_0->notify_layer_ready(num_layers);
+    tx.send_batch(std::move(task));
     usleep(3 * 1000 * 1000);  // 3s
   }
 }
@@ -1125,7 +1118,6 @@ TEST(SendStubTest, FaultTolerantTest) {
   FTTCF fttcf;
   auto naming = std::make_shared<FakeNamingWorkerClient>(2, dst_info);
   auto tx = std::make_unique<KvSendStub>("1", 0, src_info, 0, num_layers, std::make_unique<ProxyChannelFactory>(&fttcf), naming);
-  tx->start();
 
   auto req1p = std::make_shared<RequestInfo>("1", 0, "1", std::vector<uint32_t>{10, 11, 12}, std::vector<uint32_t>{14, 15, 16});
   auto& req1 = *req1p;
@@ -1140,8 +1132,8 @@ TEST(SendStubTest, FaultTolerantTest) {
     BatchSendTask task(step_0);
     task.tasks.emplace_back(req1p, 0, 8, true);
     task.tasks.emplace_back(req2p, 0, 8, false);
-    tx->send_batch(std::move(task));
     step_0->notify_layer_ready(num_layers);
+    tx->send_batch(std::move(task));
 
     while (req1.state() == ReqState::INPROCESS) {
       usleep(10 * 1000);
@@ -1171,8 +1163,8 @@ TEST(SendStubTest, FaultTolerantTest) {
     BatchSendTask task2(step_2);
     task2.tasks.emplace_back(req2p, 8, 16, true);
     task2.tasks.emplace_back(req3p, 0, 8, true);
-    tx->send_batch(std::move(task2));
     step_2->notify_layer_ready(num_layers);
+    tx->send_batch(std::move(task2));
 
     while (req3.state() == ReqState::INPROCESS) {
       usleep(10 * 1000);
@@ -1186,7 +1178,6 @@ TEST(SendStubTest, FaultTolerantTest) {
     EXPECT_TRUE(fttcf.send_notification_called_[1]);
     EXPECT_FALSE(fttcf.dead_ch_[1]);
   }
-  tx->stop();
   tx.reset();
   while (!fttcf.dead_ch_[1]) {
     usleep(10 * 1000);
@@ -1211,7 +1202,6 @@ TEST(SendStubTest, CreateChannelFaultTolerantTest) {
   FTTCF fttcf;
   auto naming = std::make_shared<FakeNamingWorkerClient>(3, dst_info);
   auto tx = std::make_unique<KvSendStub>("1", 0, src_info, 0, num_layers, std::make_unique<ProxyChannelFactory>(&fttcf), naming);
-  tx->start();
 
   auto req1p = std::make_shared<RequestInfo>("1", 0, "1", std::vector<uint32_t>{10, 11, 12}, std::vector<uint32_t>{14, 15, 16});
   auto& req1 = *req1p;
@@ -1226,8 +1216,8 @@ TEST(SendStubTest, CreateChannelFaultTolerantTest) {
     BatchSendTask task(step_0);
     task.tasks.emplace_back(req1p, 0, 8, true);
     task.tasks.emplace_back(req2p, 0, 8, false);
-    tx->send_batch(std::move(task));
     step_0->notify_layer_ready(num_layers);
+    tx->send_batch(std::move(task));
 
     while (req1.state() == ReqState::INPROCESS) {
       usleep(10 * 1000);
@@ -1254,8 +1244,8 @@ TEST(SendStubTest, CreateChannelFaultTolerantTest) {
     BatchSendTask task2(step_2);
     task2.tasks.emplace_back(req2p, 8, 16, true);
     task2.tasks.emplace_back(req3p, 0, 8, true);
-    tx->send_batch(std::move(task2));
     step_2->notify_layer_ready(num_layers);
+    tx->send_batch(std::move(task2));
 
     while (req3.state() == ReqState::INPROCESS) {
       usleep(10 * 1000);
@@ -1268,7 +1258,6 @@ TEST(SendStubTest, CreateChannelFaultTolerantTest) {
     EXPECT_FALSE(fttcf.flush_called_[0]);
     EXPECT_FALSE(fttcf.send_notification_called_[0]);
   }
-  tx->stop();
   tx.reset();
   while (!fttcf.dead_ch_[0]) {
     usleep(10 * 1000);

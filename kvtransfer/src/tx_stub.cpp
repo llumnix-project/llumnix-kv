@@ -669,6 +669,8 @@ void KvSendStub::send_batch(BatchSendTask batch) noexcept {
   return;
 }
 
+KvSendStub::~KvSendStub() {}
+
 KvSendStub::KvSendStub(InstanceId dstid, WorkerId dstworkerid,
              const WorkerInfo &src_info,
              uint32_t start_layer,
