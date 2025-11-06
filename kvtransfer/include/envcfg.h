@@ -25,6 +25,9 @@ const struct sockaddr_in* env_send_done_addr();
 constexpr int RAGGED_FLASH_CACHE_SHAPE = 1;
 // (2, num_blocks, block_size, num_kv_heads, head_dim)
 constexpr int FLASH_CACHE_SHAPE = 2;
+// (2, num_blocks, block_size, num_kv_heads, head_dim)
+// full attn same as FLASH_CACHE_SHAPE, but have gdn layers
+constexpr int QWEN3_NEXT_FLASH_CACHE_SHAPE = 3;
 int env_cache_shape();
 
 constexpr int SEND_DONE_HEAD_KIND = 1;

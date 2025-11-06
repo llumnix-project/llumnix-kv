@@ -50,5 +50,6 @@ docker run --rm -t --user $(id -u):$(id -g) \
     && cmake -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON -DBUILD_RDMA=ON .. && cmake --build . \
     && ctest -V \
     && BLLM_KVTRANS_CACHE_SHAPE=2 ctest -R '.*SendStubTest.*' -V \
+    && BLLM_KVTRANS_CACHE_SHAPE=3 ctest -R '.*SendStubTest.*' -V \
     && gcovr -r /workspace/kvtransfer --filter ../src --filter ../include --exclude ../include/thrid_party --exclude ../src/third_party \
     && gcovr -r /workspace/kvtransfer --filter ../src --filter ../include --exclude ../include/thrid_party --exclude ../src/third_party --cobertura-pretty --cobertura /workspace/kvtransfer_tests.xml"

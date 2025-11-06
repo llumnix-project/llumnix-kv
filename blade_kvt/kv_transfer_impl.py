@@ -20,7 +20,6 @@ from blade_kvt.kvtransfer_ops import (
     submit_req_send2,
 )
 
-
 @enum.unique
 class KVTransferProtocolType(enum.Enum):
     CUDA_IPC = enum.auto()
@@ -64,6 +63,7 @@ def _get_layer_num_blocks(layers: List[torch.Tensor]):
     # sync with envcfg.h
     RAGGED_FLASH_CACHE_SHAPE = "1"
     FLASH_CACHE_SHAPE = "2"
+    QWEN3_NEXT_FLASH_CACHE_SHAPE = "3"
     shape_env = os.environ.get("BLLM_KVTRANS_CACHE_SHAPE", "1")
     if shape_env == RAGGED_FLASH_CACHE_SHAPE:
         # (num_blocks, block_size, 2, num_kv_heads, head_dim)
@@ -71,6 +71,9 @@ def _get_layer_num_blocks(layers: List[torch.Tensor]):
     elif shape_env == FLASH_CACHE_SHAPE:
         # (2, num_blocks, block_size, num_kv_heads, head_dim)
         return layers[0].shape[1]
+    elif shape_env == QWEN3_NEXT_FLASH_CACHE_SHAPE:
+        # (num_blocks, 2, block_size, num_kv_heads, head_dim)
+        return layers[-1].shape[1]
     raise ValueError(f"unknown shape={shape_env}")
 
 

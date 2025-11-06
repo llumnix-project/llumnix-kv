@@ -616,8 +616,8 @@ TEST(SendStubTest, ParseBlockSendDGtP) {
 }
 
 TEST(SendStubTest, ParseBlockSendPEqD) {
-  uint32_t bs = 16 * KB;
-  uint32_t ts = KB;
+  uint32_t bs = 16 * KB; // block byte size
+  uint32_t ts = KB;  // token byte size
   WorkerInfo src_info("0", 0);
   src_info.block_size = bs;
   src_info.token_size = ts;
@@ -646,9 +646,19 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
 
     std::vector<RequestInfo *> reqs;
     // the first send;
-    auto req0p = std::make_shared<RequestInfo>("1", 0, "req_id00000000000000000000000000", std::vector<uint32_t>{0, 1, 2}, std::vector<uint32_t>{4, 5, 6});
+    auto req0p = std::make_shared<RequestInfo>(
+      /*InstanceId*/ "1", /*WorkerId*/ 0, 
+      /*RequestId*/ "req_id00000000000000000000000000", 
+      /*src_blocks*/ std::vector<uint32_t>{0, 1, 2}, 
+      /*dst_blocks*/ std::vector<uint32_t>{4, 5, 6}
+    );
     auto& req0 = *req0p;
-    task.tasks.emplace_back(req0p, 0, 8, false);
+    task.tasks.emplace_back(
+      /*RequestInfo*/ req0p, 
+      /*seen_tokens*/ 0, 
+      /*new_tokens*/ 8, 
+      /*reach_last_token*/ false
+    );
     reqs.push_back(&req0);
 
     step_0->notify_layer_ready(num_layers);
@@ -672,7 +682,30 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
         EXPECT_EQ(msg.data.value().length, 8 * KB);
         layer++;
       }
-    } else {
+    } else if (env_cache_shape() == QWEN3_NEXT_FLASH_CACHE_SHAPE){
+      // KV tensors are continous
+      EXPECT_EQ(q->size(), 3);
+      auto layer0 = q->front();
+      q->pop();
+      auto layer1 = q->front();
+      q->pop();
+      EXPECT_EQ(layer0.dst_inst_id, "1");
+      EXPECT_EQ(layer0.dst_worker_id, 0);
+      EXPECT_TRUE(layer0.data.has_value());
+      EXPECT_EQ(layer0.data.value().layer_idx, 0);
+      EXPECT_EQ(layer0.data.value().src_offset, 0);
+      EXPECT_EQ(layer0.data.value().dst_offset, 4 * bs);
+      EXPECT_EQ(layer0.data.value().length, 8 * KB);
+
+      EXPECT_EQ(layer1.dst_inst_id, "1");
+      EXPECT_EQ(layer1.dst_worker_id, 0);
+      EXPECT_TRUE(layer1.data.has_value());
+      EXPECT_EQ(layer1.data.value().layer_idx, 1);
+      EXPECT_EQ(layer1.data.value().src_offset, 0);
+      EXPECT_EQ(layer1.data.value().dst_offset, 4 * bs);
+      EXPECT_EQ(layer1.data.value().length, 8 * KB);
+    }else { // FLASH_CACHE_SHAPE
+      // 为啥是5?
       EXPECT_EQ(q->size(), 5);
       auto layer0_k = q->front();
       q->pop();
@@ -725,9 +758,18 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
 
     // the second send;
     std::vector<RequestInfo *> reqs;
-    auto req1p = std::make_shared<RequestInfo>("1", 0, "req_id00000000000000000000000001", std::vector<uint32_t>{0, 1, 2}, std::vector<uint32_t>{4, 5, 6});
+    auto req1p = std::make_shared<RequestInfo>(
+      /*InstanceId*/ "1", /*WorkerId*/ 0, 
+      /*RequestId*/ "req_id00000000000000000000000001", 
+      /*src_blocks*/ std::vector<uint32_t>{0, 1, 2}, 
+      /*dst_blocks*/ std::vector<uint32_t>{4, 5, 6});
     auto& req1 = *req1p;
-    task.tasks.emplace_back(req1p, 0, 17, false);
+    task.tasks.emplace_back(
+      /*RequestInfo*/ req1p, 
+      /*seen_tokens*/ 0, 
+      /*new_tokens*/ 17, 
+      /*reach_last_token*/ false
+    );
     reqs.push_back(&req1);
     step_1->notify_layer_ready(num_layers);
     tx.send_batch(std::move(task));
@@ -753,7 +795,26 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
         EXPECT_EQ(b2.data.value().dst_offset, 4 * 16 * KB);
         EXPECT_EQ(b2.data.value().length, 17 * KB);
       }
-    } else {
+    } else if (env_cache_shape() == QWEN3_NEXT_FLASH_CACHE_SHAPE) {
+      EXPECT_EQ(q->size(), 3); // because req1 has 17 tokens need two continuous blocks, can be merged;
+      {
+        auto b1 = q->front();
+        q->pop();
+        EXPECT_TRUE(b1.data.has_value());
+        EXPECT_EQ(b1.data.value().layer_idx, 0);
+        EXPECT_EQ(b1.data.value().src_offset, 0);
+        EXPECT_EQ(b1.data.value().dst_offset, 4 * 16 * KB);
+        EXPECT_EQ(b1.data.value().length, 17 * KB);
+
+        b1 = q->front();
+        q->pop();
+        EXPECT_TRUE(b1.data.has_value());
+        EXPECT_EQ(b1.data.value().layer_idx, 1);
+        EXPECT_EQ(b1.data.value().src_offset, 0);
+        EXPECT_EQ(b1.data.value().dst_offset, 4 * 16 * KB);
+        EXPECT_EQ(b1.data.value().length, 17 * KB);
+      }
+    }else {// FLASH_CACHE_SHAPE
       EXPECT_EQ(q->size(), 5); // because req1 has 17 tokens need two continuous blocks, can be merged;
       {
         auto b1 = q->front();
@@ -800,9 +861,18 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
 
     // the third send
     std::vector<RequestInfo *> reqs;
-    auto req3p = std::make_shared<RequestInfo>("1", 0, "req_id00000000000000000000000002", std::vector<uint32_t>{3, 4, 5}, std::vector<uint32_t>{7, 8, 9});
+    auto req3p = std::make_shared<RequestInfo>(
+      /*InstanceId*/ "1", /*WorkerId*/ 0, 
+      /*RequestId*/ "req_id00000000000000000000000002", 
+      /*src_blocks*/ std::vector<uint32_t>{3, 4, 5}, 
+      /*dst_blocks*/ std::vector<uint32_t>{7, 8, 9});
     auto& req3 = *req3p;
-    task.tasks.emplace_back(req3p, 17, 16, true);
+    task.tasks.emplace_back(
+      /*RequestInfo*/ req3p, 
+      /*seen_tokens*/ 17, 
+      /*new_tokens*/ 16, 
+      /*reach_last_token*/ true
+    );
     reqs.push_back(&req3);
     step_2->notify_layer_ready(num_layers);
     tx.send_batch(std::move(task));
@@ -829,7 +899,24 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
         EXPECT_EQ(b2.data.value().dst_offset, 8 * bs + ts);
         EXPECT_EQ(b2.data.value().length, 16 * ts);
       }
-    } else {
+    } else if (env_cache_shape() == QWEN3_NEXT_FLASH_CACHE_SHAPE)
+    {
+      auto b1 = q->front();
+      q->pop();
+      EXPECT_TRUE(b1.data.has_value());
+      EXPECT_EQ(b1.data.value().layer_idx, 0);
+      EXPECT_EQ(b1.data.value().src_offset, (4 * bs + ts));
+      EXPECT_EQ(b1.data.value().dst_offset, (8 * bs + ts));
+      EXPECT_EQ(b1.data.value().length, (3 * bs - 17 * ts));
+
+      b1 = q->front();
+      q->pop();
+      EXPECT_TRUE(b1.data.has_value());
+      EXPECT_EQ(b1.data.value().layer_idx, 1);
+      EXPECT_EQ(b1.data.value().src_offset, (4 * bs + ts));
+      EXPECT_EQ(b1.data.value().dst_offset, (8 * bs + ts));
+      EXPECT_EQ(b1.data.value().length, (3 * bs - 17 * ts));
+    } else { // FLASH_CACHE_SHAPE
       EXPECT_EQ(q->size(), 4 + 2);
       {
         auto b1 = q->front();
@@ -871,7 +958,50 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
     q->pop();
     EXPECT_TRUE(b3.req_id.has_value());
     EXPECT_EQ(b3.req_id.value(), "req_id00000000000000000000000002");
-}
+  }
+  {
+    // the fourth send, only test hybrid block parsing method 
+    // when reach_last_token is True, kvt should send all blocks even tokens are not enough
+    if (env_cache_shape() == QWEN3_NEXT_FLASH_CACHE_SHAPE){
+      auto step_3 = std::make_shared<Step>(3);
+      BatchSendTask task(step_3);
+
+      std::vector<RequestInfo *> reqs;
+      auto req4p = std::make_shared<RequestInfo>(
+        /*InstanceId*/ "1", /*WorkerId*/ 0, 
+        /*RequestId*/ "req_id00000000000000000000000003", 
+        /*src_blocks*/ std::vector<uint32_t>{3, 4, 5, 6}, 
+        /*dst_blocks*/ std::vector<uint32_t>{7, 8, 9, 10});
+      auto& req4 = *req4p;
+      task.tasks.emplace_back(
+        /*RequestInfo*/ req4p, 
+        /*seen_tokens*/ 1, 
+        /*new_tokens*/ 3, 
+        /*reach_last_token*/ true
+      );
+
+      reqs.push_back(&req4);
+      step_3->notify_layer_ready(num_layers);
+      tx.send_batch(std::move(task));
+      EXPECT_TRUE(req4.state() == ReqState::OK);
+
+      auto b1 = q->front();
+      q->pop();
+      EXPECT_TRUE(b1.data.has_value());
+      EXPECT_EQ(b1.data.value().layer_idx, 0);
+      EXPECT_EQ(b1.data.value().src_offset, (3 * bs + ts));
+      EXPECT_EQ(b1.data.value().dst_offset, (7 * bs + ts));
+      EXPECT_EQ(b1.data.value().length, (4 * bs - ts));
+
+      b1 = q->front();
+      q->pop();
+      EXPECT_TRUE(b1.data.has_value());
+      EXPECT_EQ(b1.data.value().layer_idx, 1);
+      EXPECT_EQ(b1.data.value().src_offset, (3 * bs + ts));
+      EXPECT_EQ(b1.data.value().dst_offset, (7 * bs + ts));
+      EXPECT_EQ(b1.data.value().length, (4 * bs - ts));
+    }
+  }
 }
 
 class MockChannel : public IChannel {

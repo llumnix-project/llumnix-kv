@@ -48,6 +48,56 @@ static void do_parse_block_send_p_eq_d(
   return ;
 }
 
+// NOTE(llx) Qwen3-next block parsing special case:
+// - The last three blocks are reserved for GDN blocks
+// - KVT length calculation must account for these additional blocks: (new_tokens + 3 * ntpb)
+// - During chunked prefill processing, GDN blocks transfer occurs only upon request completion
+static void do_parse_hybrid_block_send_p_eq_d(
+  size_t block_size, size_t token_size,
+  const ReqSendTask *task,
+  std::vector<IpcBlock> &send_blocks
+) {
+  // ntpb: number tokens per block
+  uint32_t src_ntpb = block_size / token_size;
+  uint32_t dst_ntpb = src_ntpb;
+  assert(src_ntpb * token_size == block_size);
+
+  const auto &src_blocks = task->src_blocks();
+  const auto &dst_blocks = task->dst_blocks();
+  // already cached tokens
+  auto wrote_tokens = task->seen_tokens;
+  // tokens to be written, aligned with block size, could oversend in last block
+  auto left_tokens = task->new_tokens;
+  // assert(src_blocks.size() == dst_blocks.size());
+  send_blocks.reserve(send_blocks.size() + left_tokens / src_ntpb + 6);
+  // GDN block parsing only happens when reaching last token(finish chunked prefill)
+  if (task->reach_last_token){
+    left_tokens = src_ntpb * src_blocks.size() - wrote_tokens;
+  }
+
+  while (left_tokens > 0) {
+    auto src_block_idx = wrote_tokens / src_ntpb;
+    auto src_token_idx = wrote_tokens % src_ntpb;
+    assert(src_block_idx < src_blocks.size());
+
+    auto tokens = std::min<uint32_t>(src_ntpb - src_token_idx, left_tokens);
+
+    auto dst_block_idx = wrote_tokens / dst_ntpb;
+    auto dst_token_idx = wrote_tokens % dst_ntpb;
+    assert(dst_block_idx < dst_blocks.size());
+    // align with kv block size
+    size_t src_offset = src_blocks[src_block_idx] * block_size
+      + src_token_idx * token_size;
+    size_t dst_offset = dst_blocks[dst_block_idx] * block_size
+      + dst_token_idx * token_size;
+    size_t length = tokens * token_size;
+    send_blocks.emplace_back(src_offset, dst_offset, length);
+    wrote_tokens += tokens;
+    left_tokens -= tokens;
+  }
+  return ;
+}
+
 // RAGGED_FLASH_CACHE_SHAPE
 static void parse_block_send_p_eq_d(
   const WorkerInfo *src_worker_info,
@@ -89,6 +139,7 @@ static void vllm_parse_block_send_p_eq_d(
   do_parse_block_send_p_eq_d(k_block_size, k_token_size, task, send_blocks);
   size_t const sb_end_idx = send_blocks.size();
 
+  // emplace_back v tensor block, which is non-contigious with k tensor
   send_blocks.reserve(send_blocks.size() + sb_end_idx - sb_idx);
   for (; sb_idx < sb_end_idx; ++sb_idx) {
     auto sb = send_blocks[sb_idx];
@@ -99,6 +150,26 @@ static void vllm_parse_block_send_p_eq_d(
 
   return ;
 }
+
+// Parse block using shape QWEN3_NEXT_FLASH_CACHE_SHAPE
+// Qwen3-next model's attn block and mamba block is block continous and padded
+// in same block size, so kvt will parse it using vllm's token_size and block_size
+static void vllm_parse_hybrid_block_send_p_eq_d(
+  const WorkerInfo *src_worker_info,
+  const WorkerInfo *dst_worker_info,
+  const ReqSendTask *task,
+  std::vector<IpcBlock> &send_blocks) {
+    // as tp size is same, token size should be same;
+    assert(src_worker_info->tp_size == dst_worker_info->tp_size);
+    assert(src_worker_info->token_size == dst_worker_info->token_size);
+    assert(src_worker_info->block_size == dst_worker_info->block_size);
+    assert(src_worker_info->worker_tp_rank == dst_worker_info->worker_tp_rank);
+    size_t const kv_token_size = src_worker_info->token_size;
+    size_t const kv_block_size = src_worker_info->block_size;
+    do_parse_hybrid_block_send_p_eq_d(kv_block_size, kv_token_size, task, send_blocks);
+    return ;
+}
+
 
 static void parse_block_send_gt(
   size_t p_token_size, size_t p_k_size, size_t d_token_size,
@@ -574,7 +645,6 @@ private:
       TimeWatch wait_start;
       batch.step->wait_layer_ready(i);
       self.wait_time_us += wait_start.get_elapse_us();
-
       // NOTE: write 可能是异步的! write 返回并不意味着数据发送了!
       self.ch->send_data(i);
     }
@@ -616,6 +686,7 @@ private:
     assert(self.parse_block == nullptr);
     assert(self.tpkind == TPKind::UNKNOWN);
     const int cache_shape = env_cache_shape();
+
     if (cache_shape == RAGGED_FLASH_CACHE_SHAPE) {
       if (srcinfo.tp_size == self.dstinfo->tp_size) {
         self.parse_block = parse_block_send_p_eq_d;
@@ -642,6 +713,14 @@ private:
         self.tpkind = TPKind::PGTD;
         return;
       }
+    }
+    if (cache_shape == QWEN3_NEXT_FLASH_CACHE_SHAPE) {
+        if (srcinfo.tp_size == self.dstinfo->tp_size) {
+          self.parse_block = vllm_parse_hybrid_block_send_p_eq_d;
+          self.tpkind = TPKind::PEQD;
+          return;
+        }
+        throw std::runtime_error("Qwen3-next only support same tp size in kvt");
     }
     throw std::runtime_error("unsupported cache_shape");
   }
