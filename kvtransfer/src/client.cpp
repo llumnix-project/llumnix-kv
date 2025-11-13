@@ -63,7 +63,11 @@ auto KvTransferClient::TargetMgr::peek(const InstanceId& inst_id, WorkerId worke
 
 void KvTransferClient::TargetMgr::shrink() {
   auto& self = *this;
+  auto ts_start = TimeWatch();
+  auto const orig_size = self.targets_.size();
   const size_t cap = env_txstub_cap();
+  std::vector<SendStub> gc_stubs;
+  gc_stubs.reserve(16);
   while (self.targets_.size() > cap) {
     auto& target = self.targets_.back();
     auto inflycnt = target.inflycnt.load(std::memory_order_relaxed);
@@ -77,8 +81,17 @@ void KvTransferClient::TargetMgr::shrink() {
 
     LOG(INFO) << "TargetMgr.shrink: instid=" << dstid << " wid=" << dwid
               << " target=" << &target << " popret=" << popret;
+    gc_stubs.emplace_back(target.release_stub());
     self.targets_.pop_back();
   }
+  self.shrink_thd_.spawn([gc_stubs=std::move(gc_stubs)] () {
+    // 在 shrink 线程池析构 SendStub, 避免阻塞主线程.
+  });
+  LOG(INFO) << "TargetMgr.shrink. OrigSize=" << orig_size
+            << "; CurSize=" << self.targets_.size()
+            << "; MapSize=" << self.target_map_.size()
+            << "; QueueSize=" << self.shrink_thd_.unsafe_size()
+            << "; DurUs=" << ts_start.get_elapse_us();
 }
 
 int KvTransferClient::TargetMgr::try_pop_map(const InstanceId& dstid, WorkerId dwid) {
@@ -129,7 +142,7 @@ KvTransferClient::KvTransferClient(std::unique_ptr<Context> &&ctx,
                                    std::unique_ptr<ISendStubFactory> &&factory) :
     auto_remove_req_(env_send_done_addr() != nullptr),
     ctx_(std::move(ctx)),
-    single_thd_(4),
+    single_thd_(env_waitlayer_tpsize()),
     mgr_(std::move(factory)) {
   auto result = accl::barex::XThreadpool::NewInstance(this->target_thdpool_, env_send_tpsize(), "clisend");
   RTASSERT_EQ(result, accl::barex::BAREX_SUCCESS);

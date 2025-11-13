@@ -32,6 +32,10 @@ class ThreadPool {
   template<class F, class... Args>
   auto spawn(F &&f, Args &&... args) -> std::future<typename std::result_of<F(Args...)>::type>;
   ~ThreadPool();
+
+  auto unsafe_size() const noexcept {
+    return this->tasks_.size();
+  }
  private:
   std::vector<std::thread> workers_;
   std::queue<std::function<void()> > tasks_;

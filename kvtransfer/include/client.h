@@ -13,6 +13,7 @@
 #include "tx_stub.h"
 #include "utils/semaphore.h"
 #include "utils/thread_pool.h"
+#include "envcfg.h"
 #include "error.h"
 #include <list>
 
@@ -87,15 +88,23 @@ class KvTransferClient : public noncopyable {
   public:
     Target(SendStub s) noexcept:
       stub(std::move(s)) {}
+
+    SendStub release_stub() noexcept {
+      SendStub tmp;
+      this->stub.swap(tmp);
+      return tmp;
+    }
   };
 
   class TargetMgr {
+    ThreadPool shrink_thd_;
     std::unique_ptr<ISendStubFactory> stub_factory_;
     // head is newer~
     std::list<Target> targets_;
     std::unordered_map<InstanceId, std::vector<std::optional<std::list<Target>::iterator>>> target_map_;
   public:
     TargetMgr(std::unique_ptr<ISendStubFactory> s) noexcept:
+      shrink_thd_(env_shrink_tpsize()),
       stub_factory_(std::move(s)) {}
 
     void try_create(const InstanceId& inst_id, WorkerId worker_id,

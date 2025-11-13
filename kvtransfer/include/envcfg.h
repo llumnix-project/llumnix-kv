@@ -48,4 +48,9 @@ int env_send_tpsize();
 
 int env_txstub_cap();
 
+int env_waitlayer_tpsize();
+
+int env_shrink_tpsize();
+
+
 }  // namespace blade_llm {

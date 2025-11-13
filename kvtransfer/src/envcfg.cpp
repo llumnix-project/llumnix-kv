@@ -255,4 +255,26 @@ int env_txstub_cap() {
 }
 
 
+int env_waitlayer_tpsize() {
+  static constexpr int DEFVAL = 2;
+  static int val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_WAITLAYER_TPSIZE", DEFVAL);
+  });
+  return val;
+}
+
+
+int env_shrink_tpsize() {
+  static constexpr int DEFVAL = 2;
+  static int val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_SHRINK_TPSIZE", DEFVAL);
+  });
+  return val;
+}
+
+
 }  // namespace blade_llm {
