@@ -276,5 +276,20 @@ int env_shrink_tpsize() {
   return val;
 }
 
+std::bitset<MAX_TP_SIZE> env_p_valid_ranks() noexcept {
+  static std::bitset<MAX_TP_SIZE> val("1111111111111111111111111111111111111111111111111111111111111111");
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    auto* valenv = getenv("BLLM_KVTRANS_P_VALID_RANKS");
+    fprintf(stdout, "kvtenv: env=BLLM_KVTRANS_P_VALID_RANKS val=%s\n", (valenv == nullptr ? "NULL" : valenv));
+    fflush(stdout);
+    if (valenv == nullptr) {
+      return;
+    }
+    val = std::bitset<MAX_TP_SIZE>(valenv);
+  });
+  return val;
+}
+
 
 }  // namespace blade_llm {

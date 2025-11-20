@@ -47,6 +47,15 @@ void init_kv_transfer_client(const std::string &inst_name,
                              const std::vector<TransferProtocol> &protocols) {
 
   if (KV_CLIENT == nullptr) {
+    auto validranks = env_p_valid_ranks();
+    RTASSERT(tp_size <= validranks.size());
+    validranks <<= (validranks.size() - tp_size);
+    validranks >>= (validranks.size() - tp_size);
+    RTASSERT(validranks.count() <= tp_size);
+    if (validranks.count() < tp_size) {
+      LOG(INFO) << "InitKvtClient: tp_size changes: old=" << tp_size << ";new=" << validranks.count();
+      tp_size = validranks.count();
+    }
     assert(block_size % token_size == 0);
     LOG(INFO) << "KVT: init kv client for worker(" << inst_name << ":" << worker_id << ") at " << inst_name;
     auto context = std::make_unique<Context>(inst_name, worker_id);

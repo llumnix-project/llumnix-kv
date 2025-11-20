@@ -2,6 +2,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <vector>
+#include <bitset>
 
 namespace blade_llm {
 
@@ -52,5 +53,7 @@ int env_waitlayer_tpsize();
 
 int env_shrink_tpsize();
 
+static constexpr size_t MAX_TP_SIZE = 64;
+std::bitset<MAX_TP_SIZE> env_p_valid_ranks() noexcept;
 
 }  // namespace blade_llm {

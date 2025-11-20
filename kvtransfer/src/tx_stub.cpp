@@ -265,6 +265,12 @@ static void vllm_parse_block_send_p_gt_d(
   const ReqSendTask *task,
   std::vector<IpcBlock> &send_blocks) {
   // p_info->block_size: uint32_t 类型, 需要先转 size_t 不然仍有溢出风险.
+  auto const validranks = env_p_valid_ranks();
+  if (!validranks[p_info->worker_tp_rank]) {
+    // kv 复制 case: 仅有效 worker tp rank 参与发送.
+    return ;
+  }
+  uint32_t const worker_tp_rank = (validranks << (validranks.size() - p_info->worker_tp_rank)).count();
   const size_t p_block_size = p_info->block_size;
   const size_t d_block_size = d_info->block_size;
   const size_t p_token_size = p_info->token_size;
@@ -272,8 +278,8 @@ static void vllm_parse_block_send_p_gt_d(
   assert(p_info->tp_size > d_info->tp_size);
   assert((p_info->tp_size % d_info->tp_size) == 0);
   const uint32_t group_n = p_info->tp_size / d_info->tp_size;
-  assert(p_info->worker_tp_rank / group_n == d_info->worker_tp_rank);
-  const uint32_t group_off = p_info->worker_tp_rank % group_n;
+  assert(worker_tp_rank / group_n == d_info->worker_tp_rank);
+  const uint32_t group_off = worker_tp_rank % group_n;
   assert(d_token_size == p_token_size * group_n);
   assert(d_token_size % 2 == 0);
   assert(p_token_size % 2 == 0);
