@@ -59,23 +59,12 @@ def support_transfers_protocols() -> List[KVTransferProtocolType]:
     return supports
 
 
-def _get_layer_num_blocks(layers: List[torch.Tensor]):
-    # sync with envcfg.h
-    RAGGED_FLASH_CACHE_SHAPE = "1"
-    FLASH_CACHE_SHAPE = "2"
-    QWEN3_NEXT_FLASH_CACHE_SHAPE = "3"
-    shape_env = os.environ.get("BLLM_KVTRANS_CACHE_SHAPE", "1")
-    if shape_env == RAGGED_FLASH_CACHE_SHAPE:
-        # (num_blocks, block_size, 2, num_kv_heads, head_dim)
-        return layers[0].shape[0]
-    elif shape_env == FLASH_CACHE_SHAPE:
-        # (2, num_blocks, block_size, num_kv_heads, head_dim)
-        return layers[0].shape[1]
-    elif shape_env == QWEN3_NEXT_FLASH_CACHE_SHAPE:
-        # (num_blocks, 2, block_size, num_kv_heads, head_dim)
-        return layers[-1].shape[1]
-    raise ValueError(f"unknown shape={shape_env}")
-
+def _get_layer_num_blocks(layers: List[torch.Tensor], block_bytes: int):
+    # No need to check shape, we can just use layer_size/block_bytes to calculate num_blocks
+    layer_shape = layers[0].shape
+    for l in layers:
+        assert l.shape == layer_shape, "All layers should have the same shape"
+    return layers[0].numel() // block_bytes
 
 class KVTransferClient:
     def __init__(
@@ -106,7 +95,7 @@ class KVTransferClient:
                 will be checked and initialized;
         """
         device_id = layers[0].get_device()
-        layer_num_blocks = _get_layer_num_blocks(layers)
+        layer_num_blocks = _get_layer_num_blocks(layers, block_bytes)
 
         self._num_layers = len(layers)
         self._init_events()
@@ -317,7 +306,7 @@ class KVTransferServer:
         protocols: List[KVTransferProtocolType],
     ):
         device_id = layers[0].get_device()
-        layer_num_blocks = _get_layer_num_blocks(layers)
+        layer_num_blocks = _get_layer_num_blocks(layers, block_bytes)
         layer_addrs = [l.data_ptr() for l in layers]
         ops_protocols = [p.to_ops_protocol() for p in protocols]
         init_kv_transfer_server(
