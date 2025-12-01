@@ -64,7 +64,7 @@ def _get_layer_num_blocks(layers: List[torch.Tensor], block_bytes: int):
     layer_shape = layers[0].shape
     for l in layers:
         assert l.shape == layer_shape, "All layers should have the same shape"
-    return layers[0].numel() // block_bytes
+    return layers[0].nbytes // block_bytes
 
 class KVTransferClient:
     def __init__(
