@@ -78,25 +78,28 @@ class BarexChannel {
   // OWNER: CliBarexCtx.connector_
   accl::barex::XConnector* const connector_;
   // may be nullptr.
-  accl::barex::XChannel* channel_;
+  std::shared_ptr<accl::barex::XChannel> channel_;
 public:
-  BarexChannel(accl::barex::XConnector* conn, accl::barex::XChannel* ch) noexcept;
+  BarexChannel(accl::barex::XConnector* conn, std::shared_ptr<accl::barex::XChannel> ch) noexcept;
 
   BarexChannel(BarexChannel&& other) noexcept:
     connector_(other.connector_),
-    channel_(other.channel_) {
-    other.channel_ = nullptr;
+    channel_(std::move(other.channel_)) {
   }
 
   ~BarexChannel() noexcept;
 
   auto* ch() const noexcept {
     assert(this->channel_ != nullptr);
+    return this->channel_.get();
+  }
+
+  auto& sch() noexcept {
     return this->channel_;
   }
 
 private:
-  void destory();
+  void destroy();
 
   BarexChannel(const BarexChannel&) = delete;
   BarexChannel& operator=(BarexChannel&&) = delete;
@@ -189,8 +192,10 @@ struct CliBarexCtx : public BarexCtx {
   }
 
   // rpc
-  std::vector<RDMAMemHandle> get_mem_handles(accl::barex::XChannel* dst) const;
-  uint32_t get_remote_crc(accl::barex::XChannel* dst, const std::vector<IpcBlock>* data, uint32_t lcrc);
+  std::vector<RDMAMemHandle> get_mem_handles(std::shared_ptr<accl::barex::XChannel>& dst) const;
+  uint32_t get_remote_crc(std::shared_ptr<accl::barex::XChannel>& dst,
+                          const std::vector<IpcBlock>* data,
+                          uint32_t lcrc);
 
  private:
    struct RpcCtxCb : public accl::barex::XChannelCallback {
@@ -261,6 +266,7 @@ class RDMAChannel : public IChannel, public noncopyable {
   void do_init();
 
   accl::barex::XChannel *ch() noexcept;
+  std::shared_ptr<accl::barex::XChannel>& sch() noexcept;
  private:
   InstanceId const src_inst_id_;
   WorkerId const src_worker_id_ = 0;
@@ -305,10 +311,17 @@ class RDMAServer : public ITransferServer {
     void OnRecvCall(accl::barex::XChannel *channel,
                     char *in_buf,
                     size_t len,
+                    accl::barex::x_msg_header header) {
+      RTASSERT(false);
+    }
+
+    void OnRecvCall(std::shared_ptr<accl::barex::XChannel> channel,
+                    char *in_buf,
+                    size_t len,
                     accl::barex::x_msg_header header) noexcept override;
    private:
-    void resp_mem_handles(accl::barex::XChannel *channel, uint64_t reqid, char *in_buf, size_t len);
-    void resp_remote_crc(accl::barex::XChannel *channel, uint64_t reqid, char *in_buf, size_t len);
+    void resp_mem_handles(std::shared_ptr<accl::barex::XChannel>& channel, uint64_t reqid, char *in_buf, size_t len);
+    void resp_remote_crc(std::shared_ptr<accl::barex::XChannel>& channel, uint64_t reqid, char *in_buf, size_t len);
   };
  private:
   RDMAInfo info_;

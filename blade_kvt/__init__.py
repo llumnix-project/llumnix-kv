@@ -43,6 +43,13 @@ def set_envs():
     os.environ.setdefault('ACCL_MAX_USER_MR_GB', '10')
     os.environ.setdefault('ACCL_WRITEBATCH_OPT', '2')
     os.environ.setdefault('ACCL_TX_DEPTH', '1024')
+
+    os.environ.setdefault('ACCL_RELEASE_CHANNEL', '1')
+
+    # https://project.aone.alibaba-inc.com/v2/project/664220/bug/72207097
+    os.environ.setdefault('ACCL_RETRANSMIT_TIMEOUT', '17')
+    os.environ.setdefault('ACCL_HEARTBEAT_INTERVAL', '3')
+
     # see https://project.aone.alibaba-inc.com/v2/project/664220/req/61674124
     os.environ.setdefault('ACCL_SOFT_TX_DEPTH', '327680')
     if is_erdma():

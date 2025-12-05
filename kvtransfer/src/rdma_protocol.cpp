@@ -205,25 +205,35 @@ void XConnectorDeleter::operator()(accl::barex::XConnector *tp) {
   delete tp;
 }
 
-BarexChannel::BarexChannel(accl::barex::XConnector* conn, accl::barex::XChannel* ch) noexcept:
-    connector_(conn), channel_(ch) {
-  LOG(INFO) << "BarexChannel new: connector=" << conn << ";channel=" << ch;
+[[nodiscard]] static std::future<Status> CloseChannel(XConnector &self, XChannel* ch) {
+  auto pr = std::make_shared<std::promise<Status>>();
+  auto fut = pr->get_future();
+
+  auto result = self.CloseChannel(ch, [pr] (Status s) {
+    pr->set_value(std::move(s));
+  });
+
+  if (result != BAREX_SUCCESS) {
+    pr->set_value(Status(result));
+  }
+
+  return fut;
 }
 
-void BarexChannel::destory() {
+BarexChannel::BarexChannel(accl::barex::XConnector* conn, std::shared_ptr<accl::barex::XChannel> ch) noexcept:
+    connector_(conn), channel_(std::move(ch)) {
+  LOG(INFO) << "BarexChannel new: connector=" << conn << ";channel=" << this->channel_.get();
+}
+
+void BarexChannel::destroy() {
   auto& self = *this;
-  auto ret = self.connector_->CloseChannel(self.channel_, [conn=self.connector_, ch=self.channel_] (Status s) noexcept {
-    std::string destroy_ret;
-    try {
-      auto res = ch->Destroy();
-      RTCHECK_EQ(res, BAREX_SUCCESS);
-    } catch (const std::exception& ex) {
-      destroy_ret = ex.what();
-    }
-    LOG(INFO) << "BarexChannel close:connector=" << conn << ";ch=" << ch
-              << ";close_ret=" << s.ErrMsg() << ";destroy_ret=" << destroy_ret;
-  });
-  RTCHECK_EQ(ret, accl::barex::BAREX_SUCCESS);
+  auto* ch = self.ch();
+  auto close_ret = CloseChannel(*self.connector_, ch).get();
+  auto destroy_ret = ch->Destroy();
+  auto delete_ret = self.connector_->CloseAndDeleteChannel(ch);
+  LOG(INFO) << "BarexChannel close:connector=" << self.connector_ << ";ch=" << ch
+            << ";close_ret=" << close_ret.ErrMsg() << ";destroy_ret=" << destroy_ret
+            << ";delete_ret=" << delete_ret;
   return;
 }
 
@@ -232,16 +242,16 @@ BarexChannel::~BarexChannel() noexcept {
     return;
   }
   try {
-    this->destory();
+    this->destroy();
   } catch (const std::exception& ex) {
     LOG(ERROR) << "BarexChannel close:connector=" << this->connector_
-               << ";ch=" << this->channel_ << ";ex=" << ex.what();
+               << ";ch=" << this->channel_.get() << ";ex=" << ex.what();
   }
 }
 
 // Send will release sdata
 // cb is invoked after sdata is freed.
-static void Send(XChannel *ch, memp_t sdata, DoneCallback cb) {
+static void Send(std::shared_ptr<XChannel>& ch, memp_t sdata, DoneCallback cb) {
   auto bufptr = sdata.buf;
   auto bufdev = sdata.d_type;
   auto wrapped_cb = [bufptr, bufdev, ch, cb=std::move(cb)] (Status s) {
@@ -267,7 +277,7 @@ static void Send(XChannel *ch, memp_t sdata, DoneCallback cb) {
 }
 
 // Send will release sdata
-[[nodiscard]] static std::future<void> Send(XChannel *ch, memp_t sdata) {
+[[nodiscard]] static std::future<void> Send(std::shared_ptr<XChannel>& ch, memp_t sdata) {
   auto pr = std::make_shared<std::promise<void>>();
   auto fut = pr->get_future();
 
@@ -283,7 +293,7 @@ static void Send(XChannel *ch, memp_t sdata, DoneCallback cb) {
   return fut;
 }
 
-static memp_t AllocCPUBuffer(XChannel* ch, uint64_t size) {
+static memp_t AllocCPUBuffer(std::shared_ptr<XChannel>& ch, uint64_t size) {
   memp_t bufmr;
   auto result = ch->AllocBuffer(bufmr, size, CPU);
   RTCHECK_EQ(result, accl::barex::BAREX_SUCCESS);
@@ -592,13 +602,13 @@ struct GetMemHandles {
 private:
   using Promise = std::promise<std::vector<RDMAMemHandle>>;
 private:
-  XChannel* const ch_ = nullptr;
+  std::shared_ptr<XChannel> const ch_ = nullptr;
   uint64_t const reqid_;
   std::shared_ptr<Promise> pr_;
 
 public:
-  GetMemHandles(XChannel* ch, uint64_t r) noexcept:
-    ch_(ch),
+  GetMemHandles(std::shared_ptr<XChannel> ch, uint64_t r) noexcept:
+    ch_(std::move(ch)),
     reqid_(r),
     pr_(std::make_shared<Promise>()) {}
 
@@ -631,7 +641,7 @@ public:
   }
 };
 
-std::vector<RDMAMemHandle> CliBarexCtx::get_mem_handles(XChannel* dst) const {
+std::vector<RDMAMemHandle> CliBarexCtx::get_mem_handles(std::shared_ptr<XChannel>& dst) const {
   auto& self = *this;
   uint32_t magic = MEM_HANDLES_REQ_MAGIC;
   uint64_t reqid = new_id();
@@ -685,13 +695,13 @@ struct RemoteCrc {
 private:
   using Promise = std::promise<uint32_t>;
 private:
-  XChannel* const ch_ = nullptr;
+  std::shared_ptr<XChannel> const ch_ = nullptr;
   uint64_t const reqid_;
   std::shared_ptr<Promise> pr_;
 
 public:
-  RemoteCrc(XChannel* ch, uint64_t r) noexcept:
-    ch_(ch),
+  RemoteCrc(std::shared_ptr<XChannel> ch, uint64_t r) noexcept:
+    ch_(std::move(ch)),
     reqid_(r),
     pr_(std::make_shared<Promise>()) {}
 
@@ -723,7 +733,7 @@ public:
   }
 };
 
-uint32_t CliBarexCtx::get_remote_crc(XChannel* dst, const std::vector<IpcBlock>* data, uint32_t lcrc) {
+uint32_t CliBarexCtx::get_remote_crc(std::shared_ptr<XChannel>& dst, const std::vector<IpcBlock>* data, uint32_t lcrc) {
   assert(!data->empty());
   auto& self = *this;
   uint64_t const reqid = new_id();
@@ -765,7 +775,7 @@ uint32_t CliBarexCtx::get_remote_crc(XChannel* dst, const std::vector<IpcBlock>*
   return fut.get();
 }
 
-void RDMAServer::CtxCallback::resp_remote_crc(accl::barex::XChannel *channel, uint64_t reqid, char *inbuf, size_t inlen) {
+void RDMAServer::CtxCallback::resp_remote_crc(std::shared_ptr<XChannel>& channel, uint64_t reqid, char *inbuf, size_t inlen) {
   const auto tp1 = SteadyClock::now();
   const auto& layer_descs = this->server_->ctx_->layer_gdrcpy_mem();
   const char* const inbuf_bak = inbuf;
@@ -841,7 +851,7 @@ void CliBarexCtx::on_send_error(accl::barex::Status s, uint64_t reqid) const {
   return handle(std::move(s), nullptr, 0);
 }
 
-void RDMAServer::CtxCallback::resp_mem_handles(accl::barex::XChannel *channel, uint64_t reqid, char *inbuf, size_t inlen) {
+void RDMAServer::CtxCallback::resp_mem_handles(std::shared_ptr<XChannel>& channel, uint64_t reqid, char *inbuf, size_t inlen) {
   assert(inlen == RPC_HEADER);
   auto& self = *this;
   auto& handles = self.server_->info_.handles;
@@ -861,7 +871,7 @@ void RDMAServer::CtxCallback::resp_mem_handles(accl::barex::XChannel *channel, u
   });
 }
 
-void RDMAServer::CtxCallback::OnRecvCall(XChannel *ch, char *in_buf, size_t len, x_msg_header _header) noexcept {
+void RDMAServer::CtxCallback::OnRecvCall(std::shared_ptr<XChannel> ch, char *in_buf, size_t len, x_msg_header _header) noexcept {
   if (len >= RPC_HEADER) {
     const auto [magic, reqid] = deser_rpc_header(in_buf);
     if (magic == MEM_HANDLES_REQ_MAGIC) {
@@ -1037,14 +1047,25 @@ void RDMAChannel::connect(const WorkerInfo &dst_info) {
   auto fut = pr->get_future();
 
   auto result = self.Connect(std::move(server_addr), port,
-                             [pr = std::move(pr), conn=&self](XChannel *res, Status s) mutable {
-                               if (!s.IsOk()) {
-                                 auto ex = std::make_exception_ptr(std::runtime_error("Connect ERR: " + s.ErrMsg()));
-                                 pr->set_exception(std::move(ex));
-                                 return;
-                               }
-                               pr->set_value(BarexChannel(conn, res));
-                             }
+    [pr = std::move(pr), conn=&self](XChannel *res, Status s) mutable {
+      if (!s.IsOk()) {
+        auto ex = std::make_exception_ptr(std::runtime_error("Connect ERR: " + s.ErrMsg()));
+        pr->set_exception(std::move(ex));
+        return;
+      }
+      std::shared_ptr<XChannel> shared_ch;
+      auto* ctx = res->GetContext();
+      bool ret = ctx->GetSharedChannel(shared_ch, res);
+      if (!ret) {
+        std::stringstream ss;
+        ss << "Connect GetSharedError; ctx=" << ctx << ";ch=" << res
+          << ";conn=" << conn;
+        auto ex = std::make_exception_ptr(std::runtime_error(std::move(ss).str()));
+        pr->set_exception(std::move(ex));
+        return;
+      }
+      pr->set_value(BarexChannel(conn, std::move(shared_ch)));
+    }
   );
 
   if (result != BAREX_SUCCESS) {
@@ -1087,7 +1108,7 @@ void RDMAChannel::do_init() {
   usleep(delay_ms * 1000);
 #endif
 
-  self.dst_handles_ = self.ctx_->get_mem_handles(chs[0].ch());
+  self.dst_handles_ = self.ctx_->get_mem_handles(chs[0].sch());
   LOG(INFO) << "RDMAChannel connect. dstip=" << self.ip_
             << ",init_us=" << init_time.get_elapse_us()
             << ",dstport=" << self.port_
@@ -1151,10 +1172,14 @@ void RDMAChannel::do_init() {
 }
 
 accl::barex::XChannel *RDMAChannel::ch() noexcept {
+  return this->sch().get();
+}
+
+std::shared_ptr<accl::barex::XChannel>& RDMAChannel::sch() noexcept {
   auto &self = *this;
   int n = self.chs_.size();
   int idx = (++self.prev_ch_idx_) % n;
-  return self.chs_[idx].ch();
+  return self.chs_[idx].sch();
 }
 
 
@@ -1529,7 +1554,7 @@ void RDMAChannel::flush(std::string& outstr) {
   if (self.enable_crc_) {
     auto crcrt = TimeWatch();
     assert(!self.chs_.empty());
-    auto rcrc = self.ctx_->get_remote_crc(self.chs_[0].ch(), self.data_, self.crc_);
+    auto rcrc = self.ctx_->get_remote_crc(self.chs_[0].sch(), self.data_, self.crc_);
     auto crc_dus_us = crcrt.get_elapse_us();
     out << ",CrcDurUs=" << crc_dus_us;
     RTASSERT_EQ(rcrc, self.crc_);
@@ -1558,7 +1583,7 @@ void RDMAChannel::send_notification(const std::vector<const ReqSendTask*>& reqs)
     const auto &block_ids = r->dst_blocks();
     // 编码规则见 RDMAServer::CtxCallback::OnRecvCall
     auto const msglen = get_encode_size(src_inst_id_, src_worker_id_, reqid, block_ids);
-    auto *use_ch = self.ch();
+    auto& use_ch = self.sch();
     assert(use_ch->GetMempool() == self.ctx_->mp());
     auto bufmr = AllocCPUBuffer(use_ch, msglen);
     encode_notification(bufmr.buf, self.src_inst_id_, self.src_worker_id_, reqid, block_ids);

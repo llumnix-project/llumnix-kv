@@ -3,6 +3,8 @@ import os
 from typing import List, Optional, Set
 
 import torch
+import logging
+
 
 from blade_kvt.kvtransfer_ops import (
     TransferProtocol,
@@ -19,6 +21,10 @@ from blade_kvt.kvtransfer_ops import (
     submit_req_recv,
     submit_req_send2,
 )
+
+
+logger = logging.getLogger("blade_kvt")
+
 
 @enum.unique
 class KVTransferProtocolType(enum.Enum):
@@ -96,6 +102,20 @@ class KVTransferClient:
         """
         device_id = layers[0].get_device()
         layer_num_blocks = _get_layer_num_blocks(layers, block_bytes)
+
+        logger.info(
+            "init kvt client:"
+            " instid=%s tpsize=%s wid=%s wrank=%s"
+            " blockbytes=%s tokenbytes=%s"
+            " naming=%s protocols=%s"
+            " layer_shape=%s layer_dtype=%s device_id=%s"
+            " num_blocks=%s num_layers=%s",
+            inst_id, tp_size, worker_id, worker_tp_rank,
+            block_bytes, token_bytes,
+            naming_url, protocols,
+            layers[0].shape, layers[0].dtype, layers[0].device,
+            layer_num_blocks, len(layers)
+        )
 
         self._num_layers = len(layers)
         self._init_events()
@@ -307,6 +327,21 @@ class KVTransferServer:
     ):
         device_id = layers[0].get_device()
         layer_num_blocks = _get_layer_num_blocks(layers, block_bytes)
+
+        logger.info(
+            "init kvt server:"
+            " instid=%s tpsize=%s wid=%s wrank=%s"
+            " blockbytes=%s tokenbytes=%s"
+            " naming=%s protocols=%s"
+            " layer_shape=%s layer_dtype=%s device_id=%s"
+            " num_blocks=%s num_layers=%s",
+            inst_id, tp_size, worker_id, worker_tp_rank,
+            block_bytes, token_bytes,
+            naming_url, protocols,
+            layers[0].shape, layers[0].dtype, layers[0].device,
+            layer_num_blocks, len(layers)
+        )
+
         layer_addrs = [l.data_ptr() for l in layers]
         ops_protocols = [p.to_ops_protocol() for p in protocols]
         init_kv_transfer_server(
