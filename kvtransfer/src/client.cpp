@@ -6,6 +6,7 @@
 #include "protocol/cuda_ipc.h"
 #include "protocol/rdma_protocol.h"
 #include "envcfg.h"
+#include "fault_inject.h"
 #include <accl/barex/xthreadpool.h>
 
 
@@ -35,12 +36,12 @@ auto KvTransferClient::TargetMgr::get(const InstanceId& inst_id, WorkerId worker
   return &*iter;
 }
 
-void KvTransferClient::TargetMgr::try_shrink() {
+void KvTransferClient::TargetMgr::try_shrink(size_t cap) {
   auto& self = *this;
-  if (self.targets_.size() <= (size_t)env_txstub_cap()) {
+  if (self.targets_.size() <= cap) {
     return;
   }
-  self.shrink();
+  self.shrink(cap);
   return;
 }
 
@@ -61,11 +62,10 @@ auto KvTransferClient::TargetMgr::peek(const InstanceId& inst_id, WorkerId worke
 }
 
 
-void KvTransferClient::TargetMgr::shrink() {
+void KvTransferClient::TargetMgr::shrink(size_t cap) {
   auto& self = *this;
   auto ts_start = TimeWatch();
   auto const orig_size = self.targets_.size();
-  const size_t cap = env_txstub_cap();
   std::vector<SendStub> gc_stubs;
   gc_stubs.reserve(16);
   while (self.targets_.size() > cap) {
@@ -214,6 +214,10 @@ void KvTransferClient::add_send_task(std::shared_ptr<RequestInfo> req, uint32_t 
   auto& self = *this;
   req->update_send(seen, new_tokens, has_last);
 
+  self.mgr_.try_create(req->dst_inst_id, req->dst_worker_id,
+    0, self.ctx_->num_layers(),
+    req->dst_worker_info);
+
   BatchSendTask* worker_task_p = nullptr;
   auto& workers_task = self.targets_tasks_buf_[req->dst_inst_id];
   for (auto& worker_task : workers_task) {
@@ -232,33 +236,34 @@ void KvTransferClient::add_send_task(std::shared_ptr<RequestInfo> req, uint32_t 
   return ;
 }
 
-void KvTransferClient::submit_req_send(const InstanceId &dst_inst_name,
-                                       const WorkerId &dst_worker_id,
-                                       const RequestId &req_id,
+void KvTransferClient::submit_req_send(InstanceId dst_inst_name,
+                                       WorkerId dst_worker_id,
+                                       RequestId req_id,
                                        uint32_t seen_tokens,
                                        uint32_t new_tokens,
                                        bool has_last_token,
                                        std::vector<uint32_t> src_block_ids,
                                        std::vector<uint32_t> dst_block_ids,
-                                       const std::optional<std::string> &dst_worker_info) {
+                                       std::optional<std::string> dst_worker_info) {
 
   if (new_tokens <= 0) {
     LOG(ERROR) << "KVT client: invalid new tokens=" << new_tokens << ";";
     throw KVTransferException(ErrorKind::INVALID_REQUEST_PARAM, "invalid new tokens;");
   }
 
-  mgr_.try_create(dst_inst_name, dst_worker_id, 0, ctx_->num_layers(), dst_worker_info);
-  auto req_info = std::make_shared<RequestInfo>(dst_inst_name,
+  auto req_info = std::make_shared<RequestInfo>(std::move(dst_inst_name),
                                                 dst_worker_id,
-                                                req_id,
+                                                std::move(dst_worker_info),
+                                                std::move(req_id),
                                                 std::move(src_block_ids),
                                                 std::move(dst_block_ids));
   add_send_task(req_info, seen_tokens, new_tokens, has_last_token);
+  const auto* reqp = req_info.get();
   if (!auto_remove_req_ || !has_last_token) {
-    reqs_[req_id].emplace_back(std::move(req_info));
+    reqs_[req_info->req_id].emplace_back(std::move(req_info));
   }
-  LOG(INFO) << "submit_req_send:step=" << step_id_ << ";req_id=" << req_id
-            << ";dst_worker=" << dst_inst_name << ',' << dst_worker_id
+  LOG(INFO) << "submit_req_send:step=" << step_id_ << ";req_id=" << reqp->req_id
+            << ";dst_worker=" << reqp->dst_inst_id << ',' << dst_worker_id
             << ";seen_tokens=" << seen_tokens << ";new_tokens=" << new_tokens
             << ";has_last_token=" << has_last_token;
 }
@@ -312,6 +317,7 @@ size_t KvTransferClient::start_send() {
         target->thread_hint = ++thread_hint_;
       }
       target_thdpool_->Submit([target, batch=std::move(worker_tasks)] () mutable {
+        fault_inject_sleep(100 * 1000);
         // std::function will COPY batch!
         target->stub->send_batch(std::move(batch));
         auto ncnt = target->inflycnt.fetch_sub(1, std::memory_order_release);
@@ -324,10 +330,8 @@ size_t KvTransferClient::start_send() {
   auto ctx = context();
   auto step_guard = std::make_shared<StepGuard>(ctx, step);
   single_thd_.spawn([step_guard]() {
-#ifndef NDEBUG
     // see https://project.aone.alibaba-inc.com/v2/project/664220/req/60271832
-    usleep(10 * 1000);  // sleep 10ms
-#endif
+    fault_inject_sleep(10 * 1000);
 
     step_guard->step()->wait_layers_start_ts = SteadyClock::now();
     step_guard->wait_layers();
@@ -358,7 +362,7 @@ void KvTransferClient::flush_send(size_t step_id) {
   last_step_guard_.reset();
 
   // 最合适的调用地方是某处可以与 gpu overlap 的地方, 后续 kvconnector 应该增加这种接口
-  mgr_.try_shrink();
+  mgr_.try_shrink(env_txstub_cap());
 }
 
 ReqState KvTransferClient::check_transfer_done(const RequestId &req_id) {

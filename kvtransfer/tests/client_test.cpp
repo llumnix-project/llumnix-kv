@@ -72,8 +72,8 @@ class ProxyStub : public ISendStub {
  public:
   InstanceId dst_inst;
   WorkerId dst_worker;
-  MockSendStub *stub;
-  ProxyStub(const InstanceId &i, WorkerId w, MockSendStub *s) :
+  ISendStub *stub;
+  ProxyStub(const InstanceId &i, WorkerId w, ISendStub *s) :
       ISendStub(i, w),
       dst_inst(i),
       dst_worker(w),
@@ -90,19 +90,17 @@ class ProxyStub : public ISendStub {
 
 class FakeStubFactory : public ISendStubFactory {
  public:
-  std::vector<std::unique_ptr<ProxyStub>> stubs;
+  std::unordered_map<std::string, ISendStub*> stubs;
 
   FakeStubFactory() = default;
   SendStub create_stub(const InstanceId &dst_inst, WorkerId dst_worker, uint32_t, uint32_t,
                        std::optional<TransferProtocol> p, const std::optional<std::string> &) override {
-    for (size_t i = 0; i < stubs.size(); ++i) {
-      if (stubs[i] != nullptr) {
-        if (stubs[i]->dst_inst == dst_inst && stubs[i]->dst_worker == dst_worker) {
-          return std::move(stubs[i]);
-        }
-      }
+    auto iter = stubs.find(dst_inst + "-" + std::to_string(dst_worker));
+    if (iter == stubs.end()) {
+      RTASSERT(false);
+      return nullptr;
     }
-    return nullptr;
+    return std::make_unique<ProxyStub>(dst_inst, dst_worker, iter->second);
   }
 };
 
@@ -116,7 +114,7 @@ TEST(KVTransferClientTest, SendTo1) {
 
   EXPECT_CALL(stub, send_batch(batchCheck(expect_reqs))).Times(2);
   auto factory = std::make_unique<FakeStubFactory>();
-  factory->stubs.push_back(std::make_unique<ProxyStub>("2", 1, &stub));
+  factory->stubs.emplace("2-1", &stub);
 
   KvTransferClient client(std::move(ctx), std::move(factory));
   // client.add_target("2", 1, 0, 2);
@@ -128,9 +126,19 @@ TEST(KVTransferClientTest, SendTo1) {
     client.submit_req_send("2", 1, req1.req_id, 1, false,
                            req1.src_blocks, req1.dst_blocks);
     auto idx = client.start_send();
+    client.target_try_shrink(0);
+    usleep(10 * 1000);
+    client.target_try_shrink(0);
+    usleep(10 * 1000);
+    client.target_try_shrink(0);
     client.notify_event_record(idx);
     client.flush_send(idx);
   }
+  while (client.target_size() > 0) {
+    usleep(100 * 1000);
+    client.target_try_shrink(0);
+  }
+
   {
     EXPECT_THROW(client.submit_delta_send("UNKNOWN_REQ_ID", 1, 1, false), KVTransferException);
     req1.add_send_task(1, 1, false);
@@ -138,8 +146,17 @@ TEST(KVTransferClientTest, SendTo1) {
     client.submit_delta_send(req1.req_id, 1, 1, false);
     client.submit_delta_send(req1.req_id, 2, 0, true);
     auto idx = client.start_send();
+    client.target_try_shrink(0);
+    usleep(10 * 1000);
+    client.target_try_shrink(0);
+    usleep(10 * 1000);
+    client.target_try_shrink(0);
     client.notify_event_record(idx);
     client.flush_send(idx);
+  }
+  while (client.target_size() > 0) {
+    usleep(100 * 1000);
+    client.target_try_shrink(0);
   }
 }
 
@@ -159,8 +176,8 @@ TEST(KVTransferClientTest, SendTo2) {
   MockSendStub stub1;
   EXPECT_CALL(stub1, send_batch(batchCheck(expect_reqs1))).Times(2);
   auto factory = std::make_unique<FakeStubFactory>();
-  factory->stubs.push_back(std::make_unique<ProxyStub>("2", 1, &stub0));
-  factory->stubs.push_back(std::make_unique<ProxyStub>("3", 1, &stub1));
+  factory->stubs.emplace("2-1", &stub0);
+  factory->stubs.emplace("3-1", &stub1);
 
   KvTransferClient client(std::move(ctx), std::move(factory));
   // client.add_target("2", 1, 0, 2);
@@ -172,7 +189,16 @@ TEST(KVTransferClientTest, SendTo2) {
                          1, false,
                          req1.src_blocks, req1.dst_blocks);
   auto idx35 = client.start_send();
+  client.target_try_shrink(0);
+  usleep(10 * 1000);
+  client.target_try_shrink(0);
+  usleep(10 * 1000);
+  client.target_try_shrink(0);
   client.flush_send(idx35);
+  while (client.target_size() > 0) {
+    usleep(100 * 1000);
+    client.target_try_shrink(0);
+  }
 
   req1.add_send_task(1, 1, false);
   req1.add_send_task(2, 0, true);
@@ -183,13 +209,22 @@ TEST(KVTransferClientTest, SendTo2) {
   client.submit_delta_send(req1.req_id, 1, 1, false);
   client.submit_delta_send(req1.req_id, 2, 0, true);
   auto idx33 = client.start_send();
+  client.target_try_shrink(0);
+  usleep(10 * 1000);
+  client.target_try_shrink(0);
+  usleep(10 * 1000);
+  client.target_try_shrink(0);
   client.notify_event_record(idx33);
   client.flush_send(idx33);
+  while (client.target_size() > 0) {
+    usleep(100 * 1000);
+    client.target_try_shrink(0);
+  }
 }
 
 TEST(KVTransferClientTest, SendToPP2) {
   auto ctx = std::make_unique<Context>("1", 1);
-  auto req0p = std::make_shared<TestRequestInfo>("3", 1, "REQ00000001", std::vector<uint32_t>{0, 1}, std::vector<uint32_t>{0, 1});
+  auto req0p = std::make_shared<TestRequestInfo>("3", 1, "REQ00000000", std::vector<uint32_t>{0, 1}, std::vector<uint32_t>{0, 1});
   auto req1p = std::make_shared<TestRequestInfo>("2", 1, "REQ00000001", std::vector<uint32_t>{0, 1}, std::vector<uint32_t>{2, 3});
   auto& req0 = *req0p;
   auto& req1 = *req1p;
@@ -204,8 +239,8 @@ TEST(KVTransferClientTest, SendToPP2) {
   EXPECT_CALL(stub1, send_batch(batchCheck(expect_reqs1))).Times(2);
 
   auto factory = std::make_unique<FakeStubFactory>();
-  factory->stubs.push_back(std::make_unique<ProxyStub>("2", 1, &stub0));
-  factory->stubs.push_back(std::make_unique<ProxyStub>("3", 1, &stub1));
+  factory->stubs.emplace("2-1", &stub0);
+  factory->stubs.emplace("3-1", &stub1);
 
   KvTransferClient client(std::move(ctx), std::move(factory));
   // client.add_target("2", 1, 0, 2);
@@ -217,12 +252,31 @@ TEST(KVTransferClientTest, SendToPP2) {
                          1, false,
                          req1.src_blocks, req1.dst_blocks);
   auto idx36 = client.start_send();
+  client.target_try_shrink(0);
+  usleep(10 * 1000);
+  client.target_try_shrink(0);
+  usleep(10 * 1000);
+  client.target_try_shrink(0);
   client.flush_send(idx36);
+  while (client.target_size() > 0) {
+    usleep(100 * 1000);
+    client.target_try_shrink(0);
+  }
 
   req1.add_send_task(1, 1, true);
   req0.add_send_task(1, 1, true);
+  client.submit_delta_send(req1.req_id, 1, 1, true);
   client.submit_delta_send(req0.req_id, 1, 1, true);
   auto zyidx34 = client.start_send();
+  client.target_try_shrink(0);
+  usleep(10 * 1000);
+  client.target_try_shrink(0);
+  usleep(10 * 1000);
+  client.target_try_shrink(0);
   client.notify_event_record(zyidx34);
   client.flush_send(zyidx34);
+  while (client.target_size() > 0) {
+    usleep(100 * 1000);
+    client.target_try_shrink(0);
+  }
 }

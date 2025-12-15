@@ -11,6 +11,7 @@
 #include <iostream>
 #include <unistd.h>
 #include <memory>
+#include <optional>
 
 #define MAX_OTHER_INFO_LEN (8192)
 #define MAX_ADDRESS_LEN (64)
@@ -207,6 +208,7 @@ class RequestInfo {
  public:
   const InstanceId dst_inst_id;
   const WorkerId dst_worker_id;
+  const std::optional<std::string> dst_worker_info;
   const RequestId req_id;
   const std::vector<uint32_t> src_blocks;
   const std::vector<uint32_t> dst_blocks;
@@ -219,13 +221,27 @@ class RequestInfo {
 #endif
 
  public:
-  RequestInfo(const InstanceId& dst_inst_id_,
+  // only for test
+  RequestInfo(InstanceId dst_inst_id_,
               WorkerId dst_worker_id_,
               RequestId req_id_,
               std::vector<uint32_t> src_blocks_,
               std::vector<uint32_t> dst_blocks_):
-      dst_inst_id(dst_inst_id_),
+      RequestInfo(std::move(dst_inst_id_), dst_worker_id_,
+                  std::nullopt,
+                  std::move(req_id_),
+                  std::move(src_blocks_),
+                  std::move(dst_blocks_)) {};
+
+  RequestInfo(InstanceId dst_inst_id_,
+              WorkerId dst_worker_id_,
+              std::optional<std::string> dst_worker_info_,
+              RequestId req_id_,
+              std::vector<uint32_t> src_blocks_,
+              std::vector<uint32_t> dst_blocks_):
+      dst_inst_id(std::move(dst_inst_id_)),
       dst_worker_id(dst_worker_id_),
+      dst_worker_info(std::move(dst_worker_info_)),
       req_id(std::move(req_id_)),
       src_blocks(std::move(src_blocks_)),
       dst_blocks(std::move(dst_blocks_)) {};

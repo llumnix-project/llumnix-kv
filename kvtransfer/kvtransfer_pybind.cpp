@@ -88,9 +88,9 @@ void add_target(const std::string &inst_name,
   }
 }
 
-void submit_req_send2(const std::string &dst_inst_name,
+void submit_req_send2(std::string dst_inst_name,
                       uint32_t dst_worker_id,
-                      const std::string &req_id,
+                      std::string req_id,
                       uint32_t seen_tokens,
                       uint32_t new_tokens,
                       bool has_last_token,
@@ -98,9 +98,9 @@ void submit_req_send2(const std::string &dst_inst_name,
                       std::vector<uint32_t> dst_block_ids,
                       std::optional<std::string> dst_worker_info = std::nullopt) {
   if (KV_CLIENT != nullptr) {
-    KV_CLIENT->submit_req_send(dst_inst_name,
+    KV_CLIENT->submit_req_send(std::move(dst_inst_name),
                                dst_worker_id,
-                               req_id,
+                               std::move(req_id),
                                seen_tokens,
                                new_tokens,
                                has_last_token,
@@ -112,15 +112,15 @@ void submit_req_send2(const std::string &dst_inst_name,
   }
 }
 
-void submit_req_send(const std::string &dst_inst_name,
+void submit_req_send(std::string dst_inst_name,
                      uint32_t dst_worker_id,
-                     const std::string &req_id,
+                     std::string req_id,
                      uint32_t new_tokens,
                      bool has_last_token,
                      std::vector<uint32_t> src_block_ids,
                      std::vector<uint32_t> dst_block_ids) {
-  return submit_req_send2(dst_inst_name, dst_worker_id,
-                          req_id, 0, new_tokens, has_last_token,
+  return submit_req_send2(std::move(dst_inst_name), dst_worker_id,
+                          std::move(req_id), 0, new_tokens, has_last_token,
                           std::move(src_block_ids),
                           std::move(dst_block_ids));
 }

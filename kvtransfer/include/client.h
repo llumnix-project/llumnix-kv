@@ -42,25 +42,25 @@ class KvTransferClient : public noncopyable {
                   const std::optional<std::string> &dst_worker_info = std::nullopt);
   void remove_target(const InstanceId &, const WorkerId &);
 
-  void submit_req_send(const InstanceId &dst_inst,
-                       const WorkerId &dst_worker,
-                       const RequestId &,
+  void submit_req_send(InstanceId dst_inst,
+                       WorkerId dst_worker,
+                       RequestId reqid,
                        uint32_t seen_tokens,
                        uint32_t new_tokens,
                        bool has_last_token,
                        std::vector<uint32_t> src_block_ids,
                        std::vector<uint32_t> dst_block_ids,
-                       const std::optional<std::string> &dst_worker_info = std::nullopt);
+                       std::optional<std::string> dst_worker_info = std::nullopt);
 
-  void submit_req_send(const InstanceId &dst_inst,
-                       const WorkerId &dst_worker,
-                       const RequestId &r,
+  void submit_req_send(InstanceId dst_inst,
+                       WorkerId dst_worker,
+                       RequestId r,
                        uint32_t new_tokens,
                        bool has_last_token,
                        std::vector<uint32_t> src_block_ids,
                        std::vector<uint32_t> dst_block_ids) {
-    return submit_req_send(dst_inst, dst_worker,
-                           r, 0, new_tokens, has_last_token,
+    return submit_req_send(std::move(dst_inst), dst_worker,
+                           std::move(r), 0, new_tokens, has_last_token,
                            std::move(src_block_ids),
                            std::move(dst_block_ids));
   }
@@ -78,6 +78,15 @@ class KvTransferClient : public noncopyable {
   Context *context() { return ctx_.get(); };
   void enable_auto_connect() { auto_connect_ = true; }
 
+  // only for test
+  size_t target_size() const noexcept {
+    return this->mgr_.size();
+  }
+
+  // only for test
+  void target_try_shrink(size_t cap) {
+    return this->mgr_.try_shrink(cap);
+  }
  private:
   void add_send_task(std::shared_ptr<RequestInfo> reqinfo, uint32_t seen, uint32_t new_tokens, bool has_last);
  private:
@@ -113,12 +122,18 @@ class KvTransferClient : public noncopyable {
 
     Target* get(const InstanceId& inst_id, WorkerId worker_id);
 
-    void try_shrink();
+    void try_shrink(size_t cap);
+
+    // only for test
+    size_t size() const noexcept {
+      assert(this->targets_.size() == this->target_map_.size());
+      return this->targets_.size();
+    }
   private:
     // RETURN self.targets_.end() means not found
     std::list<Target>::iterator peek(const InstanceId& inst_id, WorkerId worker_id);
 
-    void shrink();
+    void shrink(size_t cap);
 
     int try_pop_map(const InstanceId& inst_id, WorkerId worker_id);
 
