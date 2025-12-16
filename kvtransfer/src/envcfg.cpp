@@ -267,7 +267,7 @@ int env_waitlayer_tpsize() {
 
 
 int env_shrink_tpsize() {
-  static constexpr int DEFVAL = 2;
+  static constexpr int DEFVAL = 1;
   static int val = DEFVAL;
   static std::once_flag flag;
   std::call_once(flag, [] () {

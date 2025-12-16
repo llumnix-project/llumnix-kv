@@ -1075,12 +1075,44 @@ void RDMAChannel::connect(const WorkerInfo &dst_info) {
   return fut;
 }
 
+static void delete_channels(CliBarexCtx* ctx, std::vector<BarexChannel> chs) {
+  auto& tp = ctx->close_tp();
+  tp.spawn([chs=std::move(chs)] () {
+    // 在后台线程析构 chs.
+  });
+  assert(chs.empty());
+  return;
+}
+
+
+RDMAChannel::~RDMAChannel() {
+  delete_channels(this->ctx_, std::move(this->chs_));
+  assert(this->chs_.empty());
+  return;
+}
+
+static bool valid_channels(std::vector<BarexChannel>& chs) {
+  if (chs.empty()) {
+    return false;
+  }
+  for (auto& ch : chs) {
+    if (!ch.ch()->IsActive()) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void RDMAChannel::do_init() {
   auto &self = *this;
-  if (!self.chs_.empty()) {
+  if (valid_channels(self.chs_)) {
     assert(self.dst_handles_.size() == self.dst_layer_num_);
     return;
   }
+  std::vector<BarexChannel> tmp_chs;
+  tmp_chs.swap(self.chs_);
+  delete_channels(self.ctx_, std::move(tmp_chs));
+
   auto init_time = TimeWatch();
   const int sp = env_send_parallel();
   assert(sp > 0);
@@ -1113,7 +1145,7 @@ void RDMAChannel::do_init() {
             << ",init_us=" << init_time.get_elapse_us()
             << ",dstport=" << self.port_
             << ",dsthandles_n=" << self.dst_handles_.size();
-  assert(!self.chs_.empty());
+  assert(valid_channels(self.chs_));
   assert(self.dst_handles_.size() == self.dst_layer_num_);
   return;
 }
@@ -1242,6 +1274,7 @@ void RDMAChannel::register_data(std::vector<IpcBlock>& data, TPKind kind) {
   assert(self.data_ == nullptr);
   self.data_ = &data;
   self.kind_ = kind;
+  self.do_init();
 
   self.enable_crc_ = env_crc();
   if (self.enable_crc_) {
@@ -1308,7 +1341,6 @@ void RDMAChannel::send_data(size_t layer_idx) {
   auto &self = *this;
   assert(layer_idx < self.dst_layer_num_);
   assert(self.dst_layer_num_ == self.ctx_->layer_mr().size());
-  self.do_init();
 
   if (self.kind_ == TPKind::PLTD) {
     return self.send_data_pltd(layer_idx);
@@ -1485,7 +1517,6 @@ void RDMAChannel::do_write(uint32_t layer_idx,
                            size_t dst_offset,
                            size_t len) {
   auto &self = *this;
-  self.do_init();
 
   assert(src_offset < self.ctx_->layer_blk_size);
   assert(len < self.ctx_->layer_blk_size);
@@ -1568,7 +1599,6 @@ void RDMAChannel::flush(std::string& outstr) {
 
 void RDMAChannel::send_notification(const std::vector<const ReqSendTask*>& reqs) {
   auto &self = *this;
-  self.do_init();
 
   assert(self.send_futs_.empty());
   self.send_futs_.reserve(reqs.size());

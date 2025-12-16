@@ -19,6 +19,7 @@
 #include <mutex>
 #include <unordered_map>
 #include "thrid_party/logging.h"
+#include "utils/thread_pool.h"
 
 #ifdef ENABLE_RDMA
 #include "utils/gdr.h"
@@ -191,6 +192,10 @@ struct CliBarexCtx : public BarexCtx {
     return this->connector_.get();
   }
 
+  auto& close_tp() noexcept {
+    return this->close_tp_;
+  }
+
   // rpc
   std::vector<RDMAMemHandle> get_mem_handles(std::shared_ptr<accl::barex::XChannel>& dst) const;
   uint32_t get_remote_crc(std::shared_ptr<accl::barex::XChannel>& dst,
@@ -226,6 +231,7 @@ struct CliBarexCtx : public BarexCtx {
   // reqid, on resp callback
   std::unordered_map<uint64_t, OnRespF> rpc_;
   std::unique_ptr<accl::barex::XConnector, XConnectorDeleter> connector_;
+  ThreadPool close_tp_{1};
 };
 
 static constexpr int LAYER_NUM_MAX = 100;
@@ -242,6 +248,8 @@ class RDMAChannel : public IChannel, public noncopyable {
       src_inst_id_(inst_id),
       src_worker_id_(worker_id),
       ctx_(ctx) {}
+
+  ~RDMAChannel();
 
   // connect 在主线程调用, 尽量不要阻塞.
   // write 在后台线程调用, 可以阻塞,
