@@ -37,7 +37,9 @@ static const std::string EAS_POST_API{"/api/message"};
 static const std::string EAS_GET_API{"/api/messages"};
 static const std::string EAS_LIST_API{"/api/instances"};
 static const std::string EAS_INSTANCE_KEY{"__instance__"};
-static const std::string EAS_VERSION_KEY{"__version__"};
+// https://project.aone.alibaba-inc.com/v2/project/664220/req/76900958
+// REAL VERSION KEY: __timestamp__
+static const std::string EAS_VERSION_KEY{"__timestamp__"};
 static const std::string EAS_LOCAL_ENDPOINT{"http://127.0.0.1:9900"};
 static const std::string EAS_POST_PATH = EAS_LOCAL_ENDPOINT + EAS_POST_API;
 
@@ -60,7 +62,7 @@ class EASNamingClient : public INamingClient, noncopyable {
   void load();
   std::optional<EASNamingCache *> get_pod_kv(const std::string &pod_name);
 
-  uint32_t cache_expire_seconds_{1000};
+  uint32_t cache_expire_seconds_{1};
   std::string pod_name_;
   std::string service_endpoint_;
   std::string get_kv_path_;
