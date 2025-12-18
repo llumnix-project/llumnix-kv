@@ -260,6 +260,7 @@ class RDMAChannel : public IChannel, public noncopyable {
   void send_data(size_t layer_index) override;
   void flush(std::string& out) override;
   void send_notification(const std::vector<const ReqSendTask*>& reqs) override;
+  bool is_active() override;
   using IChannel::send_notification;
 
  private:

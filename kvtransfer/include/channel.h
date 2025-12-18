@@ -52,6 +52,10 @@ class IChannel {
   virtual void flush(std::string& out) = 0;
   virtual void send_notification(const std::vector<const ReqSendTask*>& reqs) = 0;
 
+  virtual bool is_active() {
+    return true;
+  }
+
   virtual void close() {};
   virtual ~IChannel() = default;
 

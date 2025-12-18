@@ -733,7 +733,7 @@ private:
 
   void try_create_channel() {
     auto& self = *this;
-    if (self.ch) {
+    if (self.ch && self.ch->is_active()) {
       assert(self.dstinfo.has_value());
       return ;
     }

@@ -1267,6 +1267,15 @@ static std::tuple<size_t, size_t, size_t, size_t> group_by_dst(std::vector<IpcBl
   return {min_size, max_size, total_size, cnt};
 }
 
+bool RDMAChannel::is_active() {
+  auto& self = *this;
+  if (self.chs_.empty()) {
+    return true;
+  }
+  return valid_channels(self.chs_);
+}
+
+
 void RDMAChannel::register_data(std::vector<IpcBlock>& data, TPKind kind) {
   auto& self = *this;
   assert(!data.empty());
