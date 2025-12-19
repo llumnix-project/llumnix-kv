@@ -88,6 +88,11 @@ void add_target(const std::string &inst_name,
   }
 }
 
+void start_req_send(std::vector<ReqMeta>& metas) {
+  RTASSERT(KV_CLIENT != nullptr);
+  KV_CLIENT->start_req_send(metas);
+}
+
 void submit_req_send2(std::string dst_inst_name,
                       uint32_t dst_worker_id,
                       std::string req_id,
@@ -299,6 +304,17 @@ PYBIND11_MODULE(kvtransfer_ops, m) {
       .value("RDMA_DIRECT", blade_llm::TransferProtocol::Kind::RDMA_DIRECT)
       .export_values();
 
+  py::class_<blade_llm::ReqMeta>(m, "ReqMeta")
+      .def(py::init<>())  // 默认构造
+      .def_readwrite("dst_inst", &blade_llm::ReqMeta::dst_inst)
+      .def_readwrite("dst_worker", &blade_llm::ReqMeta::dst_worker)
+      .def_readwrite("reqid", &blade_llm::ReqMeta::reqid)
+      .def_readwrite("seen_tokens", &blade_llm::ReqMeta::seen_tokens)
+      .def_readwrite("new_tokens", &blade_llm::ReqMeta::new_tokens)
+      .def_readwrite("src_block_ids", &blade_llm::ReqMeta::src_block_ids)
+      .def_readwrite("dst_block_ids", &blade_llm::ReqMeta::dst_block_ids)
+      .def_readwrite("dst_worker_info", &blade_llm::ReqMeta::dst_worker_info);
+
   py::class_<blade_llm::GeneralNamingClient> naming_client(m, "NamingClient");
   naming_client.def(py::init<>())
       .def("connect", &blade_llm::GeneralNamingClient::connect, "connect to naming service;")
@@ -318,6 +334,7 @@ PYBIND11_MODULE(kvtransfer_ops, m) {
   m.def("add_target", &blade_llm::add_target, "add target to kv client;");
   m.def("submit_req_send", &blade_llm::submit_req_send, "submit kv send to kv client;");
   m.def("submit_req_send2", &blade_llm::submit_req_send2, "submit kv send to kv client;");
+  m.def("start_req_send", &blade_llm::start_req_send, "submit kv send to kv client;");
   m.def("submit_delta_send", &blade_llm::submit_delta_send, "submit kv token to kv client;");
   m.def("start_send", &blade_llm::start_send, "start to send submitted kv data;");
   m.def("notify_event_record", &blade_llm::notify_event_record, "record kv send events;");

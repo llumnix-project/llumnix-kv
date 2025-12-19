@@ -98,6 +98,8 @@ class Step {
  public:
   const size_t step_idx;
   const Timepoint start_send_ts = SteadyClock::now();
+  // write by target mgr thread
+  Timepoint submit_ts;
   // write by python main thread
   Timepoint flush_send_ts;
   // write by wait layers thread.

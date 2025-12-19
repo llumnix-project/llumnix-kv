@@ -20,6 +20,8 @@ from blade_kvt.kvtransfer_ops import (
     submit_delta_send,
     submit_req_recv,
     submit_req_send2,
+    start_req_send,
+    ReqMeta,
 )
 
 
@@ -195,6 +197,11 @@ class KVTransferClient:
         return self.submit_req_send2(
             dst_inst_id, dst_worker_id, req_id, 0, new_tokens, has_last_token, src_block_ids, dst_block_ids, dst_worker_info
         )
+
+    def start_req_send(self, metas: list[ReqMeta]):
+        if not self._inited:
+            raise RuntimeError("KVTransferClient not inited")
+        start_req_send(metas)
 
     def submit_req_send2(
         self,

@@ -43,6 +43,7 @@ Step::~Step() noexcept {
   const auto last_send_ts = self.last_send_finish_ts();
   LOG(INFO) << std::fixed << std::setprecision(3)
             << "StepMetrics. StepIdx=" << self.step_idx
+            << ",SubmitQueueUs=" << elapse_us(self.start_send_ts, self.submit_ts)
             << ",PythonExecUs=" << elapse_us(self.start_send_ts, self.flush_send_ts)
             << ",WaitLayerQueueUs=" << elapse_us(self.start_send_ts, self.wait_layers_start_ts)
             << ",WaitLayerExecUs=" << elapse_us(self.wait_layers_start_ts, self.wait_layers_end_ts)

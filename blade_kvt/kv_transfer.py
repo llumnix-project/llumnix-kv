@@ -15,6 +15,10 @@ except ImportError:
         RDMA_DIRECT = enum.auto()  # make mypy happy~
         DUMMY = enum.auto()
 
+    class ReqMeta:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("KVTransferOps is not available, please build BladeLLM with it.")
+
     class KVTransferClient:
         def __init__(self, *args, **kwargs):
             raise RuntimeError("KVTransferOps is not available, please build BladeLLM with it.")
@@ -26,6 +30,9 @@ except ImportError:
             raise RuntimeError("KVTransferOps is not available, please build BladeLLM with it.")
 
         def submit_req_send2(self, *args, **kwargs):
+            raise RuntimeError("KVTransferOps is not available, please build BladeLLM with it.")
+
+        def start_req_send(self, *args, **kwargs):
             raise RuntimeError("KVTransferOps is not available, please build BladeLLM with it.")
 
         def submit_delta_send(self, *args, **kwargs):
@@ -75,6 +82,7 @@ else:
     )
     from blade_kvt.kvtransfer_ops import (  # noqa: F401
         NamingClient,
+        ReqMeta,
         alloc_phy_cont_mem,
         connect_naming,
         current_worker_info,

@@ -183,6 +183,10 @@ public:
     return this->seen_tokens + this->new_tokens;
   }
 
+  const RequestInfo& req() const noexcept {
+    return *req_;
+  }
+
   // FOR GTEST
   bool operator==(const ReqSendTask& other) const {
     return req_ == other.req_ &&
