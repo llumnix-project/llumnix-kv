@@ -53,7 +53,6 @@ static void ser_rpc_header(char* buf, uint32_t magic, uint64_t reqid) noexcept {
   return;
 }
 
-
 // req:
 // +--------+---------+--------+--------+--------+--------+
 //    crc       cnt       off1     len1    off2     len2
@@ -64,8 +63,7 @@ static void ser_rpc_header(char* buf, uint32_t magic, uint64_t reqid) noexcept {
 // crc: uint32_t
 static constexpr uint32_t REMOTE_CRC_REQ_MAGIC = 0x20250924;
 
-
-static constexpr uint32_t SEND_MAGIC = 0x53456e64;  /* SEnd */
+static constexpr uint32_t SEND_MAGIC = 0x53456e64; /* SEnd */
 
 //
 // magic, inst_id_len, worker_id, num_block 都是 4 字节.
@@ -166,7 +164,6 @@ bool decode_notification(const char *in_buf,
 }
 
 #ifdef ENABLE_RDMA
-
 
 template<typename T, typename E>
 static std::future<T> make_exp_future(E ex) {
@@ -394,7 +391,6 @@ static XDevice* choose_nic(const std::vector<XDevice *> &nic_devs, int gpu_dev) 
     real_gpu_rank = cuda_visible_env.at(gpu_dev);
   }
   const auto& lovely_nic = get_nic_affinity().at(real_gpu_rank);
-
   for (auto* nic_dev : nic_devs) {
     if (nic_dev->GetName() == lovely_nic) {
       LOG(INFO) << "choose_nic. gpu_dev=" << gpu_dev
@@ -431,7 +427,7 @@ private:
 };
 
 std::pair<XDevice*, XSimpleMempool*> MpManager::get_gpu_ctx(int gpu_id) const {
-  auto& self = *const_cast<MpManager*>(this);   // SAFETY: we have a mutex!
+  auto& self = *const_cast<MpManager*>(this);  // SAFETY: we have a mutex!
   auto guard = std::lock_guard<std::mutex>(self.m_);
 
   auto iter = self.map_.find(gpu_id);
@@ -508,10 +504,10 @@ BarexCtx::BarexCtx(std::string mp_name,
   self.mp_ = mp;
   mp_reserve(mp);
 
-  const auto &layer_ptr = ctx->layer_data_address();
-  // accl.barex 注册 MR 个数最大为 65536, 即要求 layer_ptr.size <= 65536.
+  const auto &layer_infos = ctx->all_layer_infos();
+  // accl.barex 注册 MR 个数最大为 65536, 即要求注册的cache tensor数 <= 65536.
   // 考虑到 LAYER_NUM_MAX 远小于 65536, 所以只需要 LAYER_NUM_MAX 限制即可.
-  RTASSERT(layer_ptr.size() <= LAYER_NUM_MAX);
+  RTASSERT(layer_infos.size() * layer_infos[0].size() <= LAYER_NUM_MAX);
   // 每个 mr 默认大小限制为 1GB.
   size_t max_mr_size = 1L * 1024 * 1024 * 1024;
   const char *max_mr_gb_str = getenv("ACCL_MAX_USER_MR_GB");
@@ -521,31 +517,46 @@ BarexCtx::BarexCtx(std::string mp_name,
       max_mr_size = max_mr_size * tmp_max_mr_gb;
     }
   }
-  auto layer_blk_size = ctx->block_size() * ctx->layer_num_blocks();
-  LOG(INFO) << "layer size(layer_blk_size) = " << layer_blk_size << ", max_mr_size = " << max_mr_size;
-  // 如果这里跪了, 需要配置环境变量 ACCL_MAX_USER_MR_GB
-  RTASSERT(layer_blk_size <= max_mr_size);
+  // check
+  const auto &block_sizes = ctx->block_sizes();
+  for (size_t i = 0; i < block_sizes.size(); i++) {
+    auto layer_blk_size = block_sizes[i] * ctx->layer_num_blocks();
+    LOG(INFO) << "layer size(layer_blk_size) = " << layer_blk_size
+                          << ", max_mr_size = " << max_mr_size;
+    // 如果这里跪了, 需要配置环境变量 ACCL_MAX_USER_MR_GB
+    RTASSERT(layer_blk_size <= max_mr_size);
+  }
 
-  self.layer_mr_.reserve(layer_ptr.size());
-  self.layer_gdrcpy_mem_.reserve(layer_ptr.size());
-  for (auto layer_p : layer_ptr) {
-    memp_t out;
-    auto layer_blk_p = reinterpret_cast<void *>(layer_p);
-    // 虽然注释上提到 RegUserMr 要求对齐. 但钉钉确认了, 只要是 cudaMalloc 返回的地址都可以.
-    auto result = self.mp_->RegUserMr(out, layer_blk_p, layer_blk_size, GPU, ctx->device_id());
-    RTASSERT(result == accl::barex::BAREX_SUCCESS);
-    RTASSERT(out.d_type == GPU);
-    RTASSERT(out.device_id == ctx->device_id());
-    RTASSERT(out.buf == layer_blk_p);
-    RTASSERT(out.buf_len == layer_blk_size);
-    LOG(INFO) << "RegUserMr. layer_blk_p=" << layer_blk_p << ", layer_blk_size=" << layer_blk_size
-              << ", gpuid=" << ctx->device_id();
-    self.layer_mr_.emplace_back(BarexMRGuard::DeregGuard(std::move(out), self.mp()));
-
-    if (env_crc()) {
-      auto desc = gdrcpy_mmap(layer_blk_p, layer_blk_size);
-      self.layer_gdrcpy_mem_.emplace_back(std::move(desc));
+  self.layer_mrs_.reserve(layer_infos.size());
+  // TODO(llx): support env_crc
+  self.layer_gdrcpy_mem_.reserve(layer_infos.size() * layer_infos[0].size());
+  for (auto layer_info : layer_infos) {
+    std::vector<BarexMRGuard> layer_mrs;
+    for (auto info : layer_info) {
+      memp_t out;
+      auto layer_blk_p = reinterpret_cast<void *>(info.layer_addr);
+      // 虽然注释上提到 RegUserMr 要求对齐. 但钉钉确认了, 只要是 cudaMalloc
+      // 返回的地址都可以. llx: layer_blk_size of each tensor in one layer may
+      // not be the same so we need to register each tensor as a separate mr
+      auto layer_blk_size = info.block_size * ctx->layer_num_blocks();
+      auto result = self.mp_->RegUserMr(out, layer_blk_p, layer_blk_size, GPU,
+                                        ctx->device_id());
+      RTASSERT(result == accl::barex::BAREX_SUCCESS);
+      RTASSERT(out.d_type == GPU);
+      RTASSERT(out.device_id == ctx->device_id());
+      RTASSERT(out.buf == layer_blk_p);
+      RTASSERT(out.buf_len == layer_blk_size);
+      LOG(INFO) << "RegUserMr. layer_blk_p=" << layer_blk_p
+                << ", layer_blk_size=" << layer_blk_size
+                << ", gpuid=" << ctx->device_id();
+      // TODO(llx): support env_crc
+      if (env_crc()) {
+        auto desc = gdrcpy_mmap(layer_blk_p, layer_blk_size);
+        self.layer_gdrcpy_mem_.emplace_back(std::move(desc));
+      }
+      layer_mrs.emplace_back(BarexMRGuard::DeregGuard(std::move(out), self.mp()));
     }
+    self.layer_mrs_.emplace_back(std::move(layer_mrs));
   }
 
   XThreadpool *threadpool = nullptr;
@@ -569,11 +580,20 @@ BarexCtx::~BarexCtx() {
 }
 
 CliBarexCtx::CliBarexCtx(std::string mp_name,
-                         std::string tp_name,
-                         int tpcnt,
-                         Context *ctx) :
-    BarexCtx(std::move(mp_name), std::move(tp_name), tpcnt, ctx, this->get_ctx_cb()),
-    layer_blk_size(ctx->layer_num_blocks() * ctx->block_size()) {
+  std::string tp_name,
+  int tpcnt,
+  Context *ctx) :
+BarexCtx(std::move(mp_name), std::move(tp_name), tpcnt, ctx, this->get_ctx_cb()),
+  layer_blk_sizes([ctx]() {
+    const auto layer_blocks = static_cast<uint64_t>(ctx->layer_num_blocks());
+    auto block_sizes = ctx->block_sizes();
+    std::vector<uint64_t> sizes;
+    sizes.reserve(block_sizes.size());
+    for (auto block_size : block_sizes) {
+      sizes.emplace_back(layer_blocks * static_cast<uint64_t>(block_size));
+    }
+    return sizes;
+  }()) {
   XConnector *connector = nullptr;
   auto result = XConnector::NewInstance(connector, env_conn_tpsize(), TIMER_3S, {this->xctx()});
   RTASSERT(result == accl::barex::BAREX_SUCCESS);
@@ -652,10 +672,10 @@ std::vector<RDMAMemHandle> CliBarexCtx::get_mem_handles(std::shared_ptr<XChannel
   auto fut = memhandles.future();
   self.push(reqid, std::move(memhandles));
 
-  Send(dst, std::move(bufmr), [this, reqid] (Status s) {
+  Send(dst, std::move(bufmr), [this, reqid](Status s) {
     // this owner: KV_CLIENT.ctx_
     if (s.IsOk()) {
-      return ;
+      return;
     }
     this->on_send_error(std::move(s), reqid);
   });
@@ -733,6 +753,8 @@ public:
   }
 };
 
+// LLX LATER LATER
+#if 0
 uint32_t CliBarexCtx::get_remote_crc(std::shared_ptr<XChannel>& dst, const std::vector<IpcBlock>* data, uint32_t lcrc) {
   assert(!data->empty());
   auto& self = *this;
@@ -760,10 +782,10 @@ uint32_t CliBarexCtx::get_remote_crc(std::shared_ptr<XChannel>& dst, const std::
   auto fut = req.future();
   self.push(reqid, std::move(req));
 
-  Send(dst, std::move(bufmr), [this, reqid] (Status s) {
+  Send(dst, std::move(bufmr), [this, reqid](Status s) {
     // this owner: KV_CLIENT.ctx_
     if (s.IsOk()) {
-      return ;
+      return;
     }
     this->on_send_error(std::move(s), reqid);
   });
@@ -799,16 +821,15 @@ void RDMAServer::CtxCallback::resp_remote_crc(std::shared_ptr<XChannel>& channel
     offlens.emplace_back(off, len);
   }
   const auto tp2 = SteadyClock::now();
-
   bool crc_enabled = !layer_descs.empty();
   uint32_t remote_crc = crc32_z(0L, Z_NULL, 0);
-  for (const auto& layer_desc : layer_descs) {
+  for (const auto &layer_desc : layer_descs) {
     if (!layer_desc) {
       crc_enabled = false;
       break;
     }
-    const Bytef* const layer_cpu_ptr = (Bytef*)layer_desc->cpu_ptr();
-    for (const auto& [off, len] : offlens) {
+    const Bytef *const layer_cpu_ptr = (Bytef *)layer_desc->cpu_ptr();
+    for (const auto &[off, len] : offlens) {
       remote_crc = crc32_z(remote_crc, layer_cpu_ptr + off, len);
     }
   }
@@ -822,31 +843,34 @@ void RDMAServer::CtxCallback::resp_remote_crc(std::shared_ptr<XChannel>& channel
   auto bufmr = AllocCPUBuffer(channel, RPC_HEADER + sizeof(uint32_t));
   memcpy(bufmr.buf, inbuf_bak, RPC_HEADER);
   memcpy(bufmr.buf + RPC_HEADER, &remote_crc, sizeof(uint32_t));
-  Send(channel, std::move(bufmr), [channel, reqid, remote_crc, local_crc] (Status s) {
-    RTASSERT_EQ(local_crc, remote_crc);
-    if (s.IsOk()) {
-      return ;
-    }
-    LOG(ERROR) << "resp_remote_crc err=" << s.ErrMsg() << " reqid=" << reqid
-               << " ch=" << channel->ToString();
-  });
+  Send(channel, std::move(bufmr),
+       [channel, reqid, remote_crc, local_crc](Status s) {
+         RTASSERT_EQ(local_crc, remote_crc);
+         if (s.IsOk()) {
+           return;
+         }
+         LOG(ERROR) << "resp_remote_crc err=" << s.ErrMsg()
+                    << " reqid=" << reqid << " ch=" << channel->ToString();
+       });
   const auto tp4 = SteadyClock::now();
 
-  LOG(INFO) << "remote crc: reqid=" << reqid << " localcrc=" << local_crc << " remotecrc=" << remote_crc
-            << " inlen=" << inlen
+  LOG(INFO) << "remote crc: reqid=" << reqid << " localcrc=" << local_crc
+            << " remotecrc=" << remote_crc << " inlen=" << inlen
             << " parsedur_us=" << elapse_us(tp1, tp2)
             << " crcdur_us=" << elapse_us(tp2, tp3)
             << " senddur_us=" << elapse_us(tp3, tp4);
   return;
 }
+#endif
 
 void CliBarexCtx::on_send_error(accl::barex::Status s, uint64_t reqid) const {
-  auto& self = *this;
+  auto &self = *this;
   auto handle = self.pop(reqid);
   if (!handle) {
     // empty func
-    LOG(ERROR) << "on_send_error. unknown reqid=" << reqid << ",err=" << s.ErrMsg();
-    return ;
+    LOG(ERROR) << "on_send_error. unknown reqid=" << reqid
+               << ",err=" << s.ErrMsg();
+    return;
   }
   return handle(std::move(s), nullptr, 0);
 }
@@ -862,9 +886,9 @@ void RDMAServer::CtxCallback::resp_mem_handles(std::shared_ptr<XChannel>& channe
 
   fault_inject_throw();
 
-  return Send(channel, std::move(bufmr), [channel, reqid] (Status s) {
+  return Send(channel, std::move(bufmr), [channel, reqid](Status s) {
     if (s.IsOk()) {
-      return ;
+      return;
     }
     LOG(ERROR) << "resp_mem_handles err=" << s.ErrMsg() << " reqid=" << reqid
                << " ch=" << channel->ToString();
@@ -877,22 +901,25 @@ void RDMAServer::CtxCallback::OnRecvCall(std::shared_ptr<XChannel> ch, char *in_
     if (magic == MEM_HANDLES_REQ_MAGIC) {
       try {
         this->resp_mem_handles(ch, reqid, in_buf, len);
-      } catch (const std::exception& ex) {
-        LOG(ERROR) << "resp mem handle: error=" << ex.what() << ";ch=" << ch->ToString()
-                  << ";reqid=" << reqid;
+      } catch (const std::exception &ex) {
+        LOG(ERROR) << "resp mem handle: error=" << ex.what()
+                   << ";ch=" << ch->ToString() << ";reqid=" << reqid;
       }
       return;
     }
 
+    // llx: later
+# if 0
     if (magic == REMOTE_CRC_REQ_MAGIC) {
       try {
         this->resp_remote_crc(ch, reqid, in_buf, len);
-      } catch (const std::exception& ex) {
-        LOG(ERROR) << "resp remote crc: error=" << ex.what() << ";ch=" << ch->ToString()
-                  << ";reqid=" << reqid;
+      } catch (const std::exception &ex) {
+        LOG(ERROR) << "resp remote crc: error=" << ex.what()
+                   << ";ch=" << ch->ToString() << ";reqid=" << reqid;
       }
       return;
     }
+# endif
   }
 
   InstanceId inst_id;
@@ -958,7 +985,6 @@ static void get_ip(RDMAInfo *out) {
   status = getaddrinfo(hostname, NULL, &hints, &res);
   RTASSERT(status == 0);
   auto guard = std::unique_ptr<struct addrinfo, decltype(&freeaddrinfo)>(res, freeaddrinfo);
-
   assert(res->ai_family == AF_INET);
   assert(res->ai_addr->sa_family == AF_INET);
   auto *ipaddr = (struct sockaddr_in *) res->ai_addr;
@@ -966,7 +992,6 @@ static void get_ip(RDMAInfo *out) {
   RTASSERT(ret != nullptr);
   return;
 }
-
 void RDMAServer::start_server(ITransferService *service, Context *ctx) {
   auto &self = *this;
   RDMAInfo& info = self.info_;
@@ -992,13 +1017,19 @@ void RDMAServer::start_server(ITransferService *service, Context *ctx) {
   self.ctx_ = barex_ctx;
 
   info.handles.reserve(layer_ptr.size());
-  for (size_t idx = 0; idx < layer_ptr.size(); ++idx) {
-    auto &out = barex_ctx->layer_mr()[idx].mr();
-    auto layer_blk_p = reinterpret_cast<void *>(layer_ptr[idx]);
-    auto& handle = info.handles.emplace_back();
-    handle.ptr = layer_blk_p;
-    handle.rkey = out.mr->rkey;
-    handle.lkey = out.mr->lkey;
+  for (size_t layer_idx = 0; layer_idx < layer_ptr.size(); ++layer_idx) {
+    auto &layer_mrs = barex_ctx->layer_mrs()[layer_idx];
+    auto &handle = info.handles.emplace_back();
+
+    assert(layer_ptr[layer_idx].size() <= MAX_CACHE_NUM_PER_LAYER);
+    // Now only support each layer have same number of cache
+    for (size_t cache_idx = 0; cache_idx < layer_ptr[layer_idx].size();
+         cache_idx++) {
+      auto &out = layer_mrs[cache_idx].mr();
+      auto layer_blk_p = reinterpret_cast<void *>(layer_ptr[layer_idx][cache_idx]);
+      handle.ptrs[cache_idx] = layer_blk_p;
+      handle.rkeys[cache_idx] = out.mr->rkey;
+    }
   }
   assert(info.handles.size() == layer_ptr.size());
 
@@ -1016,9 +1047,11 @@ void RDMAServer::start_server(ITransferService *service, Context *ctx) {
   if (xctx == nullptr) {
     LOG(ERROR) << "xctx is nullptr";
   }
-  LOG(INFO) << "RDMAServer.start_server: ip=" << info.ip << " port=" << info.port << " layer_num_blocks="
-            << layer_num_blocks;
-  auto result = XListener::NewInstance(listener, env_conn_tpsize(), info.port, TIMER_3S, {xctx});
+  LOG(INFO) << "RDMAServer.start_server: ip=" << info.ip
+            << " port=" << info.port
+            << " layer_num_blocks=" << layer_num_blocks;
+  auto result = XListener::NewInstance(listener, env_conn_tpsize(), info.port,
+                                       TIMER_3S, {xctx});
   RTASSERT(result == accl::barex::BAREX_SUCCESS);
   self.listener_.reset(listener);
   result = self.listener_->Listen();
@@ -1036,12 +1069,17 @@ void RDMAChannel::connect(const WorkerInfo &dst_info) {
   self.ip_ = addr.substr(0, pos);
   auto port_str = addr.substr(pos + 1, addr.size());
   self.port_ = std::stoi(port_str);
-  dst_layer_blk_size_ = dst_info.layer_num_blocks * size_t(dst_info.block_size);
+  for (auto &block_size : dst_info.block_sizes) {
+    dst_layer_blk_sizes_.emplace_back(
+      dst_info.layer_num_blocks * size_t(block_size)
+    );
+  }
   dst_layer_num_ = dst_info.num_layers;
-  assert(self.dst_layer_num_ == self.ctx_->layer_mr().size());
+  assert(self.dst_layer_num_ == self.ctx_->layer_mrs().size());
 }
 
-[[nodiscard]] static std::future<BarexChannel> Connect(XConnector &self, std::string server_addr, int port) {
+[[nodiscard]] static std::future<BarexChannel>
+Connect(XConnector &self, std::string server_addr, int port) {
   // std::promise<XChannel*> pr;
   auto pr = std::make_shared<std::promise<BarexChannel>>();
   auto fut = pr->get_future();
@@ -1069,7 +1107,8 @@ void RDMAChannel::connect(const WorkerInfo &dst_info) {
   );
 
   if (result != BAREX_SUCCESS) {
-    auto ex = std::runtime_error("Connect Submit Err: " + Status(result).ErrMsg());
+    auto ex =
+        std::runtime_error("Connect Submit Err: " + Status(result).ErrMsg());
     return make_exp_future<BarexChannel>(std::move(ex));
   }
   return fut;
@@ -1150,7 +1189,8 @@ void RDMAChannel::do_init() {
   return;
 }
 
-[[nodiscard]] static std::future<void> WriteSingle(XChannel *ch, memp_t sdata, uint64_t raddr, uint32_t rkey) {
+[[nodiscard]] static std::future<void>
+WriteSingle(XChannel *ch, memp_t sdata, uint64_t raddr, uint32_t rkey) {
   // std::promise<void> pr;
   auto pr = std::make_shared<std::promise<void>>();
   auto fut = pr->get_future();
@@ -1180,7 +1220,6 @@ void RDMAChannel::do_init() {
   auto pr = std::make_shared<std::promise<uint64_t>>();
   auto fut = pr->get_future();
   auto datas = datasp;
-
   const auto write_start_ts = SteadyClock::now();
   auto result = ch->WriteBatch(std::move(datas),
                                [pr = std::move(pr), d = std::move(datasp), write_start_ts](Status s) mutable {
@@ -1194,7 +1233,6 @@ void RDMAChannel::do_init() {
                                  pr->set_value(send_us);
                                }
   );
-
   if (result != BAREX_SUCCESS) {
     auto ex = std::runtime_error("Write Submit Err: " + Status(result).ErrMsg());
     return make_exp_future<uint64_t>(std::move(ex));
@@ -1214,7 +1252,6 @@ std::shared_ptr<accl::barex::XChannel>& RDMAChannel::sch() noexcept {
   return self.chs_[idx].sch();
 }
 
-
 // group 之后, input 呈现出:
 // <src_off_1, dst_off_0, len1>
 // <src_off_2, dst_off_0, len2>
@@ -1227,7 +1264,7 @@ static std::tuple<size_t, size_t, size_t, size_t> group_by_dst(std::vector<IpcBl
   assert(!input.empty());
 
   std::sort(input.begin(), input.end(),
-    [](const IpcBlock& x, const IpcBlock& y) { return x.dst_offset < y.dst_offset; });
+            [](const IpcBlock& x, const IpcBlock& y) { return x.dst_offset < y.dst_offset; });
 
   size_t min_size = UINT64_MAX;
   size_t max_size = 0;
@@ -1267,6 +1304,8 @@ static std::tuple<size_t, size_t, size_t, size_t> group_by_dst(std::vector<IpcBl
   return {min_size, max_size, total_size, cnt};
 }
 
+static size_t cdiv(size_t a, size_t b) { return (a + (b - 1)) / b; }
+
 bool RDMAChannel::is_active() {
   auto& self = *this;
   if (self.chs_.empty()) {
@@ -1275,8 +1314,7 @@ bool RDMAChannel::is_active() {
   return valid_channels(self.chs_);
 }
 
-
-void RDMAChannel::register_data(std::vector<IpcBlock>& data, TPKind kind) {
+void RDMAChannel::register_data(std::vector<std::vector<IpcBlock>>& data, TPKind kind) {
   auto& self = *this;
   assert(!data.empty());
 
@@ -1285,55 +1323,102 @@ void RDMAChannel::register_data(std::vector<IpcBlock>& data, TPKind kind) {
   self.kind_ = kind;
   self.do_init();
 
+  self.do_init();
+  // assum each tensor from one layer contains same numbers of blocks
+  // [/*tensor_0 blks*/[b1,b2], /*tensor_1 blks*/[b1,b2], /*tensor_2 blks*/[b1,b2]]
+  size_t const dataperch = cdiv(data.size() * data[0].size(), self.chs_.size());
+  assert(dataperch * self.chs_.size() >= data.size());
+  self.dataperch_ = dataperch;
   self.enable_crc_ = env_crc();
-  if (self.enable_crc_) {
-    self.crc_ = crc32_z(0L, Z_NULL, 0);
-  }
+  // if (self.enable_crc_) {
+  //   self.crc_ = crc32_z(0L, Z_NULL, 0);
+  // }
 
 #ifndef NDEBUG
-  size_t total_len_debug = std::accumulate(data.begin(), data.end(), 0, [] (size_t acc, const IpcBlock& item) {
-    return acc + item.length;
-  });
+  size_t total_len_debug = 0;
+  for (const auto &tensor_data : data) {
+    for (const auto &item : tensor_data) {
+      total_len_debug += item.length;
+    }
+  }
 #endif
 
-  self.origin_sb_num_ = data.size();
+  // Count total blocks across all tensors
+  size_t total_blocks = 0;
+  for (const auto &tensor_data : data) {
+    total_blocks += tensor_data.size();
+  }
+  self.origin_sb_num_ = total_blocks;
 
   if (kind != TPKind::PLTD) {
     // TPKind::PGTD, TPKind::PEQD
-    auto const [min, max, total, cnt] = merge_interval(data);
-    self.merged_sb_num_ = cnt;
-    self.sb_size_min_ = min;
-    self.sb_size_max_ = max;
-    self.sb_size_total_ = total;
+    // Process each tensor separately and aggregate results
+    size_t min_size = std::numeric_limits<size_t>::max();
+    size_t max_size = 0;
+    size_t total_size = 0;
+    size_t total_cnt = 0;
+
+    for (auto &tensor_data : data) {
+      if (tensor_data.empty())
+        continue;
+      auto const [min, max, total, cnt] = merge_interval(tensor_data);
+      if (cnt > 0) {
+        min_size = std::min(min_size, min);
+        max_size = std::max(max_size, max);
+        total_size += total;
+        total_cnt += cnt;
+      }
+
+      // Remove zero-length blocks from this tensor
+      auto new_end =
+          std::remove_if(tensor_data.begin(), tensor_data.end(),
+                         [](const IpcBlock &item) { return item.length == 0; });
+      tensor_data.erase(new_end, tensor_data.end());
+    }
+
+    self.merged_sb_num_ = total_cnt;
+    self.sb_size_min_ =
+        (min_size == std::numeric_limits<size_t>::max()) ? 0 : min_size;
+    self.sb_size_max_ = max_size;
+    self.sb_size_total_ = total_size;
     assert(total_len_debug == self.sb_size_total_);
     assert(self.merged_sb_num_ <= self.origin_sb_num_);
-
-    auto new_end = std::remove_if(data.begin(), data.end(), [] (const IpcBlock& item) {
-      return item.length == 0;
-    });
-    data.erase(new_end, data.end());
-    assert(data.size() == cnt);
     assert(!data.empty());
-    return ;
+    return;
   }
 
   assert(kind == TPKind::PLTD);
-  auto const [min, max, total, cnt] = group_by_dst(data);
-  self.merged_sb_num_ = cnt;
-  self.sb_size_min_ = min;
-  self.sb_size_max_ = max;
-  self.sb_size_total_ = total;
+  // Process each tensor separately and aggregate results
+  size_t min_size = std::numeric_limits<size_t>::max();
+  size_t max_size = 0;
+  size_t total_size = 0;
+  size_t total_cnt = 0;
+
+  for (auto &tensor_data : data) {
+    if (tensor_data.empty())
+      continue;
+    auto const [min, max, total, cnt] = group_by_dst(tensor_data);
+
+    assert(cnt > 0); // should have at least one block
+
+    min_size = std::min(min_size, min);
+    max_size = std::max(max_size, max);
+    total_size += total;
+    total_cnt += cnt;
+  }
+
+  self.merged_sb_num_ = total_cnt;
+  self.sb_size_min_ =
+      (min_size == std::numeric_limits<size_t>::max()) ? 0 : min_size;
+  self.sb_size_max_ = max_size;
+  self.sb_size_total_ = total_size;
   assert(self.merged_sb_num_ > 0);
   assert(self.merged_sb_num_ <= self.origin_sb_num_);
   assert(total_len_debug == self.sb_size_total_);
 
-  return ;
+  return;
 }
 
-
-static size_t cdiv(size_t a, size_t b) {
-  return (a + (b - 1)) / b;
-}
 
 // may be nullptr
 static const Bytef* get_layer_cpu_ptr(CliBarexCtx* ctx, size_t layer_idx) {
@@ -1345,57 +1430,79 @@ static const Bytef* get_layer_cpu_ptr(CliBarexCtx* ctx, size_t layer_idx) {
   return desc ? (Bytef*)desc->cpu_ptr() : (Bytef*)nullptr;
 }
 
-
 void RDMAChannel::send_data(size_t layer_idx) {
   auto &self = *this;
   assert(layer_idx < self.dst_layer_num_);
-  assert(self.dst_layer_num_ == self.ctx_->layer_mr().size());
+  assert(self.dst_layer_num_ == self.ctx_->layer_mrs().size());
 
   if (self.kind_ == TPKind::PLTD) {
     return self.send_data_pltd(layer_idx);
   }
 
-  auto& dst_layer_handle = self.dst_handles_[layer_idx];
-  const auto& data = *self.data_;
+  auto &dst_layer_handle = self.dst_handles_[layer_idx];
+  const auto &data = *self.data_;
   assert(!data.empty());
-  size_t const dataperch = cdiv(data.size(), self.chs_.size());
-  assert(dataperch * self.chs_.size() >= data.size());
+
   auto datasp = std::make_shared<std::vector<rw_memp_t>>();
-  datasp->reserve(dataperch);
-  const auto& src_mr_temp = self.ctx_->layer_mr()[layer_idx].mr();
-  const Bytef* const layer_cpu_ptr = get_layer_cpu_ptr(self.ctx_, layer_idx);
+  datasp->reserve(self.dataperch_);
+  const auto &temp_src_mrs = self.ctx_->layer_mrs()[layer_idx];
+  assert(data.size() == temp_src_mrs.size());
+
+  const Bytef *const layer_cpu_ptr = get_layer_cpu_ptr(self.ctx_, layer_idx);
   if (layer_cpu_ptr == nullptr && self.enable_crc_) {
     LOG(WARNING) << "disable crc check. layer_idx=" << layer_idx;
     self.enable_crc_ = false;
   }
-  for (const auto &[src_offset, dst_offset, len] : data) {
-    assert(len > 0);
-    assert(src_offset < self.ctx_->layer_blk_size);
-    assert(len < self.ctx_->layer_blk_size);
-    assert(src_offset + len <= self.ctx_->layer_blk_size);
-    assert(dst_offset < self.dst_layer_blk_size_);
-    assert(dst_offset + len <= self.dst_layer_blk_size_);
+  uint32_t tensor_cnt = 0;
+  for (const auto &per_tensor_data : data) {
+    assert(tensor_cnt < self.ctx_->layer_blk_sizes.size());
+    assert(tensor_cnt < self.dst_layer_blk_sizes_.size());
+    assert(tensor_cnt < dst_layer_handle.ptrs.size());
+    assert(tensor_cnt < temp_src_mrs.size());
+    for (const auto &[src_offset, dst_offset, len] : per_tensor_data) {
+      const uint64_t layer_blk_size = self.ctx_->layer_blk_sizes[tensor_cnt];
+      const uint64_t dst_layer_blk_size = self.dst_layer_blk_sizes_[tensor_cnt];
+      assert(len > 0);
+      assert(src_offset < layer_blk_size);
+      assert(len < layer_blk_size);
+      assert(src_offset + len <= layer_blk_size);
+      assert(dst_offset < dst_layer_blk_size);
+      assert(dst_offset + len <= dst_layer_blk_size);
 
-    auto *rladdr = reinterpret_cast<char *>(dst_layer_handle.ptr);
-    assert(rladdr);
-    auto rwmemp = rw_memp_t();
-    rwmemp.r_addr = reinterpret_cast<uint64_t>(rladdr + dst_offset);
-    rwmemp.r_key = dst_layer_handle.rkey;
-    rwmemp.sg.addr = uint64_t(src_mr_temp.buf) + src_offset;
-    rwmemp.sg.length = len;
-    rwmemp.sg.lkey = src_mr_temp.mr->lkey;
-    datasp->emplace_back(std::move(rwmemp));
-    if (datasp->size() >= dataperch) {
-      auto fut = WriteBatch(self.ch(), std::move(datasp));
-      self.write_futs_.emplace_back(std::move(fut));
-      datasp = std::make_shared<std::vector<rw_memp_t>>();
-      datasp->reserve(dataperch);
+      auto *rladdr = reinterpret_cast<char *>(dst_layer_handle.ptrs[tensor_cnt]);
+      const auto &src_mr_guard = temp_src_mrs[tensor_cnt];
+      const auto &src_mr = src_mr_guard.mr();
+
+      auto rwmemp = rw_memp_t();
+      rwmemp.r_addr = reinterpret_cast<uint64_t>(rladdr + dst_offset);
+      rwmemp.r_key = dst_layer_handle.rkeys[tensor_cnt];
+      rwmemp.sg.addr = uint64_t(src_mr.buf) + src_offset;
+      rwmemp.sg.length = len;
+      rwmemp.sg.lkey = src_mr.mr->lkey;
+
+#ifndef NDEBUG
+      LOG(INFO) << "Send data: layer_idx=" << layer_idx << ", tensor_cnt=" << tensor_cnt 
+      << ", src_offset=" << src_offset << ", dst_offset=" << dst_offset << ", len=" << len 
+      << ", layer_blk_size=" << layer_blk_size << ", dst_layer_blk_size=" << dst_layer_blk_size
+      << ", r_addr=" << reinterpret_cast<uint64_t>(rladdr) << ", sg.addr=" << uint64_t(src_mr.buf);
+#endif
+
+      datasp->emplace_back(std::move(rwmemp));
+      if (datasp->size() >= self.dataperch_) {
+        auto fut = WriteBatch(self.ch(), std::move(datasp));
+        self.write_futs_.emplace_back(std::move(fut));
+        datasp = std::make_shared<std::vector<rw_memp_t>>();
+        datasp->reserve(self.dataperch_);
+      }
+# if 0
+      if (self.enable_crc_) { // TODO(llx) later
+        assert(layer_cpu_ptr);
+        auto *src_addr = layer_cpu_ptr + src_offset;
+        self.crc_ = crc32_z(self.crc_, src_addr, len);
+      }
+# endif
     }
-    if (self.enable_crc_) {
-      assert(layer_cpu_ptr);
-      auto* src_addr = layer_cpu_ptr + src_offset;
-      self.crc_ = crc32_z(self.crc_, src_addr, len);
-    }
+    tensor_cnt++;
   }
   if (!datasp->empty()) {
     auto fut = WriteBatch(self.ch(), std::move(datasp));
@@ -1404,149 +1511,151 @@ void RDMAChannel::send_data(size_t layer_idx) {
   return;
 }
 
-
 // return send_us
-[[nodiscard]] static std::future<uint64_t> WriteBySgList(XChannel* ch, uint64_t remote_addr, uint32_t rkey, std::shared_ptr<std::vector<memp_t>> prefills) {
+[[nodiscard]] static std::future<uint64_t> WriteBySgList(
+  XChannel *ch, 
+  uint64_t remote_addr, 
+  uint32_t rkey,
+  std::shared_ptr<std::vector<memp_t>> prefills
+) {
   auto pr = std::make_shared<std::promise<uint64_t>>();
   auto fut = pr->get_future();
-  auto& datas = *prefills;
+  auto &datas = *prefills;
 
   const auto start_ts = SteadyClock::now();
-  auto result = ch->WriteBySgList(datas,
-    remote_addr, rkey,
-    /* signal_peer */ false,
-    /* imm_data */ 0,
-    [prefills=std::move(prefills), pr=std::move(pr), start_ts] (Status s) {
-      // WriteBySgList 要求 prefills 直至 callback 中才能回收.
-      if (!s.IsOk()) {
-        auto ex = std::make_exception_ptr(std::runtime_error("Write ERR: " + s.ErrMsg()));
-        pr->set_exception(std::move(ex));
-        return;
-      }
-      auto send_us = elapse_us(start_ts, SteadyClock::now());
-      pr->set_value(send_us);
-    });
+  auto result = ch->WriteBySgList(
+      datas, remote_addr, rkey,
+      /* signal_peer */ false,
+      /* imm_data */ 0,
+      [prefills = std::move(prefills), pr = std::move(pr), start_ts](Status s) {
+        // WriteBySgList 要求 prefills 直至 callback 中才能回收.
+        if (!s.IsOk()) {
+          auto ex = std::make_exception_ptr(
+              std::runtime_error("Write ERR: " + s.ErrMsg())
+            );
+          pr->set_exception(std::move(ex));
+          return;
+        }
+        auto send_us = elapse_us(start_ts, SteadyClock::now());
+        pr->set_value(send_us);
+      });
 
   if (result != BAREX_SUCCESS) {
-    auto ex = std::runtime_error("Write Submit Err: " + Status(result).ErrMsg());
+    auto ex =
+        std::runtime_error("Write Submit Err: " + Status(result).ErrMsg());
     return make_exp_future<uint64_t>(std::move(ex));
   }
 
   return fut;
 }
 
+// TODO(llx) 这个逻辑有点没懂
 void RDMAChannel::send_data_pltd(size_t layer_idx) {
-  auto& self = *this;
+  RTASSERT(false); // Now pltd is will not be used.
+  auto &self = *this;
   assert(self.kind_ == TPKind::PLTD);
   assert(!self.chs_.empty());
   assert(!self.data_->empty());
-  const auto& input = *self.data_;
+  const auto &input = *self.data_;
   assert(layer_idx < self.dst_handles_.size());
-  auto& dst_layer_handle = self.dst_handles_[layer_idx];
-  uint64_t const rladdr = reinterpret_cast<uint64_t>(dst_layer_handle.ptr);
-  auto const rkey = dst_layer_handle.rkey;
+  // assert(layer_idx < self.ctx_->layer_blk_sizes.size());
+  const auto &dst_layer_handle = self.dst_handles_[layer_idx];
+  const auto &rkeys = dst_layer_handle.rkeys;
 
+  assert(dst_layer_handle.ptrs.size() == input.size());
+
+  for (size_t cache_idx = 0; cache_idx < dst_layer_handle.ptrs.size();
+       cache_idx++) {
+    RTASSERT(cache_idx < self.ctx_->layer_blk_sizes.size());
+    RTASSERT(cache_idx < self.dst_layer_blk_sizes_.size());
+    const uint64_t rladdr = reinterpret_cast<uint64_t>(dst_layer_handle.ptrs[cache_idx]);
+    const auto rkey = rkeys[cache_idx];
+    const auto &cache_input = input[cache_idx];
 #ifndef NDEBUG
-  uint64_t dst_len_debug = 0;
+    uint64_t dst_len_debug = 0; // store each cache tensors len
 #endif
-  uint64_t dst_offset = input[0].dst_offset;
-  auto prefills = std::make_shared<std::vector<memp_t>>();
-  assert(dst_offset < self.dst_layer_blk_size_);
-  {
-    const auto& blk = input[0];
-    auto src_mr = self.ctx_->layer_mr()[layer_idx].mr();
-    assert(blk.length > 0);
-    assert(blk.length < self.ctx_->layer_blk_size);
-    assert(blk.src_offset < self.ctx_->layer_blk_size);
-    assert(blk.src_offset + blk.length <= self.ctx_->layer_blk_size);
-    src_mr.buf += blk.src_offset;
-    src_mr.buf_len = blk.length;
-    prefills->emplace_back(std::move(src_mr));
+    uint64_t dst_offset = cache_input[0].dst_offset;
+    auto layer_blk_size = self.ctx_->layer_blk_sizes[cache_idx];
+    auto dst_layer_blk_size = self.dst_layer_blk_sizes_[cache_idx];
 
-#ifndef NDEBUG
-    dst_len_debug += blk.length;
-#endif
-  }
+    auto prefills = std::make_shared<std::vector<memp_t>>(); // 传递给WriteBatch
 
-  for (size_t idx = 1; idx < input.size(); ++idx) {
-    const auto& blk = input[idx];
-    if (blk.dst_offset == dst_offset) {
-      auto src_mr = self.ctx_->layer_mr()[layer_idx].mr();
+    assert(dst_offset < dst_layer_blk_size);
+    {
+      const auto &blk = cache_input[0];
+      const auto &src_mr_guard = self.ctx_->layer_mrs()[layer_idx][cache_idx];
+      auto src_mr = src_mr_guard.mr();
       assert(blk.length > 0);
-      assert(blk.length < self.ctx_->layer_blk_size);
-      assert(blk.src_offset < self.ctx_->layer_blk_size);
-      assert(blk.src_offset + blk.length <= self.ctx_->layer_blk_size);
+      assert(blk.length < layer_blk_size);
+      assert(blk.src_offset < layer_blk_size);
+      assert(blk.src_offset + blk.length <= layer_blk_size);
       src_mr.buf += blk.src_offset;
       src_mr.buf_len = blk.length;
       prefills->emplace_back(std::move(src_mr));
 
-  #ifndef NDEBUG
+#ifndef NDEBUG
       dst_len_debug += blk.length;
-  #endif
-      continue;
+#endif
+    }
+    // same cache tensor, different blk
+    for (size_t idx = 1; idx < cache_input.size(); ++idx) {
+      const auto &blk = cache_input[idx];
+      if (blk.dst_offset == dst_offset) {
+        const auto &src_mr_guard = self.ctx_->layer_mrs()[layer_idx][cache_idx];
+        auto src_mr = src_mr_guard.mr();
+        assert(blk.length > 0);
+        assert(blk.length < layer_blk_size);
+        assert(blk.src_offset < layer_blk_size);
+        assert(blk.src_offset + blk.length <= layer_blk_size);
+        src_mr.buf += blk.src_offset;
+        src_mr.buf_len = blk.length;
+        prefills->emplace_back(std::move(src_mr));
+
+#ifndef NDEBUG
+        dst_len_debug += blk.length;
+#endif
+        continue;
+      }
+      assert(!prefills->empty());
+      assert(dst_len_debug > 0);
+      assert(dst_len_debug <= dst_layer_blk_size);
+      assert(dst_offset + dst_len_debug <= dst_layer_blk_size);
+      // 现在的设计，会调用“一层中包含的cache tensor数 * block数”次
+      self.write_futs_.emplace_back(WriteBySgList(
+          self.ch(), dst_offset + rladdr, rkey, std::move(prefills)));
+
+#ifndef NDEBUG
+      dst_len_debug = 0;
+#endif
+      dst_offset = blk.dst_offset;
+      prefills = std::make_shared<std::vector<memp_t>>();
+      assert(dst_offset < dst_layer_blk_size);
+      {
+        auto src_mr = self.ctx_->layer_mrs()[layer_idx][cache_idx].mr();
+        assert(blk.length > 0);
+        assert(blk.length < layer_blk_size);
+        assert(blk.src_offset < layer_blk_size);
+        assert(blk.src_offset + blk.length <= layer_blk_size);
+        src_mr.buf += blk.src_offset;
+        src_mr.buf_len = blk.length;
+        prefills->emplace_back(std::move(src_mr));
+
+#ifndef NDEBUG
+        dst_len_debug += blk.length;
+#endif
+      }
     }
     assert(!prefills->empty());
     assert(dst_len_debug > 0);
-    assert(dst_len_debug <= self.dst_layer_blk_size_);
-    assert(dst_offset + dst_len_debug <= self.dst_layer_blk_size_);
-    self.write_futs_.emplace_back(WriteBySgList(self.ch(), dst_offset + rladdr, rkey, std::move(prefills)));
-
-  #ifndef NDEBUG
-    dst_len_debug = 0;
-  #endif
-    dst_offset = blk.dst_offset;
-    prefills = std::make_shared<std::vector<memp_t>>();
-    assert(dst_offset < self.dst_layer_blk_size_);
-    {
-      auto src_mr = self.ctx_->layer_mr()[layer_idx].mr();
-      assert(blk.length > 0);
-      assert(blk.length < self.ctx_->layer_blk_size);
-      assert(blk.src_offset < self.ctx_->layer_blk_size);
-      assert(blk.src_offset + blk.length <= self.ctx_->layer_blk_size);
-      src_mr.buf += blk.src_offset;
-      src_mr.buf_len = blk.length;
-      prefills->emplace_back(std::move(src_mr));
-
-  #ifndef NDEBUG
-      dst_len_debug += blk.length;
-  #endif
-    }
+    assert(dst_len_debug <= dst_layer_blk_size);
+    assert(dst_offset + dst_len_debug <= dst_layer_blk_size);
+    self.write_futs_.emplace_back(
+      WriteBySgList(self.ch(), dst_offset + rladdr, rkey, std::move(prefills))
+    );
   }
-
-  assert(!prefills->empty());
-  assert(dst_len_debug > 0);
-  assert(dst_len_debug <= self.dst_layer_blk_size_);
-  assert(dst_offset + dst_len_debug <= self.dst_layer_blk_size_);
-  self.write_futs_.emplace_back(WriteBySgList(self.ch(), dst_offset + rladdr, rkey, std::move(prefills)));
-  return ;
-}
-
-void RDMAChannel::do_write(uint32_t layer_idx,
-                           size_t src_offset,
-                           size_t dst_offset,
-                           size_t len) {
-  auto &self = *this;
-
-  assert(src_offset < self.ctx_->layer_blk_size);
-  assert(len < self.ctx_->layer_blk_size);
-  assert(src_offset + len <= self.ctx_->layer_blk_size);
-  assert(dst_offset < self.dst_layer_blk_size_);
-  assert(dst_offset + len <= self.dst_layer_blk_size_);
-  assert(layer_idx < self.dst_layer_num_);
-  auto& dst_layer_handle = self.dst_handles_[layer_idx];
-
-  auto src_mr = self.ctx_->layer_mr()[layer_idx].mr();
-  src_mr.buf += src_offset;
-  src_mr.buf_len = len;
-
-  auto rkey = dst_layer_handle.rkey;
-  auto *rladdr = reinterpret_cast<char *>(dst_layer_handle.ptr);
-  assert(rladdr);
-  uint64_t raddr = reinterpret_cast<uint64_t>(rladdr + dst_offset);
-
-  WriteSingle(self.ch(), std::move(src_mr), raddr, rkey).get();
   return;
 }
+
 
 static void when_all_succeed(std::vector<std::future<void>> &futs) {
   for (auto &fut : futs) {
@@ -1555,7 +1664,7 @@ static void when_all_succeed(std::vector<std::future<void>> &futs) {
   return;
 }
 
-void RDMAChannel::flush(std::string& outstr) {
+void RDMAChannel::flush(std::string &outstr) {
   auto &self = *this;
 
   const auto inflyn = self.write_futs_.size();
@@ -1565,14 +1674,13 @@ void RDMAChannel::flush(std::string& outstr) {
       << ",MergedSbNum=" << self.merged_sb_num_
       << ",SbSizeMin=" << self.sb_size_min_
       << ",SbSizeMax=" << self.sb_size_max_
-      << ",SbSizeTotal=" << self.sb_size_total_
-      << ",CRC32=" << self.crc_
+      << ",SbSizeTotal=" << self.sb_size_total_ << ",CRC32=" << self.crc_
       << ",InflyWrite=" << inflyn;
 
   uint64_t send_us_min = UINT64_MAX;
   uint64_t send_us_max = 0;
   uint64_t send_us_total = 0;
-  for (auto& fut : self.write_futs_) {
+  for (auto &fut : self.write_futs_) {
     uint64_t send_us = 0;
     try {
       send_us = fut.get();
@@ -1587,32 +1695,32 @@ void RDMAChannel::flush(std::string& outstr) {
   }
   self.write_futs_.clear();
 
-  out << ",SendUsMin=" << send_us_min
-      << ",SendUsMax=" << send_us_max
+  out << ",SendUsMin=" << send_us_min << ",SendUsMax=" << send_us_max
       << ",SendUsAvg=" << send_us_total / float(inflyn);
 
-  if (self.enable_crc_) {
-    auto crcrt = TimeWatch();
-    assert(!self.chs_.empty());
-    auto rcrc = self.ctx_->get_remote_crc(self.chs_[0].sch(), self.data_, self.crc_);
-    auto crc_dus_us = crcrt.get_elapse_us();
-    out << ",CrcDurUs=" << crc_dus_us;
-    RTASSERT_EQ(rcrc, self.crc_);
-  }
+  // enable this after adapt crc check
+  // if (self.enable_crc_) {
+  //   auto crcrt = TimeWatch();
+  //   assert(!self.chs_.empty());
+  //   auto rcrc = self.ctx_->get_remote_crc(self.chs_[0].sch(), self.data_, self.crc_);
+  //   auto crc_dus_us = crcrt.get_elapse_us();
+  //   out << ",CrcDurUs=" << crc_dus_us;
+  //   RTASSERT_EQ(rcrc, self.crc_);
+  // }
 
   self.data_ = nullptr;
   outstr = std::move(out).str();
   return;
 }
 
-
-void RDMAChannel::send_notification(const std::vector<const ReqSendTask*>& reqs) {
+void RDMAChannel::send_notification(
+    const std::vector<const ReqSendTask *> &reqs) {
   auto &self = *this;
 
   assert(self.send_futs_.empty());
   self.send_futs_.reserve(reqs.size());
 
-  for (const auto* r : reqs) {
+  for (const auto *r : reqs) {
     assert(r->state() != ReqState::INPROCESS);
     if (r->state() != ReqState::OK) {
       continue;
@@ -1625,7 +1733,8 @@ void RDMAChannel::send_notification(const std::vector<const ReqSendTask*>& reqs)
     auto& use_ch = self.sch();
     assert(use_ch->GetMempool() == self.ctx_->mp());
     auto bufmr = AllocCPUBuffer(use_ch, msglen);
-    encode_notification(bufmr.buf, self.src_inst_id_, self.src_worker_id_, reqid, block_ids);
+    encode_notification(bufmr.buf, self.src_inst_id_, self.src_worker_id_,
+                        reqid, block_ids);
 
     auto fut = Send(use_ch, std::move(bufmr));
     self.send_futs_.emplace_back(std::move(fut));
@@ -1648,7 +1757,8 @@ bool RDMAProtoContext::check_support() {
       return false;
     }
   } catch (const std::exception &e) {
-    LOG(ERROR) << "RDMAProtoContext::check_support: " << e.what() << " return false;";
+    LOG(ERROR) << "RDMAProtoContext::check_support: " << e.what()
+               << " return false;";
     return false;
   }
   return true;
@@ -1694,10 +1804,8 @@ public:
               << ", gpu_id=" << self.gpu_id
               << ", size=" << self.size;
   }
-
   DataPtrCtx(const DataPtrCtx&) = delete;
   DataPtrCtx(DataPtrCtx&&) = delete;
-
   ~DataPtrCtx() {
     auto& self = *this;
     self.allocator->Release(self.ptr);
@@ -1721,14 +1829,12 @@ PyObject* alloc_phy_cont_mem(size_t size, PyObject* device) {
   RTASSERT(dev->device.type() == c10::DeviceType::CUDA);
   RTASSERT(dev->device.has_index());
   int gpu_id = dev->device.index();
-
   XAllocator* gpu_allocator = nullptr;
   auto [_, mp] = g_mp_manager.get_gpu_ctx(gpu_id);
   auto result = mp->GetXAllocator(gpu_allocator, GPU);
   RTASSERT(result == accl::barex::BAREX_SUCCESS);
   // cudaMalloc 至少 256 对齐. align 在 PPU 上不生效, 即 PPU 上 kvcache 不保证对齐.
   void* const buf = gpu_allocator->Alloc(size, gpu_id, nullptr /* attr */, 512 /* align */);
-
   auto* dpctx = new DataPtrCtx(buf, gpu_allocator, gpu_id, size);
   auto data_ptr = c10::DataPtr(buf, dpctx, DataPtrCtxDeleter, dev->device);
   auto storage = c10::Storage(c10::Storage::use_byte_size_t{},
@@ -1738,10 +1844,8 @@ PyObject* alloc_phy_cont_mem(size_t size, PyObject* device) {
     false /* resizable */);
   return THPStorage_Wrap(std::move(storage));
 }
-
 #endif   // ENABLE_TORCH
 
 #endif // ENABLE_RDMA
 
-
-}  // namespace blade_llm
+} // namespace blade_llm

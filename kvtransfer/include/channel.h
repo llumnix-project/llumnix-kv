@@ -45,7 +45,7 @@ class IChannel {
   //   还需要把 data 再返回出来给 start_async 下一轮迭代使用, 但太麻烦了.
   // 之后在每个 layer 计算完毕之后调用 send_data 来发送数据. send_data 可能是异步的, 其返回并不意味数据
   // 传输完毕. flush() 会阻塞等待所有 in-flighting send_data 结束.
-  virtual void register_data(std::vector<IpcBlock>& data, TPKind kind) = 0;
+  virtual void register_data(std::vector<std::vector<IpcBlock>>& data, TPKind kind) = 0;
   virtual void send_data(size_t layer_index) = 0;
   // out 存放着 register_data, send_data 期间产生的一些 metric 信息. 比如数据特征, 发送时间等.
   // out 格式最好是 key=val,key2=val2 形式, 便于后期脚本化处理.

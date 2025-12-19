@@ -2,7 +2,6 @@
 
 #ifndef KVTRANSFER_RDMA_PROTOCOL
 #define KVTRANSFER_RDMA_PROTOCOL
-
 #include "common.h"
 #include "context.h"
 #include "channel.h"
@@ -109,12 +108,13 @@ private:
 class BarexMRGuard : public noncopyable {
   accl::barex::memp_t mr_;
   accl::barex::XSimpleMempool *mp_ = nullptr; // owner: BarexCtx
-  bool const release_;  // 若为 true 则使用 ReleaseAndDeregBuffer 否则仅使用 DeregUserMr
+  bool const release_; // 若为 true 则使用 ReleaseAndDeregBuffer 否则仅使用 DeregUserMr
  private:
   BarexMRGuard(accl::barex::memp_t &&mr, accl::barex::XSimpleMempool *mp, bool r) noexcept:
-      mr_(std::move(mr)),
-      mp_(mp),
+      mr_(std::move(mr)), 
+      mp_(mp), 
       release_(r) {}
+
  public:
   static BarexMRGuard RelDeregGuard(accl::barex::memp_t &&mr, accl::barex::XSimpleMempool *mp) noexcept {
     return BarexMRGuard(std::move(mr), mp, true);
@@ -123,9 +123,9 @@ class BarexMRGuard : public noncopyable {
     return BarexMRGuard(std::move(mr), mp, false);
   }
 
-  BarexMRGuard(BarexMRGuard &&other) noexcept:
-      mr_(std::move(other.mr_)),
-      mp_(other.mp_),
+  BarexMRGuard(BarexMRGuard &&other) noexcept: 
+      mr_(std::move(other.mr_)), 
+      mp_(other.mp_), 
       release_(other.release_) {
     other.mp_ = nullptr;
   }
@@ -146,8 +146,8 @@ struct BarexCtx : public noncopyable {
 
   ~BarexCtx();
 
-  const auto &layer_mr() const noexcept {
-    return this->layer_mr_;
+  const auto &layer_mrs() const noexcept {
+    return this->layer_mrs_;
   }
 
   const auto& layer_gdrcpy_mem() const noexcept {
@@ -169,18 +169,21 @@ struct BarexCtx : public noncopyable {
   std::unique_ptr<accl::barex::XThreadpool, XThreadpoolDeleter> tp_;
   std::unique_ptr<accl::barex::XContext> xctx_;
 
-  std::vector<BarexMRGuard> layer_mr_;
+  std::vector<std::vector<BarexMRGuard>> layer_mrs_;
   // may be null
   std::vector<std::unique_ptr<GdrMemDesc>> layer_gdrcpy_mem_;
 };
 
-// RDMAMemHandle 可以 memcpy.
+// 每层layer最多包含的cache tensor数量
+static constexpr size_t MAX_CACHE_NUM_PER_LAYER = 2;
+
+// 为了保证RDMAMemHandle 可以 memcpy，用固定大小的array保存
 struct RDMAMemHandle {
-  void *ptr = nullptr;
-  uint32_t rkey = 0;
-  uint32_t lkey = 0; // 不必要, 正好这里 padding 4 字节, 不用白不用.
+  std::array<void*, MAX_CACHE_NUM_PER_LAYER> ptrs{};
+  std::array<uint32_t, MAX_CACHE_NUM_PER_LAYER> rkeys{};
 };
 static_assert(std::is_standard_layout_v<RDMAMemHandle>);
+static_assert(std::is_trivially_copyable_v<RDMAMemHandle>, "Must be trivial!");
 
 struct CliBarexCtx : public BarexCtx {
   CliBarexCtx(std::string mp_name,
@@ -198,25 +201,23 @@ struct CliBarexCtx : public BarexCtx {
 
   // rpc
   std::vector<RDMAMemHandle> get_mem_handles(std::shared_ptr<accl::barex::XChannel>& dst) const;
-  uint32_t get_remote_crc(std::shared_ptr<accl::barex::XChannel>& dst,
-                          const std::vector<IpcBlock>* data,
-                          uint32_t lcrc);
+  // uint32_t get_remote_crc(std::shared_ptr<accl::barex::XChannel>& dst,
+  //                         const std::vector<IpcBlock>* data,
+  //                         uint32_t lcrc);
 
  private:
    struct RpcCtxCb : public accl::barex::XChannelCallback {
-     RpcCtxCb(const CliBarexCtx* clictx) noexcept: cli_ctx_(clictx) {}
-
-     void OnRecvCall(accl::barex::XChannel *channel,
-                     char *in_buf,
-                     size_t len,
-                     accl::barex::x_msg_header header) override;
-   private:
-     const CliBarexCtx* const cli_ctx_ = nullptr;  // owner: KV_CLIENT.ctx_
-   };
-
-   std::unique_ptr<RpcCtxCb> get_ctx_cb() const noexcept {
-    return std::make_unique<RpcCtxCb>(this);
-   }
+    RpcCtxCb(const CliBarexCtx* clictx) noexcept: cli_ctx_(clictx) {}
+    void OnRecvCall(accl::barex::XChannel *channel,
+                    char *in_buf,
+                    size_t len,
+                    accl::barex::x_msg_header header) override;
+  private:
+    const CliBarexCtx* const cli_ctx_ = nullptr;  // owner: KV_CLIENT.ctx_
+  };
+  std::unique_ptr<RpcCtxCb> get_ctx_cb() const noexcept {
+   return std::make_unique<RpcCtxCb>(this);
+  }
 
    using OnRespF = std::function<void(accl::barex::Status, char*, size_t)>;
    void push(uint64_t reqid, OnRespF on_resp) const;
@@ -225,7 +226,9 @@ struct CliBarexCtx : public BarexCtx {
    void on_send_error(accl::barex::Status s, uint64_t reqid) const;
 
  public:
-  const uint64_t layer_blk_size;
+  // block size of all tensors in one layer, assume all tensors from different
+  // layers have same shape
+  const std::vector<uint64_t> layer_blk_sizes; // size: num cache tensors from one layer
  private:
   std::mutex mtx_;
   // reqid, on resp callback
@@ -234,7 +237,7 @@ struct CliBarexCtx : public BarexCtx {
   ThreadPool close_tp_{1};
 };
 
-static constexpr int LAYER_NUM_MAX = 100;
+static constexpr int LAYER_NUM_MAX = 150;
 struct RDMAInfo {
   char ip[INET_ADDRSTRLEN]{'\0'};  // decode listen ip, 以 '\0' 结尾.
   int port = 0;  // decode listen port
@@ -256,7 +259,8 @@ class RDMAChannel : public IChannel, public noncopyable {
   // 上层会确保 connect happen-before write.
   void connect(const WorkerInfo &dst_info) override;
 
-  void register_data(std::vector<IpcBlock>& data, TPKind kind) override;
+  void register_data(std::vector<std::vector<IpcBlock>>& data, TPKind kind) override;
+  
   void send_data(size_t layer_index) override;
   void flush(std::string& out) override;
   void send_notification(const std::vector<const ReqSendTask*>& reqs) override;
@@ -266,16 +270,11 @@ class RDMAChannel : public IChannel, public noncopyable {
  private:
   void send_data_pltd(size_t layer_index);
 
-  void do_write(uint32_t layer_idx,
-                size_t src_offset,
-                size_t dst_offset,
-                size_t len);
-
   // do real connect.
   void do_init();
-
   accl::barex::XChannel *ch() noexcept;
   std::shared_ptr<accl::barex::XChannel>& sch() noexcept;
+
  private:
   InstanceId const src_inst_id_;
   WorkerId const src_worker_id_ = 0;
@@ -283,11 +282,14 @@ class RDMAChannel : public IChannel, public noncopyable {
 
   std::string ip_;
   int port_{0};
-  size_t dst_layer_blk_size_{0};
+  std::vector<size_t> dst_layer_blk_sizes_; // 默认构造，空vector
   uint32_t dst_layer_num_{0};
 
   int prev_ch_idx_ = 0;
-  std::vector<IpcBlock>* data_ = nullptr;
+  // outside vec represent each tensor's block list
+  // inside vec represent blocks need to send from one tensor
+  std::vector<std::vector<IpcBlock>> *data_ = nullptr;
+  size_t dataperch_ = 0;
   TPKind kind_ = TPKind::UNKNOWN;
   // sb is send block~
   size_t origin_sb_num_ = 0;
@@ -309,6 +311,7 @@ class RDMAChannel : public IChannel, public noncopyable {
 class RDMAServer : public ITransferServer {
  public:
   void start_server(ITransferService *service, Context *ctx) override;
+
  private:
   class CtxCallback : public accl::barex::XChannelCallback {
     ITransferService* const ser_ = nullptr;   // owner: KV_SERVICE
@@ -316,7 +319,7 @@ class RDMAServer : public ITransferServer {
    public:
     CtxCallback(ITransferService *s, RDMAServer* v) noexcept:
       ser_(s), server_(v) {}
-
+      
     void OnRecvCall(accl::barex::XChannel *channel,
                     char *in_buf,
                     size_t len,
@@ -328,10 +331,13 @@ class RDMAServer : public ITransferServer {
                     char *in_buf,
                     size_t len,
                     accl::barex::x_msg_header header) noexcept override;
+
    private:
     void resp_mem_handles(std::shared_ptr<accl::barex::XChannel>& channel, uint64_t reqid, char *in_buf, size_t len);
-    void resp_remote_crc(std::shared_ptr<accl::barex::XChannel>& channel, uint64_t reqid, char *in_buf, size_t len);
+    // later
+    // void resp_remote_crc(std::shared_ptr<accl::barex::XChannel>& channel, uint64_t reqid, char *in_buf, size_t len);
   };
+
  private:
   RDMAInfo info_;
   BarexCtx* ctx_ = nullptr;  // OWNER: KvTransferService.ctx_
@@ -353,7 +359,7 @@ class RDMAProtoContext : public IProtocolContext {
   const bool is_server;
 
   static std::unique_ptr<RDMAProtoContext> server_context(std::string &&name,
-                                                          std::unique_ptr<accl::barex::XChannelCallback> &&);
+                                                          std::unique_ptr<accl::barex::XChannelCallback> &&cb);
 
   static std::unique_ptr<RDMAProtoContext> client_context(std::string &&name);
 

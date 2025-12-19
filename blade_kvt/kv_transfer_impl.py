@@ -1,6 +1,6 @@
 import enum
 import os
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Union
 
 import torch
 import logging
@@ -30,14 +30,11 @@ logger = logging.getLogger("blade_kvt")
 
 @enum.unique
 class KVTransferProtocolType(enum.Enum):
-    CUDA_IPC = enum.auto()
     RDMA_DIRECT = enum.auto()
     UNKNOWN = enum.auto()
 
     def to_ops_protocol(self) -> TransferProtocol:
         match self:
-            case KVTransferProtocolType.CUDA_IPC:
-                return TransferProtocol(TransferProtocol.Kind.CUDA_IPC)
             case KVTransferProtocolType.RDMA_DIRECT:
                 return TransferProtocol(TransferProtocol.Kind.RDMA_DIRECT)
             case _:
@@ -46,8 +43,6 @@ class KVTransferProtocolType(enum.Enum):
     @classmethod
     def to_protocol_type(cls, protocol_kind: str) -> "KVTransferProtocolType":
         match protocol_kind:
-            case "ipc":
-                return KVTransferProtocolType.CUDA_IPC
             case "rdma":
                 return KVTransferProtocolType.RDMA_DIRECT
             case _:
@@ -58,8 +53,6 @@ def support_transfers_protocols() -> List[KVTransferProtocolType]:
     supports = []
     for p in lib_support_transfer_protocols():
         match p.type:
-            case TransferProtocol.Kind.CUDA_IPC:
-                supports.append(KVTransferProtocolType.CUDA_IPC)
             case TransferProtocol.Kind.RDMA_DIRECT:
                 supports.append(KVTransferProtocolType.RDMA_DIRECT)
             case _:
@@ -81,10 +74,10 @@ class KVTransferClient:
         tp_size: int,
         worker_id: int,
         worker_tp_rank: int,
-        block_bytes: int,
-        token_bytes: int,
+        block_bytes: Union[List[int], int],
+        token_bytes: Union[List[int], int],
         naming_url: str,
-        layers: List[torch.Tensor],
+        layers: Union[List[List[torch.Tensor]], List[torch.Tensor]],
         protocols: List[KVTransferProtocolType],
     ):
         """
@@ -95,16 +88,37 @@ class KVTransferClient:
                 tp_size(int): the size of tensor parallel group on current instance;
                 worker_id(int): the id of the current worker on current instance;
                 worker_tp_rank(int): the rank of current worker among tensor parallel group;
-                block_bytes(int): the size in bytes of a block occupied in kv cache allocated;
-                token_bytes(int): the size in bytes of one token occupied in a block;
+                block_bytes(List[int]): the size in bytes of a block occupied in kv cache allocated, align with layers;
+                token_bytes(List[int]): the size in bytes of one token occupied in a block, align with layers;
                 naming_url(str): the address of the naming service used to register(find) workers endpoint in cluster;
-                layers(List[torch.Tensor]): the kv cache data by layers;
+                layers(List[List[torch.Tensor]]): the kv cache data by layers, each layer may contain multiple cache tensors;
                 protocols(List[TransferProtocol]): the transfer protocols will be checked and initialized; They can be used to transfer kv data in later; An empty list is supported, which means all library supported transfer protocols
                 will be checked and initialized;
         """
-        device_id = layers[0].get_device()
-        layer_num_blocks = _get_layer_num_blocks(layers, block_bytes)
+        # older version vllm, should only contain simple model architecture
+        if isinstance(block_bytes, int) and isinstance(token_bytes, int):
+            block_bytes = [block_bytes]
+            token_bytes = [token_bytes]
+            layers = [layers]
+        else:
+            assert isinstance(block_bytes, list) and isinstance(token_bytes, list)
 
+        for layer in layers:
+            assert len(layer) == len(layers[0]), "All layer should have the same number of cache tensors"
+        assert (len(block_bytes) == len(token_bytes) == len(layers[0]), 
+                "block_bytes and token_bytes should align with layers' cache number")
+        
+        layer_num_blocks_list = [
+            _get_layer_num_blocks([
+                layer[cache_index] for layer in layers
+            ], block_bytes[cache_index]) for cache_index in range(len(block_bytes))
+        ]
+        assert (all(layer_num_blocks == layer_num_blocks_list[0] 
+                   for layer_num_blocks in layer_num_blocks_list), 
+                "Currently all cache in one layer should have the same number of blocks")
+        layer_num_blocks = layer_num_blocks_list[0]
+
+        device_id = layers[0][0].get_device()
         logger.info(
             "init kvt client:"
             " instid=%s tpsize=%s wid=%s wrank=%s"
@@ -115,13 +129,15 @@ class KVTransferClient:
             inst_id, tp_size, worker_id, worker_tp_rank,
             block_bytes, token_bytes,
             naming_url, protocols,
-            layers[0].shape, layers[0].dtype, layers[0].device,
+            [cache.shape for cache in layers[0]], 
+            [cache.dtype for cache in layers[0]], 
+            [cache.device for cache in layers[0]],
             layer_num_blocks, len(layers)
         )
 
         self._num_layers = len(layers)
         self._init_events()
-        layer_addrs = [l.data_ptr() for l in layers]
+        layer_addrs = [[l.data_ptr() for l in layer] for layer in layers]
         ops_protocols = [p.to_ops_protocol() for p in protocols]
         init_kv_transfer_client(
             inst_id,
@@ -326,14 +342,37 @@ class KVTransferServer:
         tp_size: int,
         worker_id: int,
         worker_tp_rank: int,
-        block_bytes: int,
-        token_bytes: int,
+        block_bytes: Union[List[int], int],
+        token_bytes: Union[List[int], int],
         naming_url: str,
-        layers: List[torch.Tensor],
+        layers: Union[List[List[torch.Tensor]], List[torch.Tensor]],
         protocols: List[KVTransferProtocolType],
+
     ):
-        device_id = layers[0].get_device()
-        layer_num_blocks = _get_layer_num_blocks(layers, block_bytes)
+        # older version vllm, should only contain simple model architecture
+        if isinstance(block_bytes, int) and isinstance(token_bytes, int):
+            block_bytes = [block_bytes]
+            token_bytes = [token_bytes]
+            layers = [layers]
+        else:
+            assert isinstance(block_bytes, list) and isinstance(token_bytes, list)
+
+        for layer in layers:
+            assert len(layer) == len(layers[0]), "All layer should have the same number of cache tensors"
+        assert (len(block_bytes) == len(token_bytes) == len(layers[0]), 
+                "block_bytes and token_bytes should align with layers' cache number")
+
+        layer_num_blocks_list = [
+            _get_layer_num_blocks([
+                layer[cache_index] for layer in layers
+            ], block_bytes[cache_index]) for cache_index in range(len(block_bytes))
+        ]
+        assert (all(layer_num_blocks == layer_num_blocks_list[0]
+                   for layer_num_blocks in layer_num_blocks_list), 
+                "Currently all cache in one layer should have the same number of blocks")
+        layer_num_blocks = layer_num_blocks_list[0]
+
+        device_id = layers[0][0].get_device()
 
         logger.info(
             "init kvt server:"
@@ -345,11 +384,13 @@ class KVTransferServer:
             inst_id, tp_size, worker_id, worker_tp_rank,
             block_bytes, token_bytes,
             naming_url, protocols,
-            layers[0].shape, layers[0].dtype, layers[0].device,
+            [cache.shape for cache in layers[0]], 
+            [cache.dtype for cache in layers[0]], 
+            [cache.device for cache in layers[0]],
             layer_num_blocks, len(layers)
         )
 
-        layer_addrs = [l.data_ptr() for l in layers]
+        layer_addrs = [[l.data_ptr() for l in layer] for layer in layers]
         ops_protocols = [p.to_ops_protocol() for p in protocols]
         init_kv_transfer_server(
             inst_id,

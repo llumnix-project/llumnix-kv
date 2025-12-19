@@ -87,7 +87,7 @@ TEST(RDMAChannelTest, TestSerdeReqNofitfication) {
 }
 
 
-TEST(RDMAChannelTest, TestTransefer) {
+TEST(RDMAChannelTest, TestTransfer) {
   auto test_rdma_ctx = RDMAProtoContext::client_context("test");
   if (!test_rdma_ctx->check_support()) {
     LOG(INFO) << "rdma not support on this node;";
@@ -108,15 +108,16 @@ TEST(RDMAChannelTest, TestTransefer) {
     cuda_malloc(&layer_1, layer_size);
     cudaMemset(layer_0, 0, layer_size);
     cudaMemset(layer_1, 0, layer_size);
-    std::vector<uint64_t> layer_addrs(2);
-    layer_addrs[0] = reinterpret_cast<uint64_t>(layer_0);
-    layer_addrs[1] = reinterpret_cast<uint64_t>(layer_1);
     ShmNamingClient naming;
     naming.connect(NAMING_FILE);
 
     Context ctx("0", 0);
-    ctx.set_layer_data_address(0, layer_addrs);
-    ctx.set_block_params(block_size, token_size, 4);
+    std::vector<std::vector<LayerInfo>> all_layer_infos = {
+      {LayerInfo(token_size, block_size, reinterpret_cast<uint64_t>(layer_0))},
+      {LayerInfo(token_size, block_size, reinterpret_cast<uint64_t>(layer_1))}
+    };
+    ctx.set_layer_info(0, all_layer_infos);
+    ctx.set_block_params({block_size}, {token_size}, 4);
     RDMAServer server;
     FakeTransferService service;
     server.start_server(&service, &ctx);
@@ -167,15 +168,16 @@ TEST(RDMAChannelTest, TestTransefer) {
     cuda_malloc(&layer_1, layer_size);
     cudaMemset(layer_0, 7, layer_size);
     cudaMemset(layer_1, 8, layer_size);
-    std::vector<uint64_t> layer_addrs(2);
-    layer_addrs[0] = reinterpret_cast<uint64_t>(layer_0);
-    layer_addrs[1] = reinterpret_cast<uint64_t>(layer_1);
     ShmNamingClient naming;
     naming.connect(NAMING_FILE);
 
     Context ctx("1", 0);
-    ctx.set_layer_data_address(0, layer_addrs);
-    ctx.set_block_params(block_size, token_size, 4);
+    std::vector<std::vector<LayerInfo>> all_layer_infos = {
+      {LayerInfo(token_size, block_size, reinterpret_cast<uint64_t>(layer_0))},
+      {LayerInfo(token_size, block_size, reinterpret_cast<uint64_t>(layer_1))}
+    };
+    ctx.set_layer_info(0, all_layer_infos);
+    ctx.set_block_params({block_size}, {token_size}, 4);
     auto proto_ctx = RDMAProtoContext::client_context("KVTClient");
     auto proto = proto_ctx->protocol();
     ctx.register_protocol(std::move(proto_ctx));
@@ -190,21 +192,32 @@ TEST(RDMAChannelTest, TestTransefer) {
     }
     EXPECT_TRUE(dst_info.has_value());
     auto &info = dst_info.value();
-    LOG(INFO) << "fetch dst worker info: token_size=" << info.token_size << ", block_size=" << info.block_size;
+    LOG(INFO) << "fetch dst worker info: token_sizes=" << info.token_sizes[0] << ", block_sizes=" << info.block_sizes[0];
     channel.connect(dst_info.value());
     std::vector<uint32_t> blocks{0, 1};
     std::vector<const ReqSendTask *> reqs;
     auto rp = std::make_shared<RequestInfo>("0", 0, "test_rdma", blocks, blocks);
     ReqSendTask t(rp, 0, 1, true);
     reqs.push_back(&t);
-    std::vector<IpcBlock> data{{0, 0, token_size}, {2 * token_size, 2 * token_size, token_size}};
+    std::vector<std::vector<IpcBlock>> data{
+      {IpcBlock(0, 0, token_size), IpcBlock(2 * token_size, 2 * token_size, token_size)}
+    };
     channel.register_data(data, TPKind::PEQD);
     channel.send_data(0);
     channel.send_data(1);
+
     std::string out;
     channel.flush(out);
+
+    // set task state to OK manually
+    assert(t.reach_last_token);
+    if (t.state() == ReqState::INPROCESS) {
+      t.set_state(ReqState::OK);
+    }
     auto nf = CopySource<const ReqSendTask *>::from(reqs);
     channel.send_notification(nf.get());
+    LOG(INFO) << "send_notification done";
+
     channel.close();
     cudaFree(layer_0);
     cudaFree(layer_1);

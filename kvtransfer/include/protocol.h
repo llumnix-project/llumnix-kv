@@ -11,12 +11,10 @@ namespace blade_llm {
 struct TransferProtocol {
  public:
   enum Kind {
-    CUDA_IPC = 1,
-    RDMA_DIRECT = 1U << 1
+    RDMA_DIRECT = 1
   };
 
   TransferProtocol(Kind p): type(p) {}
-  static TransferProtocol cuda_ipc();
   static TransferProtocol rdma_direct();
   [[nodiscard]] std::string to_string() const;
 

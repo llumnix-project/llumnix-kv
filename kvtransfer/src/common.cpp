@@ -4,10 +4,43 @@
 #include <stdexcept>
 #include <sstream>
 #include "utils/base64.h"
+#include "thrid_party/logging.h"
 
 namespace blade_llm {
 
+static std::string join_sizes(const std::vector<size_t>& v) {
+  std::stringstream ss;
+  for (size_t i = 0; i < v.size(); ++i) {
+    if (i > 0) {
+      ss << '|';
+    }
+    ss << v[i];
+  }
+  return ss.str();
+}
+
+static std::vector<size_t> parse_sizes(const std::string& s) {
+  std::vector<size_t> out;
+  size_t start = 0;
+  while (true) {
+    auto pos = s.find('|', start);
+    auto token = (pos == std::string::npos)
+                   ? s.substr(start)
+                   : s.substr(start, pos - start);
+    if (!token.empty())
+      out.push_back(std::stoul(token));
+    if (pos == std::string::npos) break;
+    start = pos + 1;
+  }
+  return out;
+}
+
+// TODO(llx): now only support one block_size/token_size
 std::vector<uint8_t> WorkerInfo::to_bytes() const {
+  RTASSERT(!block_sizes.empty());
+  RTASSERT(!token_sizes.empty());
+  auto block_size = block_sizes[0];
+  auto token_size = token_sizes[0];
   RTASSERT_EQ(block_size, uint32_t(block_size));
   RTASSERT_EQ(token_size, uint32_t(token_size));
   uint32_t tmp[11];
@@ -61,8 +94,12 @@ WorkerInfo WorkerInfo::from_bytes(const unsigned char *src, size_t length) {
   wi.worker_id = be32toh(tmp[0]);
   wi.tp_size = be32toh(tmp[1]);
   wi.worker_tp_rank = be32toh(tmp[2]);
-  wi.block_size = be32toh(tmp[3]);
-  wi.token_size = be32toh(tmp[4]);
+
+  wi.block_sizes.clear();
+  wi.block_sizes.push_back(be32toh(tmp[3]));
+  wi.token_sizes.clear();
+  wi.token_sizes.push_back(be32toh(tmp[4]));
+
   wi.layer_num_blocks = be32toh(tmp[5]);
   wi.num_layers = be32toh(tmp[6]);
   wi.transfer_protocols = (uint8_t)be32toh(tmp[7]);
@@ -114,8 +151,8 @@ std::string WorkerInfo::to_string() const {
      << worker_id << ","
      << tp_size << ","
      << worker_tp_rank << ","
-     << block_size << ","
-     << token_size << ","
+     << join_sizes(block_sizes) << ","
+     << join_sizes(token_sizes) << ","
      << layer_num_blocks << ","
      << num_layers << ","
      << (uint32_t)transfer_protocols;
@@ -131,10 +168,13 @@ std::string WorkerInfo::to_string() const {
     }
     ss << "," << base64_encode(other_info);
   }
+  LOG(INFO) << "WorkerInfo::to_string() result:" << ss.str();
   return std::move(ss).str();
 }
 
 WorkerInfo WorkerInfo::from_string(const std::string &src) {
+  LOG(INFO) << "WorkerInfo::from_string() recieve:" << src;
+
   WorkerInfo w;
   std::vector<std::string> tmp;
   tmp.reserve(11);
@@ -156,8 +196,8 @@ WorkerInfo WorkerInfo::from_string(const std::string &src) {
   w.worker_id = stoul(tmp[1]);
   w.tp_size = stoul(tmp[2]);
   w.worker_tp_rank = stoul(tmp[3]);
-  w.block_size = stoul(tmp[4]);
-  w.token_size = stoul(tmp[5]);
+  w.block_sizes = parse_sizes(tmp[4]);
+  w.token_sizes = parse_sizes(tmp[5]);
   w.layer_num_blocks = stoul(tmp[6]);
   w.num_layers = stoul(tmp[7]);
   w.transfer_protocols = stoul(tmp[8]);

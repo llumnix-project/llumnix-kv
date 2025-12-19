@@ -38,12 +38,12 @@ void init_kv_transfer_client(const std::string &inst_name,
                              uint32_t worker_id,
                              uint32_t worker_tp_rank,
                              uint32_t device_id,
-                             uint32_t block_size,
-                             uint32_t token_size,
+                             std::vector<size_t> block_sizes,
+                             std::vector<size_t> token_sizes,
                              uint32_t layer_num_blocks,
                              const std::string &naming_url,
                              const std::vector<uint64_t> &events,
-                             const std::vector<uint64_t> &layers,
+                             const std::vector<std::vector<uint64_t>> &layers,
                              const std::vector<TransferProtocol> &protocols) {
 
   if (KV_CLIENT == nullptr) {
@@ -56,12 +56,26 @@ void init_kv_transfer_client(const std::string &inst_name,
       LOG(INFO) << "InitKvtClient: tp_size changes: old=" << tp_size << ";new=" << validranks.count();
       tp_size = validranks.count();
     }
-    assert(block_size % token_size == 0);
+    assert(block_sizes.size() == token_sizes.size());
+    for (size_t i = 0; i < block_sizes.size(); i++) {
+      assert(block_sizes[i] % token_sizes[i] == 0);
+    }
     LOG(INFO) << "KVT: init kv client for worker(" << inst_name << ":" << worker_id << ") at " << inst_name;
     auto context = std::make_unique<Context>(inst_name, worker_id);
     context->set_tp(tp_size, worker_tp_rank);
-    context->set_block_params(block_size, token_size, layer_num_blocks);
-    context->set_layer_data_address(device_id, layers);
+
+    std::vector<std::vector<LayerInfo>> all_layer_infos;
+    for (auto layer: layers){ // each layer
+      std::vector<LayerInfo> layer_infos;
+      for(auto tensor_addr: layer){ // each cache tensor of each layer
+        auto layer_info = LayerInfo(token_sizes[layer_infos.size()], block_sizes[layer_infos.size()], tensor_addr);
+        layer_infos.emplace_back(std::move(layer_info));
+      }
+      all_layer_infos.emplace_back(std::move(layer_infos));
+    }
+
+    context->set_block_params(block_sizes, token_sizes, layer_num_blocks);
+    context->set_layer_info(device_id, all_layer_infos);
     context->set_cuda_barrier(std::make_unique<CudaEventBarrier>(events));
     auto naming_client = NAMING_MANAGER->connect_naming(inst_name, naming_url);
     auto stub_factory = std::make_unique<KvSendStubFactory>(context.get(), std::move(naming_client));
@@ -180,17 +194,33 @@ void init_kv_transfer_server(const std::string &inst_name,
                              uint32_t worker_id,
                              uint32_t worker_tp_rank,
                              uint32_t device_id,
-                             uint32_t block_size,
-                             uint32_t token_size,
+                             std::vector<size_t> block_sizes,
+                             std::vector<size_t> token_sizes,
                              uint32_t layer_num_blocks,
                              const std::string &naming_url,
-                             const std::vector<uint64_t> &layers,
+                             const std::vector<std::vector<uint64_t>> &layers,
                              const std::vector<TransferProtocol> &protocols) {
   if (KV_SERVER == nullptr) {
     auto context = std::make_unique<Context>(inst_name, worker_id);
     context->set_tp(tp_size, worker_tp_rank);
-    context->set_block_params(block_size, token_size, layer_num_blocks);
-    context->set_layer_data_address(device_id, layers);
+
+    assert(block_sizes.size() == token_sizes.size());
+    for (size_t i = 0; i < block_sizes.size(); i++) {
+      assert(block_sizes[i] % token_sizes[i] == 0);
+    }
+
+    std::vector<std::vector<LayerInfo>> all_layer_infos;
+    for (auto layer: layers){ // each layer
+      std::vector<LayerInfo> layer_infos;
+      for(auto tensor_addr: layer){ // each cache tensor of each layer
+        auto layer_info = LayerInfo(token_sizes[layer_infos.size()], block_sizes[layer_infos.size()], tensor_addr);
+        layer_infos.emplace_back(std::move(layer_info));
+      }
+      all_layer_infos.emplace_back(std::move(layer_infos));
+    }
+
+    context->set_block_params(block_sizes, token_sizes, layer_num_blocks);
+    context->set_layer_info(device_id, all_layer_infos);
 
     if (protocols.size() > 1) {
       throw std::runtime_error("multi-protocols server not support temporarily");
@@ -210,18 +240,7 @@ void init_kv_transfer_server(const std::string &inst_name,
           KV_SERVER = nullptr;
           LOG(INFO) << "KVT: transfer protocol: " + p.to_string() + " not support, try next ...";
         }
-      } else if (supported.is_support(TransferProtocol::Kind::CUDA_IPC)) {
-        auto p = TransferProtocol::cuda_ipc();
-        try {
-          KV_SERVER = create_transfer_server(p);
-          KV_SERVER->start_server(KV_SERVICE, ctx);
-          LOG(INFO) << "KVT: start kvtransfer server with protocol: " + p.to_string();
-        } catch (const std::exception &e) {
-          KV_SERVER = nullptr;
-          LOG(INFO) << "KVT: transfer protocol: " + p.to_string() + " not support.";
-        }
       }
-
       if (KV_SERVER == nullptr) {
         throw std::runtime_error("start kvtransfer server failed, because no transfer protocol support");
       }
@@ -300,7 +319,6 @@ PYBIND11_MODULE(kvtransfer_ops, m) {
       .def("__str__", &blade_llm::TransferProtocol::to_string)
       .def("__repr__", &blade_llm::TransferProtocol::to_string);
   py::enum_<blade_llm::TransferProtocol::Kind>(protocol, "Kind")
-      .value("CUDA_IPC", blade_llm::TransferProtocol::Kind::CUDA_IPC)
       .value("RDMA_DIRECT", blade_llm::TransferProtocol::Kind::RDMA_DIRECT)
       .export_values();
 

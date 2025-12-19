@@ -3,7 +3,6 @@
 #include "naming.h"
 #include "thrid_party/logging.h"
 #include "utils/timer.h"
-#include "protocol/cuda_ipc.h"
 #include "protocol/rdma_protocol.h"
 #include "envcfg.h"
 #include "fault_inject.h"
@@ -194,8 +193,6 @@ std::unique_ptr<KvTransferClient> KvTransferClient::create(std::unique_ptr<Conte
     for (const auto &p : protocols) {
       std::unique_ptr<IProtocolContext> proto_ctx;
       switch (p.type) {
-        case TransferProtocol::CUDA_IPC:proto_ctx = std::make_unique<CudaIpcContext>(ctx->device_id());
-          break;
         case TransferProtocol::RDMA_DIRECT:
 #ifdef ENABLE_RDMA
           proto_ctx = RDMAProtoContext::client_context("KVTClient");
@@ -208,10 +205,6 @@ std::unique_ptr<KvTransferClient> KvTransferClient::create(std::unique_ptr<Conte
       ctx->register_protocol(std::move(proto_ctx));
     }
   } else {
-    auto cuda_ctx = std::make_unique<CudaIpcContext>(ctx->device_id());
-    if (cuda_ctx->check_support()) {
-      ctx->register_protocol(std::move(cuda_ctx));
-    }
 #ifdef ENABLE_RDMA
     auto rdma_ctx = RDMAProtoContext::client_context("KVTClient");
     if (rdma_ctx->check_support()) {

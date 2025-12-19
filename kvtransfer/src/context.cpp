@@ -30,19 +30,33 @@ void Context::set_tp(uint32_t tp_size, uint32_t worker_tp_rank) {
   worker_info_.worker_tp_rank = worker_tp_rank;
 }
 
-void Context::set_block_params(uint32_t block_size, uint32_t token_size, uint32_t layer_num_blocks) {
-  if (block_size < token_size || block_size % token_size != 0) {
-    throw std::runtime_error("block_size must be a multiple of token_size");
+void Context::set_block_params(std::vector<size_t> block_sizes, std::vector<size_t> token_sizes, uint32_t layer_num_blocks) {
+  RTASSERT(block_sizes.size() == token_sizes.size());
+  for (size_t i = 0; i < block_sizes.size(); i++) {
+    auto block_size = block_sizes[i];
+    auto token_size = token_sizes[i];
+    assert(block_size >= token_size && block_size % token_size == 0);
   }
-  worker_info_.block_size = block_size;
-  worker_info_.token_size = token_size;
+  worker_info_.block_sizes = block_sizes;
+  worker_info_.token_sizes = token_sizes;
   worker_info_.layer_num_blocks = layer_num_blocks;
 }
 
-void Context::set_layer_data_address(uint8_t device_id, const std::vector<uint64_t> &layers) {
+
+void Context::set_layer_info(uint8_t device_id, const std::vector<std::vector<LayerInfo>> &all_layer_infos) {
   device_id_ = (int) device_id;
-  worker_info_.num_layers = layers.size();
-  layer_data_address_ = layers;
+  worker_info_.num_layers = all_layer_infos.size();
+  all_layer_infos_ = all_layer_infos;
+  
+  // Extract all layer addresses from all_layer_infos_
+  layer_data_address_.clear();
+  for (const auto &layer_infos : all_layer_infos_) {
+    std::vector<uint64_t> layer_cache_address;
+    for (const auto &info : layer_infos) {
+      layer_cache_address.push_back(info.layer_addr);
+    }
+    layer_data_address_.push_back(std::move(layer_cache_address));
+  }
 }
 
 void Context::set_cuda_barrier(std::unique_ptr<ICUDABarrier> &&barrier) {
@@ -64,7 +78,12 @@ ICUDABarrier *Context::cuda_barrier() {
 const WorkerInfo &Context::worker_info() const {
   return worker_info_;
 }
-const std::vector<uint64_t> &Context::layer_data_address() const {
+
+const std::vector<std::vector<LayerInfo>> &Context::all_layer_infos() const {
+  return all_layer_infos_;
+}
+
+const std::vector<std::vector<uint64_t>> &Context::layer_data_address() const {
   return layer_data_address_;
 }
 
@@ -80,9 +99,10 @@ uint32_t Context::layer_num_blocks() const {
   return worker_info_.layer_num_blocks;
 }
 
-size_t Context::block_size() const {
-  return worker_info_.block_size;
+const std::vector<size_t> &Context::block_sizes() const {
+  return worker_info_.block_sizes;
 }
+
 const SupportTransferProtocols &Context::support_protocols() const {
   return transfer_protos_;
 }

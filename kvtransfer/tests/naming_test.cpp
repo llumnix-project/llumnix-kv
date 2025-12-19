@@ -24,9 +24,8 @@ TEST(NamingTest, TestShmNaming) {
   EXPECT_FALSE(info.has_value());
   Context ctx("1", 1);
   ctx.set_tp(2, 0);
-  ctx.set_block_params(512, 128, 8);
+  ctx.set_block_params({512}, {128}, 8);
   SupportTransferProtocols protocols;
-  protocols.set_support(TransferProtocol::Kind::CUDA_IPC);
   protocols.set_support(TransferProtocol::Kind::RDMA_DIRECT);
   auto worker_info = ctx.worker_info();
   worker_info.transfer_protocols = protocols.value();
@@ -40,11 +39,10 @@ TEST(NamingTest, TestShmNaming) {
   EXPECT_EQ(worker_info.worker_id, info_opt->worker_id);
   EXPECT_EQ(worker_info.tp_size, info_opt->tp_size);
   EXPECT_EQ(worker_info.worker_tp_rank, info_opt->worker_tp_rank);
-  EXPECT_EQ(worker_info.block_size, info_opt->block_size);
-  EXPECT_EQ(worker_info.token_size, info_opt->token_size);
+  EXPECT_EQ(worker_info.block_sizes, info_opt->block_sizes);
+  EXPECT_EQ(worker_info.token_sizes, info_opt->token_sizes);
   EXPECT_EQ(worker_info.transfer_protocols, info_opt->transfer_protocols);
   SupportTransferProtocols check_protocol(info_opt->transfer_protocols);
-  EXPECT_TRUE(check_protocol.is_support(TransferProtocol::Kind::CUDA_IPC));
   EXPECT_TRUE(check_protocol.is_support(TransferProtocol::Kind::RDMA_DIRECT));
 }
 
@@ -210,8 +208,8 @@ void worker_naming_test(INamingClient* client) {
   WorkerInfo wi(client->inst_id, 1);
   wi.tp_size = 4;
   wi.worker_tp_rank = 1;
-  wi.block_size = 1024 * 64;
-  wi.token_size = 512;
+  wi.block_sizes = {1024 * 64};
+  wi.token_sizes = {512};
   wi.layer_num_blocks = 10;
   wi.num_layers = 80;
   wi.transfer_protocols = 1;
@@ -242,8 +240,8 @@ void worker_naming_test(INamingClient* client) {
   EXPECT_EQ(wi.worker_id, wii.worker_id);
   EXPECT_EQ(wi.tp_size, wii.tp_size);
   EXPECT_EQ(wi.worker_tp_rank, wii.worker_tp_rank);
-  EXPECT_EQ(wi.block_size, wii.block_size);
-  EXPECT_EQ(wi.token_size, wii.token_size);
+  EXPECT_EQ(wi.block_sizes, wii.block_sizes);
+  EXPECT_EQ(wi.token_sizes, wii.token_sizes);
   EXPECT_EQ(wi.layer_num_blocks, wii.layer_num_blocks);
   EXPECT_EQ(wi.num_layers, wii.num_layers);
   EXPECT_EQ(wi.transfer_protocols, wii.transfer_protocols);

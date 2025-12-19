@@ -36,21 +36,22 @@ class Context : noncopyable {
 
   Context(const InstanceId& inst_name, const WorkerId& worker_id);
   void set_tp(uint32_t tp_size, uint32_t worker_tp_rank);
-  void set_block_params(uint32_t block_size, uint32_t token_size, uint32_t layer_num_blocks);
-  void set_layer_data_address(uint8_t device_id, const std::vector<uint64_t> &layers);
+  void set_block_params(std::vector<size_t> block_sizes, std::vector<size_t> token_sizes, uint32_t layer_num_blocks);
+  void set_layer_info(uint8_t device_id, const std::vector<std::vector<LayerInfo>> &all_layer_infos);
   void set_cuda_barrier(std::unique_ptr<ICUDABarrier> &&);
   void register_protocol(std::unique_ptr<IProtocolContext> &&);
 
   WorkerInfo *worker_info_mutable();
   ICUDABarrier *cuda_barrier();
   [[nodiscard]] const WorkerInfo &worker_info() const;
-  [[nodiscard]] const std::vector<uint64_t> &layer_data_address() const;
+  [[nodiscard]] const std::vector<std::vector<LayerInfo>> &all_layer_infos() const;
+  [[nodiscard]] const std::vector<std::vector<uint64_t>> &layer_data_address() const;
   [[nodiscard]] int device_id() const;
   [[nodiscard]] uint32_t num_layers() const;
   [[nodiscard]] uint32_t layer_num_blocks() const;
   [[nodiscard]] const SupportTransferProtocols& support_protocols() const;
   [[nodiscard]] bool check_transfer_support(TransferProtocol) const;
-  [[nodiscard]] size_t block_size() const;
+  [[nodiscard]] const std::vector<size_t> &block_sizes() const;
   template<class T>
   T* get_protocol_ctx(const TransferProtocol &t) {
     auto ret = protocol_ctxs_.find(t.type);
@@ -65,7 +66,8 @@ class Context : noncopyable {
   int device_id_{-1};
   WorkerInfo worker_info_;
   SupportTransferProtocols transfer_protos_;
-  std::vector<uint64_t> layer_data_address_;
+  std::vector<std::vector<LayerInfo>> all_layer_infos_;
+  std::vector<std::vector<uint64_t>> layer_data_address_;
   std::unique_ptr<ICUDABarrier> cuda_barrier_;
   std::unordered_map<TransferProtocol::Kind, std::unique_ptr<IProtocolContext>> protocol_ctxs_;
 };

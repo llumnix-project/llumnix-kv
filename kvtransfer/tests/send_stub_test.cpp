@@ -89,7 +89,7 @@ class FakeChannel : public IChannel {
   uint32_t dst_worker_id;
   std::queue<Message> q;
   std::shared_ptr<std::atomic<int>> flush_cnt = std::make_shared<std::atomic<int>>(0);
-  std::vector<IpcBlock>* data_;
+  std::vector<std::vector<IpcBlock>>* data_;
 
   FakeChannel() : dst_inst_id("0"), dst_worker_id(INVALID_INST_WORKER_ID), q() {};
   void connect(const WorkerInfo &info) override {
@@ -97,17 +97,21 @@ class FakeChannel : public IChannel {
     dst_worker_id = info.worker_id;
   }
 
-  void register_data(std::vector<IpcBlock>& data, TPKind) override {
+  void register_data(std::vector<std::vector<IpcBlock>>& data, TPKind) override {
     this->data_ = &data;
-    merge_interval(data);
+    for (auto &tensor_data : data) {
+      merge_interval(tensor_data);
+    }
   }
 
   void send_data(size_t layer_idx) override {
-    for (const auto &[src_offset, dst_offset, length] : *this->data_) {
-      if (length > 0) {
-        Message msg(dst_inst_id, dst_worker_id);
-        msg.set_data(layer_idx, src_offset, dst_offset, length);
-        q.push(msg);
+    for (const auto &tensor_data : *this->data_) {
+      for (const auto &[src_offset, dst_offset, length] : tensor_data) {
+        if (length > 0) {
+          Message msg(dst_inst_id, dst_worker_id);
+          msg.set_data(layer_idx, src_offset, dst_offset, length);
+          q.push(msg);
+        }
       }
     }
   }
@@ -130,7 +134,7 @@ class ProxyChannel : public IChannel {
   void connect(const WorkerInfo &dst_info) override {
     ch_->connect(dst_info);
   }
-  void register_data(std::vector<IpcBlock>& data, TPKind k) override {
+  void register_data(std::vector<std::vector<IpcBlock>>& data, TPKind k) override {
     ch_->register_data(data, k);
   }
   void send_data(size_t layer_idx) override {
@@ -211,16 +215,16 @@ static void test_parse_block_generate(int p_rank, int d_rank) {
   auto p_info = WorkerInfo("0", 0);
   p_info.tp_size = 16;
   p_info.worker_tp_rank = p_rank;
-  p_info.token_size = 2 * (kv_heads / p_info.tp_size) * head_dim * sizeof(uint16_t);
-  p_info.block_size = p_info.token_size * ntpb;
-  std::cout << "p_info.token_size=" << p_info.token_size << " p_info.block_size=" << p_info.block_size << std::endl;
+  p_info.token_sizes = {2 * (kv_heads / p_info.tp_size) * head_dim * sizeof(uint16_t)};
+  p_info.block_sizes = {p_info.token_sizes[0] * ntpb};
+  std::cout << "p_info.token_size=" << p_info.token_sizes[0] << " p_info.block_size=" << p_info.block_sizes[0] << std::endl;
 
   auto d_info = WorkerInfo("1", 0);
   d_info.tp_size = 4;
   d_info.worker_tp_rank = d_rank;
-  d_info.token_size = 2 * (kv_heads / d_info.tp_size) * head_dim * sizeof(uint16_t);
-  d_info.block_size = d_info.token_size * ntpb;
-  std::cout << "d_info.token_size=" << d_info.token_size << " d_info.block_size=" << d_info.block_size << std::endl;
+  d_info.token_sizes = {2 * (kv_heads / d_info.tp_size) * head_dim * sizeof(uint16_t)};
+  d_info.block_sizes = {d_info.token_sizes[0] * ntpb};
+  std::cout << "d_info.token_size=" << d_info.token_sizes[0] << " d_info.block_size=" << d_info.block_sizes[0] << std::endl;
 
   auto fbc = std::make_unique<FakeChannel>();
   fbc->connect(d_info);
@@ -419,16 +423,16 @@ static void dgtp_test_parse_block_generate(int p_rank, int d_rank) {
   auto p_info = WorkerInfo("0", 0);
   p_info.tp_size = 4;
   p_info.worker_tp_rank = p_rank;
-  p_info.token_size = 2 * (kv_heads / p_info.tp_size) * head_dim * sizeof(uint16_t);
-  p_info.block_size = p_info.token_size * ntpb;
-  std::cout << "p_info.token_size=" << p_info.token_size << " p_info.block_size=" << p_info.block_size << std::endl;
+  p_info.token_sizes = {2 * (kv_heads / p_info.tp_size) * head_dim * sizeof(uint16_t)};
+  p_info.block_sizes = {p_info.token_sizes[0] * ntpb};
+  std::cout << "p_info.token_size=" << p_info.token_sizes[0] << " p_info.block_size=" << p_info.block_sizes[0] << std::endl;
 
   auto d_info = WorkerInfo("1", 0);
   d_info.tp_size = 16;
   d_info.worker_tp_rank = d_rank;
-  d_info.token_size = 2 * (kv_heads / d_info.tp_size) * head_dim * sizeof(uint16_t);
-  d_info.block_size = d_info.token_size * ntpb;
-  std::cout << "d_info.token_size=" << d_info.token_size << " d_info.block_size=" << d_info.block_size << std::endl;
+  d_info.token_sizes = {2 * (kv_heads / d_info.tp_size) * head_dim * sizeof(uint16_t)};
+  d_info.block_sizes = {d_info.token_sizes[0] * ntpb};
+  std::cout << "d_info.token_size=" << d_info.token_sizes[0] << " d_info.block_size=" << d_info.block_sizes[0] << std::endl;
 
   auto fbc = std::make_unique<FakeChannel>();
   fbc->connect(d_info);
@@ -619,14 +623,14 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
   uint32_t bs = 16 * KB; // block byte size
   uint32_t ts = KB;  // token byte size
   WorkerInfo src_info("0", 0);
-  src_info.block_size = bs;
-  src_info.token_size = ts;
+  src_info.block_sizes = {bs};
+  src_info.token_sizes = {ts};
   src_info.layer_num_blocks = 8;
   size_t src_half_layer_size = src_info.layer_num_blocks * bs / 2;
 
   WorkerInfo dst_info("1", 0);
-  dst_info.block_size = bs;
-  dst_info.token_size = ts;
+  dst_info.block_sizes = {bs};
+  dst_info.token_sizes = {ts};
   dst_info.layer_num_blocks = 16;
   size_t dst_half_layer_size = dst_info.layer_num_blocks * bs / 2;
 
@@ -635,8 +639,12 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
   auto flush_cnt = fbc->flush_cnt;
   auto q = &fbc->q;
   Context ctx("0", 1);
-  ctx.set_block_params(bs, ts, 8);
-  ctx.set_layer_data_address(0, {0, 8 * bs});
+  ctx.set_block_params({bs}, {ts}, 8);
+  std::vector<std::vector<LayerInfo>> all_layer_infos = {
+    {LayerInfo(ts, bs, 0)},
+    {LayerInfo(ts, bs, 8 * bs)}
+  };
+  ctx.set_layer_info(0, all_layer_infos);
   uint32_t num_layers = 2;
   auto naming = std::make_shared<FakeNamingWorkerClient>(2, dst_info);
   auto tx = KvSendStub("1", 0, src_info, 0, num_layers, std::make_unique<FakeChannelFactory>(fbc.get()), naming);
@@ -1008,7 +1016,7 @@ class MockChannel : public IChannel {
  public:
   MockChannel() = default;
   MOCK_METHOD(void, connect, (const WorkerInfo &dst_info), (override));
-  MOCK_METHOD(void, register_data, ((std::vector<IpcBlock>& data), TPKind kind), (override));
+  MOCK_METHOD(void, register_data, ((std::vector<std::vector<IpcBlock>>& data), TPKind kind), (override));
   MOCK_METHOD(void, flush, (std::string& out), (override));
   MOCK_METHOD(void, send_data, (size_t layer_idx), (override));
   MOCK_METHOD(void, send_notification, (const std::vector<const ReqSendTask*>& reqs), (override));
@@ -1021,16 +1029,20 @@ TEST(SendStubTest, UseMockChannel) {
   uint32_t bs = 16 * KB;
   uint32_t ts = KB;
   WorkerInfo src_info("0", 0);
-  src_info.block_size = bs;
-  src_info.token_size = ts;
+  src_info.block_sizes = {bs};
+  src_info.token_sizes = {ts};
 
   WorkerInfo dst_info("1", 0);
-  dst_info.block_size = bs;
-  dst_info.token_size = ts;
+  dst_info.block_sizes = {bs};
+  dst_info.token_sizes = {ts};
 
   Context ctx("0", 1);
-  ctx.set_block_params(bs, ts, 8);
-  ctx.set_layer_data_address(0, {0, 8 * bs});
+  ctx.set_block_params({bs}, {ts}, 8);
+  std::vector<std::vector<LayerInfo>> all_layer_infos = {
+    {LayerInfo(ts, bs, 0)},
+    {LayerInfo(ts, bs, 8 * bs)}
+  };
+  ctx.set_layer_info(0, all_layer_infos);
   uint32_t num_layers = 2;
 
   auto step_0 = std::make_shared<Step>(0);
@@ -1041,9 +1053,10 @@ TEST(SendStubTest, UseMockChannel) {
   task.tasks.emplace_back(req0p, 0, 8, false);
   reqs.push_back(&req0);
   IpcBlock expect_data(0, 4 * bs, 8 * ts);
+  std::vector<std::vector<IpcBlock>> expect_datas = {{expect_data}};
 
   MockChannel channel;
-  EXPECT_CALL(channel, register_data(ElementsAre(expect_data), Eq(TPKind::PEQD))).Times(1);
+  EXPECT_CALL(channel, register_data(ElementsAre(ElementsAre(expect_data)), Eq(TPKind::PEQD))).Times(1);
   EXPECT_CALL(channel, send_data(Eq(0))).Times(1);
   EXPECT_CALL(channel, send_data(Eq(1))).Times(1);
   EXPECT_CALL(channel, flush(_)).Times(1);
@@ -1164,14 +1177,14 @@ public:
   }
 
   void connect(const WorkerInfo &dst_info) {}
-  void register_data(std::vector<IpcBlock>& data, TPKind kind) override {
+  void register_data(std::vector<std::vector<IpcBlock>>& data, TPKind kind) override {
     *register_data_called_ = true;
     if (ch_id_ == 0) {
     } else if (ch_id_ == 1) {
       IpcBlock expect_data(0, 4 * bs, 8 * ts);
-      std::vector<IpcBlock> expect_datas;
-      expect_datas.emplace_back(expect_data);
-      EXPECT_EQ(data, expect_datas);
+      EXPECT_EQ(data.size(), 1);
+      EXPECT_EQ(data[0].size(), 1);
+      EXPECT_EQ(data[0][0], expect_data);
     } else {
       EXPECT_TRUE(false);
     }
@@ -1233,16 +1246,20 @@ TEST(SendStubTest, FaultTolerantTest) {
     return ;
   }
   WorkerInfo src_info("0", 0);
-  src_info.block_size = bs;
-  src_info.token_size = ts;
+  src_info.block_sizes = {bs};
+  src_info.token_sizes = {ts};
 
   WorkerInfo dst_info("1", 0);
-  dst_info.block_size = bs;
-  dst_info.token_size = ts;
+  dst_info.block_sizes = {bs};
+  dst_info.token_sizes = {ts};
 
   Context ctx("0", 1);
-  ctx.set_block_params(bs, ts, 8);
-  ctx.set_layer_data_address(0, {0, 8 * bs});
+  ctx.set_block_params({bs}, {ts}, 8);
+  std::vector<std::vector<LayerInfo>> all_layer_infos = {
+    {LayerInfo(ts, bs, 0)},
+    {LayerInfo(ts, bs, 8 * bs)}
+  };
+  ctx.set_layer_info(0, all_layer_infos);
   uint32_t num_layers = 2;
 
   FTTCF fttcf;
@@ -1317,16 +1334,20 @@ TEST(SendStubTest, FaultTolerantTest) {
 
 TEST(SendStubTest, CreateChannelFaultTolerantTest) {
   WorkerInfo src_info("0", 0);
-  src_info.block_size = bs;
-  src_info.token_size = ts;
+  src_info.block_sizes = {bs};
+  src_info.token_sizes = {ts};
 
   WorkerInfo dst_info("1", 0);
-  dst_info.block_size = bs;
-  dst_info.token_size = ts;
+  dst_info.block_sizes = {bs};
+  dst_info.token_sizes = {ts};
 
   Context ctx("0", 1);
-  ctx.set_block_params(bs, ts, 8);
-  ctx.set_layer_data_address(0, {0, 8 * bs});
+  ctx.set_block_params({bs}, {ts}, 8);
+  std::vector<std::vector<LayerInfo>> all_layer_infos = {
+    {LayerInfo(ts, bs, 0)},
+    {LayerInfo(ts, bs, 8 * bs)}
+  };
+  ctx.set_layer_info(0, all_layer_infos);
   uint32_t num_layers = 2;
 
   FTTCF fttcf;

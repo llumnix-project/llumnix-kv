@@ -21,24 +21,29 @@ __global__ void clientTestKernel(char *ptr, int sz, char val) {
 
 class FakeChannel: public IChannel {
  public:
-  const std::vector<uint64_t> src_layer;
-  const std::vector<uint64_t> dst_layer;
+  const std::vector<std::vector<uint64_t>> src_layers;
+  const std::vector<std::vector<uint64_t>> dst_layers;
   std::queue<std::string> *notifies;
-  std::vector<IpcBlock>* data_;
+  std::vector<std::vector<IpcBlock>>* data_;
 
-  FakeChannel(Context *ctx, const std::vector<uint64_t> &dst, std::queue<std::string> *n) :
-    src_layer(ctx->layer_data_address()), dst_layer(dst), notifies(n) {}
+  FakeChannel(Context *ctx, const std::vector<std::vector<uint64_t>> &dst, std::queue<std::string> *n) :
+    src_layers(ctx->layer_data_address()), dst_layers(dst), notifies(n) {}
   void connect(const WorkerInfo &dst_info) override {};
-  void register_data(std::vector<IpcBlock>& data, TPKind) override {
+  void register_data(std::vector<std::vector<IpcBlock>>& data, TPKind) override {
     this->data_ = &data;
   }
   void send_data(size_t layer_index) override {
-    for(const auto& b: *this->data_) {
-      auto src_layer_ptr = reinterpret_cast<const char *>(src_layer[layer_index]);
-      auto src_ptr = src_layer_ptr + b.src_offset;
-      auto dst_layer_ptr = reinterpret_cast<char *>(dst_layer[layer_index]);
-      auto dst_ptr = dst_layer_ptr + b.dst_offset;
-      cuda_d2h_mem_copy(dst_ptr, src_ptr, b.length);
+    for(size_t tensor_index = 0; tensor_index < this->data_->size(); ++tensor_index) {
+      const auto& src_layer = src_layers[layer_index];
+      const auto& dst_layer = dst_layers[layer_index];
+      const auto& tensor_data = (*this->data_)[tensor_index];
+      for(const auto& b: tensor_data) {
+        auto src_layer_ptr = reinterpret_cast<const char *>(src_layer[tensor_index]);
+        auto src_ptr = src_layer_ptr + b.src_offset;
+        auto dst_layer_ptr = reinterpret_cast<char *>(dst_layer[tensor_index]);
+        auto dst_ptr = dst_layer_ptr + b.dst_offset;
+        cuda_d2h_mem_copy(dst_ptr, src_ptr, b.length);
+      }
     }
   };
   void send_notification(const std::vector<const ReqSendTask*>& reqs) override {
@@ -52,14 +57,14 @@ class FakeChannel: public IChannel {
 
 class FakeChannelFactory : public IChannelFactory {
   Context* const ctx_;
-  std::vector<uint64_t> dst_layer_;
+  std::vector<std::vector<uint64_t>> dst_layers_;
   std::queue<blade_llm::RequestId>* notifies_;
 public:
-  FakeChannelFactory(Context *ctx, std::vector<uint64_t> dst, std::queue<blade_llm::RequestId>* n):
-    ctx_(ctx), dst_layer_(std::move(dst)), notifies_(n) {}
+  FakeChannelFactory(Context *ctx, const std::vector<std::vector<uint64_t>> &dst, std::queue<blade_llm::RequestId>* n):
+    ctx_(ctx), dst_layers_(dst), notifies_(n) {}
 
   Channel create(const WorkerInfo&) override {
-    return std::make_unique<FakeChannel>(ctx_, dst_layer_, notifies_);
+    return std::make_unique<FakeChannel>(ctx_, dst_layers_, notifies_);
   }
 };
 
@@ -74,25 +79,25 @@ public:
     WorkerInfo dst_info(id, wid);
     dst_info.tp_size = 1;
     dst_info.worker_tp_rank = 0;
-    dst_info.block_size =  16 * KB;
-    dst_info.token_size = KB;
+    dst_info.block_sizes = {16 * KB};
+    dst_info.token_sizes = {KB};
     return dst_info;
   }
 };
 
 class FakeSendStubFactory : public ISendStubFactory {
  public:
-  const std::vector<uint64_t> dst_layer;
+  const std::vector<std::vector<uint64_t>> dst_layers;
   Context *ctx;
   std::queue<std::string> *notifies;
   std::shared_ptr<FakeNamingWorkerClient> naming_ = std::make_shared<FakeNamingWorkerClient>();
 
-  FakeSendStubFactory(Context *ctx, const std::vector<uint64_t> &dst, std::queue<std::string> &n):
-    ctx(ctx), dst_layer(dst), notifies(&n) {}
+  FakeSendStubFactory(Context *ctx, const std::vector<std::vector<uint64_t>> &dst, std::queue<std::string> &n):
+    ctx(ctx), dst_layers(dst), notifies(&n) {}
   SendStub create_stub(const InstanceId& i, WorkerId w, uint32_t start_layer, uint32_t num_layers,
                        std::optional<TransferProtocol> p, const std::optional<std::string> &) override {
     LOG(INFO) << "Create SendStub";
-    auto cf = std::make_unique<FakeChannelFactory>(ctx, dst_layer, notifies);
+    auto cf = std::make_unique<FakeChannelFactory>(ctx, dst_layers, notifies);
     return std::make_unique<KvSendStub>(i, w, ctx->worker_info(), start_layer, num_layers, std::move(cf), naming_);
   }
 };
@@ -121,24 +126,38 @@ TEST(KVTransferClientTest, TestKernelSyncAndDataTransfer) {
   cudaMalloc(&layer_1, data_size);
   cudaMemset(layer_0, 0, data_size);
   cudaMemset(layer_1, 0, data_size);
-  std::vector<uint64_t> device_layer_addrs;
-  device_layer_addrs.push_back(reinterpret_cast<uint64_t>(layer_0));
-  device_layer_addrs.push_back(reinterpret_cast<uint64_t>(layer_1));
+  std::vector<std::vector<uint64_t>> device_layer_addrs;
+  std::vector<uint64_t> layer_0_addrs = {reinterpret_cast<uint64_t>(layer_0)};
+  std::vector<uint64_t> layer_1_addrs = {reinterpret_cast<uint64_t>(layer_1)};
+  device_layer_addrs.push_back(layer_0_addrs);
+  device_layer_addrs.push_back(layer_1_addrs);
 
   auto * host_layer_0 = malloc(data_size);
   auto * host_layer_1 = malloc(data_size);
   memset(host_layer_0, 0, data_size);
   memset(host_layer_1, 0, data_size);
-  std::vector<uint64_t> host_layer_addrs;
-  host_layer_addrs.push_back(reinterpret_cast<uint64_t>(host_layer_0));
-  host_layer_addrs.push_back(reinterpret_cast<uint64_t>(host_layer_1));
+  std::vector<std::vector<uint64_t>> host_layer_addrs;
+  std::vector<uint64_t> host_layer_0_addrs = {reinterpret_cast<uint64_t>(host_layer_0)};
+  std::vector<uint64_t> host_layer_1_addrs = {reinterpret_cast<uint64_t>(host_layer_1)};
+  host_layer_addrs.push_back(host_layer_0_addrs);
+  host_layer_addrs.push_back(host_layer_1_addrs);
   std::vector<uint32_t> dst_blocks{4, 5, 6, 7};
 
   auto ctx = std::make_unique<Context>("1",  0);
   ctx->set_tp(1, 0);
-  ctx->set_layer_data_address(0, device_layer_addrs);
-  auto block_size = 16 * KB;
-  ctx->set_block_params(block_size, KB, 128);
+
+  std::vector<std::vector<LayerInfo>> all_layer_infos;
+  for (auto layer: device_layer_addrs){ // each layer
+    std::vector<LayerInfo> layer_infos;
+    for(auto tensor_addr: layer){ // each cache tensor of each layer
+      auto layer_info = LayerInfo(KB, 16 * KB, tensor_addr);
+      layer_infos.emplace_back(std::move(layer_info));
+    }
+    all_layer_infos.emplace_back(std::move(layer_infos));
+  }
+  ctx->set_layer_info(0, all_layer_infos);
+  uint32_t block_size = 16 * KB;
+  ctx->set_block_params({block_size}, {KB}, 128);
   ctx->set_cuda_barrier(std::move(cu_barrier));
 
   std::queue<RequestId> notifies;

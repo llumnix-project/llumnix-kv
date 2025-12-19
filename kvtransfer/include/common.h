@@ -95,40 +95,55 @@ typedef std::string InstanceId;
 typedef uint32_t WorkerId;
 typedef std::string RequestId;
 
+struct LayerInfo {
+  size_t token_size;
+  uint32_t block_size;
+  uint64_t layer_addr;
+
+  LayerInfo(
+    size_t token_size_, 
+    uint32_t block_size_,
+    uint64_t layer_addr_) :
+  token_size(token_size_),
+  block_size(block_size_),
+  layer_addr(layer_addr_) {}
+};
+
 struct WorkerInfo {
   InstanceId inst_id;
   WorkerId worker_id;
   uint32_t tp_size;
   uint32_t worker_tp_rank;
-  size_t block_size;
-  size_t token_size;
+  std::vector<size_t> block_sizes;
+  std::vector<size_t> token_sizes;
   uint32_t layer_num_blocks{1};
   uint32_t num_layers{1};
   uint8_t transfer_protocols{0};
-  std::string addr;
+  std::string addr; // ip
   std::vector<uint8_t> other_info;
 
+  // todo
   WorkerInfo() :
       worker_id(INVALID_INST_WORKER_ID),
       tp_size(0),
       worker_tp_rank(0),
-      block_size(0),
-      token_size(0) {};
+      block_sizes({}),
+      token_sizes({}) {};
 
   WorkerInfo(const InstanceId& id, const WorkerId &w_id) :
       inst_id(id),
       worker_id(w_id),
       tp_size(1),
       worker_tp_rank(0),
-      block_size(16 * KB),
-      token_size(KB) {};
+      block_sizes({16 * KB}),
+      token_sizes({KB}) {};
 
   WorkerInfo(InstanceId&& inst_id_,
              WorkerId worker_id_,
              uint32_t tp_size_,
              uint32_t worker_tp_rank_,
-             uint32_t block_size_,
-             uint32_t token_size_,
+             std::vector<size_t> block_sizes_,
+             std::vector<size_t> token_sizes_,
              uint32_t layer_num_blocks_,
              uint32_t num_layers_,
              uint32_t protocols) :
@@ -136,8 +151,8 @@ struct WorkerInfo {
       worker_id(worker_id_),
       tp_size(tp_size_),
       worker_tp_rank(worker_tp_rank_),
-      block_size(block_size_),
-      token_size(token_size_),
+      block_sizes(block_sizes_),
+      token_sizes(token_sizes_),
       layer_num_blocks(layer_num_blocks_),
       num_layers(num_layers_),
       transfer_protocols(protocols) {};
@@ -214,6 +229,8 @@ class RequestInfo {
   const WorkerId dst_worker_id;
   const std::optional<std::string> dst_worker_info;
   const RequestId req_id;
+  // 这里的src_blocks/dst_blocks是从vllm传进来的。
+  // 现在对于不同的cache tensor，block id应是一致的
   const std::vector<uint32_t> src_blocks;
   const std::vector<uint32_t> dst_blocks;
  private:

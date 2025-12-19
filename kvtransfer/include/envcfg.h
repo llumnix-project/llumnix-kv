@@ -29,6 +29,10 @@ constexpr int FLASH_CACHE_SHAPE = 2;
 // (2, num_blocks, block_size, num_kv_heads, head_dim)
 // full attn same as FLASH_CACHE_SHAPE, but have gdn layers
 constexpr int QWEN3_NEXT_FLASH_CACHE_SHAPE = 3;
+// Each layer contains two tensors: 
+// k tensor for select and mla tensor for attention.
+constexpr int DPSK_V32_SPARSE_MLA_SHAPE = 4;
+
 int env_cache_shape();
 
 constexpr int SEND_DONE_HEAD_KIND = 1;
