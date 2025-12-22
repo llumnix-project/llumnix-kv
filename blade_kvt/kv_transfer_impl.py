@@ -353,7 +353,7 @@ class KVTransferServer:
         if isinstance(block_bytes, int) and isinstance(token_bytes, int):
             block_bytes = [block_bytes]
             token_bytes = [token_bytes]
-            layers = [layers]
+            layers = [[layer] for layer in layers]
         else:
             assert isinstance(block_bytes, list) and isinstance(token_bytes, list)
 

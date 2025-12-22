@@ -171,7 +171,7 @@ struct BarexCtx : public noncopyable {
 
   std::vector<std::vector<BarexMRGuard>> layer_mrs_;
   // may be null
-  std::vector<std::unique_ptr<GdrMemDesc>> layer_gdrcpy_mem_;
+  std::vector<std::vector<std::unique_ptr<GdrMemDesc>>> layer_gdrcpy_mem_;
 };
 
 // 每层layer最多包含的cache tensor数量
@@ -201,9 +201,9 @@ struct CliBarexCtx : public BarexCtx {
 
   // rpc
   std::vector<RDMAMemHandle> get_mem_handles(std::shared_ptr<accl::barex::XChannel>& dst) const;
-  // uint32_t get_remote_crc(std::shared_ptr<accl::barex::XChannel>& dst,
-  //                         const std::vector<IpcBlock>* data,
-  //                         uint32_t lcrc);
+  uint32_t get_remote_crc(std::shared_ptr<accl::barex::XChannel>& dst,
+                          const std::vector<std::vector<IpcBlock>>* data,
+                          uint32_t lcrc);
 
  private:
    struct RpcCtxCb : public accl::barex::XChannelCallback {
@@ -334,8 +334,7 @@ class RDMAServer : public ITransferServer {
 
    private:
     void resp_mem_handles(std::shared_ptr<accl::barex::XChannel>& channel, uint64_t reqid, char *in_buf, size_t len);
-    // later
-    // void resp_remote_crc(std::shared_ptr<accl::barex::XChannel>& channel, uint64_t reqid, char *in_buf, size_t len);
+    void resp_remote_crc(std::shared_ptr<accl::barex::XChannel>& channel, uint64_t reqid, char *in_buf, size_t len);
   };
 
  private:
