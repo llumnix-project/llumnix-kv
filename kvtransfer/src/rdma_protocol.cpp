@@ -538,7 +538,7 @@ BarexCtx::BarexCtx(std::string mp_name,
       // 虽然注释上提到 RegUserMr 要求对齐. 但钉钉确认了, 只要是 cudaMalloc
       // 返回的地址都可以. llx: layer_blk_size of each tensor in one layer may
       // not be the same so we need to register each tensor as a separate mr
-      auto layer_blk_size = info.block_size * ctx->layer_num_blocks();
+      auto layer_blk_size = info.block_size * ctx->layer_num_blocks(); // size_t * uint32_t = size_t
       auto result = self.mp_->RegUserMr(out, layer_blk_p, layer_blk_size, GPU,
                                         ctx->device_id());
       RTASSERT(result == accl::barex::BAREX_SUCCESS);
@@ -1071,7 +1071,7 @@ void RDMAChannel::connect(const WorkerInfo &dst_info) {
   self.port_ = std::stoi(port_str);
   for (auto &block_size : dst_info.block_sizes) {
     dst_layer_blk_sizes_.emplace_back(
-      dst_info.layer_num_blocks * size_t(block_size)
+      dst_info.layer_num_blocks * block_size // uint32_t * size_t = size_t
     );
   }
   dst_layer_num_ = dst_info.num_layers;

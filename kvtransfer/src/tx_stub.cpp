@@ -413,7 +413,6 @@ static void vllm_parse_block_send_p_gt_d(
   const WorkerInfo *d_info,  // decode
   const ReqSendTask *task,
   std::vector<std::vector<IpcBlock>> &send_blocks) {
-  // p_info->block_size: uint32_t 类型, 需要先转 size_t 不然仍有溢出风险.
   auto const validranks = env_p_valid_ranks();
   if (!validranks[p_info->worker_tp_rank]) {
     // kv 复制 case: 仅有效 worker tp rank 参与发送.

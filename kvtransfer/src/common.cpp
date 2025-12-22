@@ -47,8 +47,9 @@ std::vector<uint8_t> WorkerInfo::to_bytes() const {
   tmp[0] = htobe32(worker_id);
   tmp[1] = htobe32(tp_size);
   tmp[2] = htobe32(worker_tp_rank);
-  tmp[3] = htobe32(block_size);
-  tmp[4] = htobe32(token_size);
+  // use uint32_t to change to bytes
+  tmp[3] = htobe32(static_cast<uint32_t>(block_size));
+  tmp[4] = htobe32(static_cast<uint32_t>(token_size));
   tmp[5] = htobe32(layer_num_blocks);
   tmp[6] = htobe32(num_layers);
   tmp[7] = htobe32(transfer_protocols);

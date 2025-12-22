@@ -97,12 +97,12 @@ typedef std::string RequestId;
 
 struct LayerInfo {
   size_t token_size;
-  uint32_t block_size;
+  size_t block_size;
   uint64_t layer_addr;
 
   LayerInfo(
     size_t token_size_, 
-    uint32_t block_size_,
+    size_t block_size_,
     uint64_t layer_addr_) :
   token_size(token_size_),
   block_size(block_size_),
