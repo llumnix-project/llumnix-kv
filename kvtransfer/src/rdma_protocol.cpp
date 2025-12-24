@@ -1489,7 +1489,7 @@ void RDMAChannel::send_data(size_t layer_idx) {
       rwmemp.sg.length = len;
       rwmemp.sg.lkey = src_mr.mr->lkey;
 
-#ifndef NDEBUG
+#if 0
       LOG(INFO) << "Send data: layer_idx=" << layer_idx << ", tensor_cnt=" << tensor_cnt
       << ", src_offset=" << src_offset << ", dst_offset=" << dst_offset << ", len=" << len
       << ", layer_blk_size=" << layer_blk_size << ", dst_layer_blk_size=" << dst_layer_blk_size
