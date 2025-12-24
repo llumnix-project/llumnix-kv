@@ -3,6 +3,7 @@ from setuptools_scm import get_version
 from setuptools_scm.version import get_local_node_and_date
 
 import os
+import re
 import subprocess
 from pathlib import Path
 from shutil import which
@@ -75,11 +76,27 @@ _build_options = ["-DBUILD_TESTS=OFF", "-DBUILD_RDMA=ON", "-DBUILD_PYTHON_BIND=O
 blade_kvt_ext = CMakeExtension("blade_kvt.kvtransfer_ops", src_dir=_kvtransfer_src, build_options=_build_options)
 
 
+def _barex_ver():
+    result = subprocess.run(
+        ["barex_benchmark", "-V"],
+        capture_output=True,
+        text=True,
+        check=True
+    )
+    for line in result.stdout.splitlines():
+        if "Git Message" not in line:
+            continue
+        # line format: printf("Git Message: %s, %s, %s\n", BUILD_BRANCH, BUILD_COMMIT_ID, BUILD_COMMIT);
+        parts = line.split(',')
+        return parts[1].strip()
+    raise RuntimeError(f"barex_ver: failed. {result=}")
+
 def _local_version(version) -> str:
     local_ver = get_local_node_and_date(version)
     version_parts = [local_ver]
     if int(os.environ.get("BLADELLM_CMAKE_DEBUG", 0)):
         version_parts.append('debug')
+    version_parts.append(f"barex.{_barex_ver()}")
     return '.'.join(version_parts)
 
 

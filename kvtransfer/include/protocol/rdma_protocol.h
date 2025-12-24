@@ -111,8 +111,8 @@ class BarexMRGuard : public noncopyable {
   bool const release_; // 若为 true 则使用 ReleaseAndDeregBuffer 否则仅使用 DeregUserMr
  private:
   BarexMRGuard(accl::barex::memp_t &&mr, accl::barex::XSimpleMempool *mp, bool r) noexcept:
-      mr_(std::move(mr)), 
-      mp_(mp), 
+      mr_(std::move(mr)),
+      mp_(mp),
       release_(r) {}
 
  public:
@@ -123,9 +123,9 @@ class BarexMRGuard : public noncopyable {
     return BarexMRGuard(std::move(mr), mp, false);
   }
 
-  BarexMRGuard(BarexMRGuard &&other) noexcept: 
-      mr_(std::move(other.mr_)), 
-      mp_(other.mp_), 
+  BarexMRGuard(BarexMRGuard &&other) noexcept:
+      mr_(std::move(other.mr_)),
+      mp_(other.mp_),
       release_(other.release_) {
     other.mp_ = nullptr;
   }
@@ -260,7 +260,7 @@ class RDMAChannel : public IChannel, public noncopyable {
   void connect(const WorkerInfo &dst_info) override;
 
   void register_data(std::vector<std::vector<IpcBlock>>& data, TPKind kind) override;
-  
+
   void send_data(size_t layer_index) override;
   void flush(std::string& out) override;
   void send_notification(const std::vector<const ReqSendTask*>& reqs) override;
@@ -268,8 +268,6 @@ class RDMAChannel : public IChannel, public noncopyable {
   using IChannel::send_notification;
 
  private:
-  void send_data_pltd(size_t layer_index);
-
   // do real connect.
   void do_init();
   accl::barex::XChannel *ch() noexcept;
@@ -319,7 +317,7 @@ class RDMAServer : public ITransferServer {
    public:
     CtxCallback(ITransferService *s, RDMAServer* v) noexcept:
       ser_(s), server_(v) {}
-      
+
     void OnRecvCall(accl::barex::XChannel *channel,
                     char *in_buf,
                     size_t len,

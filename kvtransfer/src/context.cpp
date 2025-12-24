@@ -35,7 +35,7 @@ void Context::set_block_params(std::vector<size_t> block_sizes, std::vector<size
   for (size_t i = 0; i < block_sizes.size(); i++) {
     auto block_size = block_sizes[i];
     auto token_size = token_sizes[i];
-    assert(block_size >= token_size && block_size % token_size == 0);
+    RTASSERT(block_size % token_size == 0);
   }
   worker_info_.block_sizes = block_sizes;
   worker_info_.token_sizes = token_sizes;
@@ -47,7 +47,7 @@ void Context::set_layer_info(uint8_t device_id, const std::vector<std::vector<La
   device_id_ = (int) device_id;
   worker_info_.num_layers = all_layer_infos.size();
   all_layer_infos_ = all_layer_infos;
-  
+
   // Extract all layer addresses from all_layer_infos_
   layer_data_address_.clear();
   for (const auto &layer_infos : all_layer_infos_) {

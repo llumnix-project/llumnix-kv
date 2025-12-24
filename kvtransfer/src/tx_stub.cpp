@@ -122,7 +122,7 @@ static void parse_block_send_p_eq_d(
   send_blocks.resize(token_sizes.size());
   std::vector<IpcBlock> &per_cache_send_blocks = send_blocks[0];
   do_parse_block_send_p_eq_d(
-    block_sizes[0], token_sizes[0], 
+    block_sizes[0], token_sizes[0],
     task, per_cache_send_blocks
   );
   return;
@@ -150,7 +150,7 @@ static void vllm_parse_block_send_multi_tensor_p_eq_d(
   for (size_t i = 0; i < token_sizes.size(); ++i) {
     std::vector<IpcBlock> &per_cache_send_blocks = send_blocks[i];
     do_parse_block_send_p_eq_d(
-      block_sizes[i], token_sizes[i], 
+      block_sizes[i], token_sizes[i],
       task, per_cache_send_blocks
     );
   }
@@ -183,7 +183,7 @@ static void vllm_parse_block_send_p_eq_d(
   size_t const k_block_size = kv_block_size / 2;
   assert(2 * k_token_size == kv_token_size);
   assert(2 * k_block_size == kv_block_size);
-  
+
   size_t const src_layer_size = k_block_size * src_worker_info->layer_num_blocks;
   size_t const dst_layer_size = k_block_size * dst_worker_info->layer_num_blocks;
   // src_layer_size, dst_layer_size 并不一定要相等.
@@ -230,7 +230,7 @@ static void vllm_parse_hybrid_block_send_p_eq_d(
     send_blocks.resize(kv_token_sizes.size());
     std::vector<IpcBlock> &per_cache_send_blocks = send_blocks[0];
     do_parse_hybrid_block_send_p_eq_d(
-      kv_block_sizes[0], kv_token_sizes[0], 
+      kv_block_sizes[0], kv_token_sizes[0],
       task, per_cache_send_blocks
     );
     return ;
@@ -393,7 +393,7 @@ static void do_multi_tensor_parse_block_send(
       per_cache_send_blocks
     );
     const size_t sbsize_after = per_cache_send_blocks.size();
-  
+
     per_cache_send_blocks.reserve(per_cache_send_blocks.size() + sbsize_after - sbsize);
     for (size_t idx = sbsize; idx < sbsize_after; ++idx) {
       const auto& sb = per_cache_send_blocks[idx];
@@ -449,7 +449,7 @@ static void vllm_parse_block_send_p_gt_d(
   const uint32_t ntpb = p_block_size / p_token_size;
   assert(ntpb * p_token_size == p_block_size);
   assert(ntpb * d_token_size == d_block_size);
-  
+
   send_blocks.resize(p_token_sizes.size());
   std::vector<IpcBlock> &per_cache_send_blocks = send_blocks[0];
   size_t sb_idx = per_cache_send_blocks.size();  // sb: send block~
@@ -471,37 +471,43 @@ static void vllm_parse_block_send_p_gt_d(
   return;
 }
 
+static void parse_block_send_p_gt_d_dpsk(
+  const WorkerInfo *p_info,  // src
+  const WorkerInfo *d_info,  // dst
+  const ReqSendTask *task,
+  std::vector<std::vector<IpcBlock>> &send_blocks) {
+  assert(p_info->token_sizes == d_info->token_sizes);
+  // 此时表明 kvcache 在各个 P rank 之间是完全一样的.
+  // 只需要 tp rank=0 的 worker 传输 kvcache 即可.
+  // 后续这里可以让所有 worker 都参与进来, 每个 worker 传 1 部分.
+  if (p_info->worker_tp_rank != 0) {
+    return ;
+  }
+
+  assert(d_info->worker_tp_rank == 0);
+  // PD Block 包含的token数需要一致
+  assert(p_info->block_sizes == d_info->block_sizes);
+  auto &token_sizes = p_info->token_sizes;
+  auto &block_sizes = p_info->block_sizes;
+  assert(token_sizes.size() == block_sizes.size());
+  // Should only have one cache in one layer for RAGGED_FLASH_CACHE_SHAPE.
+  assert(token_sizes.size() == 1);
+  assert(block_sizes.size() == 1);
+
+  send_blocks.resize(token_sizes.size());
+  std::vector<IpcBlock> &per_cache_send_blocks = send_blocks[0];
+  do_parse_block_send_p_eq_d(
+    block_sizes[0], token_sizes[0], task, per_cache_send_blocks
+  );
+  return;
+}
+
 // This is for bladellm/vllm dpsk
 static void parse_block_send_p_gt_d(
   const WorkerInfo *p_info,  // src
   const WorkerInfo *d_info,  // dst
   const ReqSendTask *task,
   std::vector<std::vector<IpcBlock>> &send_blocks) {
-  if (p_info->token_sizes == d_info->token_sizes) {
-    // 此时表明 kvcache 在各个 P rank 之间是完全一样的.
-    // 只需要 tp rank=0 的 worker 传输 kvcache 即可.
-    // 后续这里可以让所有 worker 都参与进来, 每个 worker 传 1 部分.
-    if (p_info->worker_tp_rank != 0) {
-      return ;
-    }
-
-    assert(d_info->worker_tp_rank == 0);
-    // PD Block 包含的token数需要一致
-    assert(p_info->block_sizes == d_info->block_sizes);
-    auto &token_sizes = p_info->token_sizes;
-    auto &block_sizes = p_info->block_sizes;
-    assert(token_sizes.size() == block_sizes.size());
-    // Should only have one cache in one layer for RAGGED_FLASH_CACHE_SHAPE.
-    assert(token_sizes.size() == 1);
-    assert(block_sizes.size() == 1);
-
-    send_blocks.resize(token_sizes.size());
-    std::vector<IpcBlock> &per_cache_send_blocks = send_blocks[0];
-    do_parse_block_send_p_eq_d(
-      block_sizes[0], token_sizes[0], task, per_cache_send_blocks
-    );
-    return;
-  }
 
   return do_parse_block_send(
     p_info, task->src_blocks(),
@@ -689,7 +695,11 @@ public:
           self.parse_block(&srcinfo, &self.dstinfo.value(), task, self.send_blocks);
         }
         if (!self.send_blocks.empty() && !self.send_blocks[0].empty()) {
-          LOG(INFO) << "KVT tx_stub send block num: " << self.send_blocks.size() * self.send_blocks[0].size();
+#ifndef NDEBUG
+          for (const auto& sb : self.send_blocks) {
+            assert(!sb.empty());
+          }
+#endif
           self.do_send(batch);
         }
       } catch (std::exception& ex) {
@@ -935,8 +945,13 @@ private:
         return;
       }
       if (srcinfo.tp_size > self.dstinfo->tp_size) {
-        self.parse_block = parse_block_send_p_gt_d;
-        self.tpkind = TPKind::PGTD;
+        if (srcinfo.token_sizes == self.dstinfo->token_sizes) {
+          self.parse_block = parse_block_send_p_gt_d_dpsk;
+          self.tpkind = TPKind::PEQD;
+        } else {
+          self.parse_block = parse_block_send_p_gt_d;
+          self.tpkind = TPKind::PGTD;
+        }
         return;
       }
       self.parse_block = parse_block_send_p_lt_d;
@@ -971,11 +986,11 @@ private:
       }
       if (srcinfo.tp_size > self.dstinfo->tp_size) {
         self.parse_block = vllm_parse_block_send_multi_tensor_p_gt_d;
-        self.tpkind = TPKind::PGTD;
+        self.tpkind = TPKind::PEQD;
         return;
       }
       self.parse_block = vllm_parse_block_send_multi_tensor_p_lt_d;
-      self.tpkind = TPKind::PLTD;
+      self.tpkind = TPKind::PEQD;
       return;
 
     }

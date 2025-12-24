@@ -529,11 +529,11 @@ BarexCtx::BarexCtx(std::string mp_name,
 
   self.layer_mrs_.reserve(layer_infos.size());
   self.layer_gdrcpy_mem_.reserve(layer_infos.size());
-  for (auto layer_info : layer_infos) {
+  for (const auto& layer_info : layer_infos) {
     std::vector<BarexMRGuard> layer_mrs;
     std::vector<std::unique_ptr<GdrMemDesc>> layer_gdrcpy_mem;
     layer_gdrcpy_mem.reserve(layer_info.size());
-    for (auto info : layer_info) {
+    for (const auto& info : layer_info) {
       memp_t out;
       auto layer_blk_p = reinterpret_cast<void *>(info.layer_addr);
       // 虽然注释上提到 RegUserMr 要求对齐. 但钉钉确认了, 只要是 cudaMalloc
@@ -760,14 +760,14 @@ uint32_t CliBarexCtx::get_remote_crc(std::shared_ptr<XChannel>& dst, const std::
   assert(!data->empty());
   auto& self = *this;
   uint64_t const reqid = new_id();
-  
+
   // 计算总大小：tensor数量 + 每个tensor的IpcBlock数量 + 所有offset/length对
   uint32_t tensor_cnt = static_cast<uint32_t>(data->size());
   uint32_t total_blocks = 0;
   for (const auto& per_tensor_data : *data) {
     total_blocks += static_cast<uint32_t>(per_tensor_data.size());
   }
-  
+
   // 协议格式: (magic + reqid) + lcrc + tensor_cnt + [tensor0_block_cnt + off1+len1 + off2+len2 + ...] + [tensor1_block_cnt + ...] + ...
   const auto bodysize = sizeof(uint32_t) + // tensor_cnt
                         tensor_cnt * sizeof(uint32_t) + // 每个tensor的block数量
@@ -780,12 +780,12 @@ uint32_t CliBarexCtx::get_remote_crc(std::shared_ptr<XChannel>& dst, const std::
   bufstart += sizeof(uint32_t);
   memcpy(bufstart, &tensor_cnt, sizeof(uint32_t));
   bufstart += sizeof(uint32_t);
-  
+
   for (const auto& per_tensor_data : *data) {
     uint32_t block_cnt = static_cast<uint32_t>(per_tensor_data.size());
     memcpy(bufstart, &block_cnt, sizeof(uint32_t));
     bufstart += sizeof(uint32_t);
-    
+
     for (const auto& sb : per_tensor_data) {
       RTASSERT((bufend - bufstart) >= 16 /* sizeof(uint64_t) * 2 */);
       memcpy(bufstart, &sb.dst_offset, sizeof(uint64_t));
@@ -827,7 +827,7 @@ void RDMAServer::CtxCallback::resp_remote_crc(std::shared_ptr<XChannel>& channel
   inbuf += sizeof(uint32_t);
   memcpy(&tensor_cnt, inbuf, sizeof(uint32_t));
   inbuf += sizeof(uint32_t);
-  
+
   size_t num_tensors_per_layer = layer_mrs.empty() ? 0 : layer_mrs[0].size();
   std::vector<std::vector<std::pair<uint64_t, uint64_t>>> tensor_offlens(tensor_cnt);
 
@@ -842,7 +842,7 @@ void RDMAServer::CtxCallback::resp_remote_crc(std::shared_ptr<XChannel>& channel
       RTASSERT(static_cast<size_t>(inbuf_end - inbuf) >= sizeof(uint32_t));
       memcpy(&block_cnt, inbuf, sizeof(uint32_t));
       inbuf += sizeof(uint32_t);
-      
+
       tensor_offlens[tensor_idx].reserve(block_cnt);
       for (uint32_t i = 0; i < block_cnt; ++i) {
         RTASSERT((inbuf_end - inbuf) >= 16 /* sizeof(uint64_t) * 2 */);
@@ -1066,7 +1066,8 @@ void RDMAServer::start_server(ITransferService *service, Context *ctx) {
     auto &layer_mrs = barex_ctx->layer_mrs()[layer_idx];
     auto &handle = info.handles.emplace_back();
 
-    assert(layer_ptr[layer_idx].size() <= MAX_CACHE_NUM_PER_LAYER);
+    RTASSERT(layer_ptr[layer_idx].size() <= MAX_CACHE_NUM_PER_LAYER);
+    RTASSERT_EQ(layer_ptr[layer_idx].size(), layer_mrs.size());
     // Now only support each layer have same number of cache
     for (size_t cache_idx = 0; cache_idx < layer_ptr[layer_idx].size();
          cache_idx++) {
@@ -1076,7 +1077,7 @@ void RDMAServer::start_server(ITransferService *service, Context *ctx) {
       handle.rkeys[cache_idx] = out.mr->rkey;
     }
   }
-  assert(info.handles.size() == layer_ptr.size());
+  RTASSERT_EQ(info.handles.size(), layer_ptr.size());
 
   get_ip(&info);
   info.port = env_port_base() + winfo->worker_id;
@@ -1121,6 +1122,7 @@ void RDMAChannel::connect(const WorkerInfo &dst_info) {
   }
   dst_layer_num_ = dst_info.num_layers;
   assert(self.dst_layer_num_ == self.ctx_->layer_mrs().size());
+  assert(dst_layer_blk_sizes_.size() == self.ctx_->layer_mrs().at(0).size());
 }
 
 [[nodiscard]] static std::future<BarexChannel>
@@ -1368,11 +1370,6 @@ void RDMAChannel::register_data(std::vector<std::vector<IpcBlock>>& data, TPKind
   self.kind_ = kind;
   self.do_init();
 
-  // assum each tensor from one layer contains same numbers of blocks
-  // [/*tensor_0 blks*/[b1,b2], /*tensor_1 blks*/[b1,b2], /*tensor_2 blks*/[b1,b2]]
-  size_t const dataperch = cdiv(data.size() * data[0].size(), self.chs_.size());
-  assert(dataperch * self.chs_.size() >= data.size());
-  self.dataperch_ = dataperch;
   self.enable_crc_ = env_crc();
   if (self.enable_crc_) {
     self.crc_ = crc32_z(0L, Z_NULL, 0);
@@ -1387,79 +1384,44 @@ void RDMAChannel::register_data(std::vector<std::vector<IpcBlock>>& data, TPKind
   }
 #endif
 
-  // Count total blocks across all tensors
-  size_t total_blocks = 0;
-  for (const auto &tensor_data : data) {
-    total_blocks += tensor_data.size();
-  }
-  self.origin_sb_num_ = total_blocks;
+  self.origin_sb_num_ = 0;
+  self.merged_sb_num_ = 0;
+  self.sb_size_min_ = std::numeric_limits<size_t>::max();
+  self.sb_size_max_ = 0;
+  self.sb_size_total_ = 0;
 
-  if (kind != TPKind::PLTD) {
-    // TPKind::PGTD, TPKind::PEQD
-    // Process each tensor separately and aggregate results
-    size_t min_size = std::numeric_limits<size_t>::max();
-    size_t max_size = 0;
-    size_t total_size = 0;
-    size_t total_cnt = 0;
-
-    for (auto &tensor_data : data) {
-      if (tensor_data.empty())
-        continue;
+  if (kind == TPKind::PEQD) {
+    for (auto& tensor_data : data) {
+      assert(!tensor_data.empty());
+      self.origin_sb_num_ += tensor_data.size();
       auto const [min, max, total, cnt] = merge_interval(tensor_data);
-      if (cnt > 0) {
-        min_size = std::min(min_size, min);
-        max_size = std::max(max_size, max);
-        total_size += total;
-        total_cnt += cnt;
-      }
+      assert(cnt > 0);
+      self.merged_sb_num_ += cnt;
+      self.sb_size_min_ = std::min(self.sb_size_min_, min);
+      self.sb_size_max_ = std::max(self.sb_size_max_, max);
+      self.sb_size_total_ += total;
 
-      // Remove zero-length blocks from this tensor
       auto new_end =
           std::remove_if(tensor_data.begin(), tensor_data.end(),
                          [](const IpcBlock &item) { return item.length == 0; });
       tensor_data.erase(new_end, tensor_data.end());
+      assert(tensor_data.size() == cnt);
     }
-
-    self.merged_sb_num_ = total_cnt;
-    self.sb_size_min_ =
-        (min_size == std::numeric_limits<size_t>::max()) ? 0 : min_size;
-    self.sb_size_max_ = max_size;
-    self.sb_size_total_ = total_size;
-    assert(total_len_debug == self.sb_size_total_);
-    assert(self.merged_sb_num_ <= self.origin_sb_num_);
-    assert(!data.empty());
-    return;
+  } else {
+    assert(data.size() == 1);
+    const auto& tensor_data = data[0];
+    assert(!tensor_data.empty());
+    self.origin_sb_num_ = tensor_data.size();
+    self.merged_sb_num_ = tensor_data.size();
+    self.sb_size_min_ = tensor_data[0].length;
+    self.sb_size_max_ = tensor_data[0].length;
+    self.sb_size_total_ = self.sb_size_min_ * self.origin_sb_num_;
   }
-
-  assert(kind == TPKind::PLTD);
-  // Process each tensor separately and aggregate results
-  size_t min_size = std::numeric_limits<size_t>::max();
-  size_t max_size = 0;
-  size_t total_size = 0;
-  size_t total_cnt = 0;
-
-  for (auto &tensor_data : data) {
-    if (tensor_data.empty())
-      continue;
-    auto const [min, max, total, cnt] = group_by_dst(tensor_data);
-
-    assert(cnt > 0); // should have at least one block
-
-    min_size = std::min(min_size, min);
-    max_size = std::max(max_size, max);
-    total_size += total;
-    total_cnt += cnt;
-  }
-
-  self.merged_sb_num_ = total_cnt;
-  self.sb_size_min_ =
-      (min_size == std::numeric_limits<size_t>::max()) ? 0 : min_size;
-  self.sb_size_max_ = max_size;
-  self.sb_size_total_ = total_size;
   assert(self.merged_sb_num_ > 0);
   assert(self.merged_sb_num_ <= self.origin_sb_num_);
   assert(total_len_debug == self.sb_size_total_);
 
+  self.dataperch_ = cdiv(self.merged_sb_num_, self.chs_.size());
   return;
 }
 
@@ -1483,10 +1445,6 @@ void RDMAChannel::send_data(size_t layer_idx) {
   assert(layer_idx < self.dst_layer_num_);
   assert(self.dst_layer_num_ == self.ctx_->layer_mrs().size());
 
-  if (self.kind_ == TPKind::PLTD) {
-    return self.send_data_pltd(layer_idx);
-  }
-
   auto &dst_layer_handle = self.dst_handles_[layer_idx];
   const auto &data = *self.data_;
   assert(!data.empty());
@@ -1502,14 +1460,14 @@ void RDMAChannel::send_data(size_t layer_idx) {
     assert(tensor_cnt < self.dst_layer_blk_sizes_.size());
     assert(tensor_cnt < dst_layer_handle.ptrs.size());
     assert(tensor_cnt < temp_src_mrs.size());
-    
+
     // 获取当前tensor的CPU指针用于CRC计算
     const Bytef *const tensor_cpu_ptr = get_layer_tensor_cpu_ptr(self.ctx_, layer_idx, tensor_cnt);
     if (tensor_cpu_ptr == nullptr && self.enable_crc_) {
       LOG(WARNING) << "disable crc check. layer_idx=" << layer_idx << ", tensor_cnt=" << tensor_cnt;
       self.enable_crc_ = false;
     }
-    
+
     for (const auto &[src_offset, dst_offset, len] : per_tensor_data) {
       const uint64_t layer_blk_size = self.ctx_->layer_blk_sizes[tensor_cnt];
       const uint64_t dst_layer_blk_size = self.dst_layer_blk_sizes_[tensor_cnt];
@@ -1532,8 +1490,8 @@ void RDMAChannel::send_data(size_t layer_idx) {
       rwmemp.sg.lkey = src_mr.mr->lkey;
 
 #ifndef NDEBUG
-      LOG(INFO) << "Send data: layer_idx=" << layer_idx << ", tensor_cnt=" << tensor_cnt 
-      << ", src_offset=" << src_offset << ", dst_offset=" << dst_offset << ", len=" << len 
+      LOG(INFO) << "Send data: layer_idx=" << layer_idx << ", tensor_cnt=" << tensor_cnt
+      << ", src_offset=" << src_offset << ", dst_offset=" << dst_offset << ", len=" << len
       << ", layer_blk_size=" << layer_blk_size << ", dst_layer_blk_size=" << dst_layer_blk_size
       << ", r_addr=" << reinterpret_cast<uint64_t>(rladdr) << ", sg.addr=" << uint64_t(src_mr.buf);
 #endif
@@ -1561,8 +1519,8 @@ void RDMAChannel::send_data(size_t layer_idx) {
 
 // return send_us
 [[nodiscard]] static std::future<uint64_t> WriteBySgList(
-  XChannel *ch, 
-  uint64_t remote_addr, 
+  XChannel *ch,
+  uint64_t remote_addr,
   uint32_t rkey,
   std::shared_ptr<std::vector<memp_t>> prefills
 ) {
@@ -1596,113 +1554,6 @@ void RDMAChannel::send_data(size_t layer_idx) {
 
   return fut;
 }
-
-void RDMAChannel::send_data_pltd(size_t layer_idx) {
-  RTASSERT(false); // Now pltd is will not be used.
-  auto &self = *this;
-  assert(self.kind_ == TPKind::PLTD);
-  assert(!self.chs_.empty());
-  assert(!self.data_->empty());
-  const auto &input = *self.data_;
-  assert(layer_idx < self.dst_handles_.size());
-  // assert(layer_idx < self.ctx_->layer_blk_sizes.size());
-  const auto &dst_layer_handle = self.dst_handles_[layer_idx];
-  const auto &rkeys = dst_layer_handle.rkeys;
-
-  assert(dst_layer_handle.ptrs.size() == input.size());
-
-  for (size_t cache_idx = 0; cache_idx < dst_layer_handle.ptrs.size();
-       cache_idx++) {
-    RTASSERT(cache_idx < self.ctx_->layer_blk_sizes.size());
-    RTASSERT(cache_idx < self.dst_layer_blk_sizes_.size());
-    const uint64_t rladdr = reinterpret_cast<uint64_t>(dst_layer_handle.ptrs[cache_idx]);
-    const auto rkey = rkeys[cache_idx];
-    const auto &cache_input = input[cache_idx];
-#ifndef NDEBUG
-    uint64_t dst_len_debug = 0; // store each cache tensors len
-#endif
-    uint64_t dst_offset = cache_input[0].dst_offset;
-    auto layer_blk_size = self.ctx_->layer_blk_sizes[cache_idx];
-    auto dst_layer_blk_size = self.dst_layer_blk_sizes_[cache_idx];
-
-    auto prefills = std::make_shared<std::vector<memp_t>>(); // 传递给WriteBatch
-
-    assert(dst_offset < dst_layer_blk_size);
-    {
-      const auto &blk = cache_input[0];
-      const auto &src_mr_guard = self.ctx_->layer_mrs()[layer_idx][cache_idx];
-      auto src_mr = src_mr_guard.mr();
-      assert(blk.length > 0);
-      assert(blk.length < layer_blk_size);
-      assert(blk.src_offset < layer_blk_size);
-      assert(blk.src_offset + blk.length <= layer_blk_size);
-      src_mr.buf += blk.src_offset;
-      src_mr.buf_len = blk.length;
-      prefills->emplace_back(std::move(src_mr));
-
-#ifndef NDEBUG
-      dst_len_debug += blk.length;
-#endif
-    }
-    // same cache tensor, different blk
-    for (size_t idx = 1; idx < cache_input.size(); ++idx) {
-      const auto &blk = cache_input[idx];
-      if (blk.dst_offset == dst_offset) {
-        const auto &src_mr_guard = self.ctx_->layer_mrs()[layer_idx][cache_idx];
-        auto src_mr = src_mr_guard.mr();
-        assert(blk.length > 0);
-        assert(blk.length < layer_blk_size);
-        assert(blk.src_offset < layer_blk_size);
-        assert(blk.src_offset + blk.length <= layer_blk_size);
-        src_mr.buf += blk.src_offset;
-        src_mr.buf_len = blk.length;
-        prefills->emplace_back(std::move(src_mr));
-
-#ifndef NDEBUG
-        dst_len_debug += blk.length;
-#endif
-        continue;
-      }
-      assert(!prefills->empty());
-      assert(dst_len_debug > 0);
-      assert(dst_len_debug <= dst_layer_blk_size);
-      assert(dst_offset + dst_len_debug <= dst_layer_blk_size);
-      // 现在的设计，会调用“一层中包含的cache tensor数 * block数”次
-      self.write_futs_.emplace_back(WriteBySgList(
-          self.ch(), dst_offset + rladdr, rkey, std::move(prefills)));
-
-#ifndef NDEBUG
-      dst_len_debug = 0;
-#endif
-      dst_offset = blk.dst_offset;
-      prefills = std::make_shared<std::vector<memp_t>>();
-      assert(dst_offset < dst_layer_blk_size);
-      {
-        auto src_mr = self.ctx_->layer_mrs()[layer_idx][cache_idx].mr();
-        assert(blk.length > 0);
-        assert(blk.length < layer_blk_size);
-        assert(blk.src_offset < layer_blk_size);
-        assert(blk.src_offset + blk.length <= layer_blk_size);
-        src_mr.buf += blk.src_offset;
-        src_mr.buf_len = blk.length;
-        prefills->emplace_back(std::move(src_mr));
-
-#ifndef NDEBUG
-        dst_len_debug += blk.length;
-#endif
-      }
-    }
-    assert(!prefills->empty());
-    assert(dst_len_debug > 0);
-    assert(dst_len_debug <= dst_layer_blk_size);
-    assert(dst_offset + dst_len_debug <= dst_layer_blk_size);
-    self.write_futs_.emplace_back(
-      WriteBySgList(self.ch(), dst_offset + rladdr, rkey, std::move(prefills))
-    );
-  }
-  return;
-}
-
 
 static void when_all_succeed(std::vector<std::future<void>> &futs) {
   for (auto &fut : futs) {
