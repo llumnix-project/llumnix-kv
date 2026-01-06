@@ -169,13 +169,10 @@ std::string WorkerInfo::to_string() const {
     }
     ss << "," << base64_encode(other_info);
   }
-  LOG(INFO) << "WorkerInfo::to_string() result:" << ss.str();
   return std::move(ss).str();
 }
 
 WorkerInfo WorkerInfo::from_string(const std::string &src) {
-  LOG(INFO) << "WorkerInfo::from_string() recieve:" << src;
-
   WorkerInfo w;
   std::vector<std::string> tmp;
   tmp.reserve(11);

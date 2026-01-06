@@ -719,7 +719,11 @@ public:
     for (auto task : self.finished_req) {
       assert(task->reach_last_token);
       if (task->state() == ReqState::INPROCESS) {
-        task->set_state(ReqState::OK);
+        auto final_state = ReqState::OK;
+        if (task->new_tokens <= 0) {
+          final_state = ReqState::FAILED;
+        }
+        task->set_state(final_state);
       }
 
       LOG(INFO) << "KVT tx_stub. DstId=" << dst_id << ",DstWorkerId=" << dst_worker_id
