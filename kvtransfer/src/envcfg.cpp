@@ -291,5 +291,86 @@ std::bitset<MAX_TP_SIZE> env_p_valid_ranks() noexcept {
   return val;
 }
 
+int env_gdn_element_size() {
+  static constexpr int DEFVAL = 1;
+  static int val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("GDN_ELEMENT_SIZE", DEFVAL);
+  });
+  return val;
+}
+
+static void parse_tensor_shape(std::vector<size_t>* out, const char* inputval) {
+  if (inputval == nullptr) {
+    return;
+  }
+  auto input = std::string(inputval);
+  size_t start = 0;
+  size_t end = 0;
+  while ((end = input.find(',', start)) != std::string::npos) {
+    assert(end >= start);
+    auto part = input.substr(start, end - start);
+    start = end + 1;
+    if (!part.empty()) {
+      try {
+        size_t dim = std::stoull(part);
+        out->push_back(dim);
+      } catch (const std::exception& e) {
+        fprintf(stderr, "parse_tensor_shape: failed to parse dimension '%s': %s\n", part.c_str(), e.what());
+      }
+    }
+  }
+  if (start < input.length()) {
+    auto part = input.substr(start);
+    if (!part.empty()) {
+      try {
+        size_t dim = std::stoull(part);
+        out->push_back(dim);
+      } catch (const std::exception& e) {
+        fprintf(stderr, "parse_tensor_shape: failed to parse dimension '%s': %s\n", part.c_str(), e.what());
+      }
+    }
+  }
+  return;
+}
+
+const std::vector<size_t>* env_ssm_state_shape() {
+  static std::vector<size_t> val;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    auto* valenv = getenv("QWEN3_NEXT_SSM_SHAPE");
+    fprintf(stdout, "kvtenv: env=QWEN3_NEXT_SSM_SHAPE val=%s\n", (valenv == nullptr ? "NULL" : valenv));
+    fflush(stdout);
+    if (valenv == nullptr) {
+      return;
+    }
+    try {
+      parse_tensor_shape(&val, valenv);
+    } catch (const std::exception& e) {
+      fprintf(stderr, "env_ssm_state_shape: bad input=%s;ex=%s\n", valenv, e.what());
+    }
+  });
+  return &val;
+}
+
+const std::vector<size_t>* env_conv_state_shape() {
+  static std::vector<size_t> val;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    auto* valenv = getenv("QWEN3_NEXT_CONV_SHAPE");
+    fprintf(stdout, "kvtenv: env=QWEN3_NEXT_CONV_SHAPE val=%s\n", (valenv == nullptr ? "NULL" : valenv));
+    fflush(stdout);
+    if (valenv == nullptr) {
+      return;
+    }
+    try {
+      parse_tensor_shape(&val, valenv);
+    } catch (const std::exception& e) {
+      fprintf(stderr, "env_conv_state_shape: bad input=%s;ex=%s\n", valenv, e.what());
+    }
+  });
+  return &val;
+}
 
 }  // namespace blade_llm {

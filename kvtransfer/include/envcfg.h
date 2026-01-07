@@ -26,8 +26,8 @@ const struct sockaddr_in* env_send_done_addr();
 constexpr int RAGGED_FLASH_CACHE_SHAPE = 1;
 // (2, num_blocks, block_size, num_kv_heads, head_dim)
 constexpr int FLASH_CACHE_SHAPE = 2;
-// (2, num_blocks, block_size, num_kv_heads, head_dim)
-// full attn same as FLASH_CACHE_SHAPE, but have gdn layers
+// shape:(2, num_blocks, block_size, num_kv_heads, head_dim)
+// stride:(num_blocks, 2, block_size, num_kv_heads, head_dim)
 constexpr int QWEN3_NEXT_FLASH_CACHE_SHAPE = 3;
 // Each layer contains two tensors: 
 // k tensor for select and mla tensor for attention.
@@ -59,5 +59,10 @@ int env_shrink_tpsize();
 
 static constexpr size_t MAX_TP_SIZE = 64;
 std::bitset<MAX_TP_SIZE> env_p_valid_ranks() noexcept;
+
+int env_gdn_element_size();
+
+const std::vector<size_t>* env_ssm_state_shape();
+const std::vector<size_t>* env_conv_state_shape();
 
 }  // namespace blade_llm {
