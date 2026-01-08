@@ -373,4 +373,26 @@ const std::vector<size_t>* env_conv_state_shape() {
   return &val;
 }
 
+int env_gdn_block_num() {
+  static constexpr int DEFVAL = 3;
+  static int val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_GDN_BLOCK_NUM", DEFVAL);
+  });
+  return val;
+}
+
+uint32_t env_origin_p_tp_size() noexcept {
+  static uint32_t val = 0;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    auto* valenv = getenv("BLLM_KVTRANS_ORIGIN_P_TP_SIZE");
+    if (valenv != nullptr) {
+      val = static_cast<uint32_t>(atoi(valenv));
+    }
+  });
+  return val;
+}
+
 }  // namespace blade_llm {

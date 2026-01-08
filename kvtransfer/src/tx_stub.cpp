@@ -102,8 +102,12 @@ static void do_parse_hybrid_block_send_p_gt_d(
   size_t p_token_size, size_t d_token_size,
   uint32_t src_ntpb, // ntpb: number tokens per block
   uint32_t dst_ntpb, 
-  uint32_t group_n,
-  uint32_t group_off, // offset in pd rank mapping group
+  uint32_t attn_group_n,
+  uint32_t attn_group_off, // attn offset in pd rank mapping group
+  uint32_t gdn_group_n,
+  uint32_t gdn_group_off, // gdn offset in pd rank mapping group
+  const std::bitset<MAX_TP_SIZE>& validranks,
+  uint32_t p_tp_rank,
   const ReqSendTask *task,
   std::vector<IpcBlock> &per_cache_send_blocks
 ) {
@@ -117,11 +121,8 @@ static void do_parse_hybrid_block_send_p_gt_d(
   // tokens to be written, aligned with block size, could oversend in last block
   auto left_tokens = task->new_tokens;
 
-  const auto p_attn_blk_num = (wrote_tokens+left_tokens+src_ntpb-1)/src_ntpb;
-  const auto d_attn_blk_num = (wrote_tokens+left_tokens+dst_ntpb-1)/dst_ntpb;
-  auto p_gdn_blks_num = src_blocks.size() - p_attn_blk_num;
-  auto d_gdn_blks_num = dst_blocks.size() - d_attn_blk_num;
-  assert(p_gdn_blks_num == d_gdn_blks_num);
+  const auto p_gdn_blks_num = env_gdn_block_num();
+  const auto d_gdn_blks_num = p_gdn_blks_num;
   // 现在develop修改了排列顺序，先 GDN Block 再 Attn Block
   const auto p_gdn_blk_idx = 0;
   const auto d_gdn_blk_idx = 0;
@@ -134,7 +135,7 @@ static void do_parse_hybrid_block_send_p_gt_d(
     // TODO: Not elegant, refactor this later
     const auto p_conv_block_size = conv_state_shape[1] * conv_state_shape[2] * gdn_element_size;
     const auto p_ssm_block_size = ssm_state_shape[1] * ssm_state_shape[2] * ssm_state_shape[3] * gdn_element_size;
-    for (size_t i = 0; i < p_gdn_blks_num; ++i) {
+    for (auto i = 0; i < p_gdn_blks_num; ++i) {
       const size_t p_blk_idx = p_gdn_blk_idx + i;
       const size_t d_blk_idx = d_gdn_blk_idx + i;
       // GDN Block:[[Conv][SSM][Padding]]
@@ -144,13 +145,17 @@ static void do_parse_hybrid_block_send_p_gt_d(
       const auto conv_step_length = conv_state_shape[2] * gdn_element_size;
       for (size_t conv_dim = 0; conv_dim < conv_state_shape[1]; ++conv_dim) {
         const size_t p_conv_off = p_gdn_off + conv_dim * conv_step_length;
-        const size_t d_conv_off = d_gdn_off + (group_off + conv_dim * group_n)* conv_step_length;
+        const size_t d_conv_off = d_gdn_off + (gdn_group_off + conv_dim * gdn_group_n)* conv_step_length;
         per_cache_send_blocks.emplace_back(p_conv_off, d_conv_off, conv_step_length);
       }
       const size_t p_ssm_off = p_gdn_off + p_conv_block_size;
-      const size_t d_ssm_off = d_gdn_off + group_n * p_conv_block_size + group_off * p_ssm_block_size;
+      const size_t d_ssm_off = d_gdn_off + gdn_group_n * p_conv_block_size + gdn_group_off * p_ssm_block_size;
       per_cache_send_blocks.emplace_back(p_ssm_off, d_ssm_off, p_ssm_block_size);
     }
+  }
+  if (!validranks[p_tp_rank]) {
+    // kv 复制 case: 仅有效 worker tp rank 参与attn发送.
+    return ;
   }
   while (left_tokens > 0) {
     const auto p_blk_idx = p_gdn_blks_num + wrote_tokens / src_ntpb;
@@ -165,8 +170,6 @@ static void do_parse_hybrid_block_send_p_gt_d(
     const auto tokens = std::min<uint32_t>(
       {src_ntpb - p_token_idx_base, dst_ntpb - d_token_idx_base, left_tokens}
     );
-    // qwen3-next eq的parse block有bug，多传的kv cache又很好的弥补了这一部分QAQ
-    // 后面一起改vllm和这里
     // kv分开，除以2
     const auto token_step_length = p_token_size / 2;
     assert(token_step_length * 2 == p_token_size);
@@ -176,7 +179,7 @@ static void do_parse_hybrid_block_send_p_gt_d(
       const size_t pk_token_off = p_blk_off + p_token_idx * token_step_length;
       const size_t pv_token_off = pk_token_off + p_block_size/2;
       const size_t d_token_off = d_blk_off + d_token_idx * d_token_size / 2;
-      const size_t dk_token_off = d_token_off + group_off * token_step_length;
+      const size_t dk_token_off = d_token_off + attn_group_off * token_step_length;
       const size_t dv_token_off = dk_token_off + d_block_size/2;
       // K
       per_cache_send_blocks.emplace_back(pk_token_off, dk_token_off, token_step_length);
@@ -332,7 +335,6 @@ static void vllm_parse_hybrid_block_send_p_gt_d(
   const WorkerInfo *dst_worker_info,
   const ReqSendTask *task,
   std::vector<std::vector<IpcBlock>> &send_blocks) {
-    // LLx: 需要考虑TP Size > Head数吗？
     const auto & p_block_sizes = src_worker_info->block_sizes;
     const auto & d_block_sizes = dst_worker_info->block_sizes;
     const auto & p_token_sizes = src_worker_info->token_sizes;
@@ -341,14 +343,16 @@ static void vllm_parse_hybrid_block_send_p_gt_d(
     assert(src_worker_info->tp_size > dst_worker_info->tp_size);
     assert(src_worker_info->tp_size % dst_worker_info->tp_size == 0);
 
-    const uint32_t group_n = src_worker_info->tp_size / dst_worker_info->tp_size;
-    // ？例如p tp size=4 rank(0,1,2,3) d tp size=1, group_n=4
-    // 0/4=0 1/4=0...
-    // assert(worker_tp_rank / group_n == dst_worker_info->worker_tp_rank);
-    // 要考虑valid rank！
-    assert(src_worker_info->worker_tp_rank / group_n == dst_worker_info->worker_tp_rank);
-    // Token粒度的group_off
-    const uint32_t group_off = src_worker_info->worker_tp_rank % group_n;
+    // GDN不会受到head < tp size的困扰
+    const uint32_t p_origin_tp_size = env_origin_p_tp_size();
+    const uint32_t gdn_group_n = p_origin_tp_size / dst_worker_info->tp_size;
+    assert(src_worker_info->worker_tp_rank / gdn_group_n == dst_worker_info->worker_tp_rank);
+    const uint32_t gdn_group_off = src_worker_info->worker_tp_rank % gdn_group_n;
+    auto const validranks = env_p_valid_ranks();
+    uint32_t const worker_tp_rank = (validranks << (validranks.size() - src_worker_info->worker_tp_rank)).count();
+    const uint32_t attn_group_n = validranks.count() / dst_worker_info->tp_size;
+    const uint32_t attn_group_off = worker_tp_rank % attn_group_n;
+
     // Should only have one cache in one layer.
     assert(p_token_sizes.size() == 1);
     assert(d_token_sizes.size() == 1);
@@ -359,7 +363,7 @@ static void vllm_parse_hybrid_block_send_p_gt_d(
     const auto p_block_size = p_block_sizes[0];
     const auto d_block_size = d_block_sizes[0];
 
-    assert(d_token_size == p_token_size * group_n);
+    assert(d_token_size == p_token_size * attn_group_n);
 
     // ntpb: number tokens per block, pd block size should align
     const uint32_t src_ntpb = p_block_size / p_token_size;
@@ -373,7 +377,10 @@ static void vllm_parse_hybrid_block_send_p_gt_d(
     do_parse_hybrid_block_send_p_gt_d(
       p_token_size, d_token_size,
       src_ntpb, dst_ntpb,
-      group_n, group_off,
+      attn_group_n, attn_group_off,
+      gdn_group_n, gdn_group_off,
+      validranks,
+      src_worker_info->worker_tp_rank,
       task, per_cache_send_blocks
     );
     return;

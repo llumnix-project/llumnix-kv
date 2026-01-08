@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/pytypes.h>
+#include <cstdlib>
 
 #include "client.h"
 #include "service.h"
@@ -8,6 +9,7 @@
 #include "naming.h"
 #include "protocol.h"
 #include "thrid_party/logging.h"
+#include "envcfg.h"
 
 namespace py = pybind11;
 
@@ -52,6 +54,10 @@ void init_kv_transfer_client(const std::string &inst_name,
     validranks <<= (validranks.size() - tp_size);
     validranks >>= (validranks.size() - tp_size);
     RTASSERT(validranks.count() <= tp_size);
+
+    std::string original_tp_size_str = std::to_string(tp_size);
+    setenv("BLLM_KVTRANS_ORIGIN_P_TP_SIZE", original_tp_size_str.c_str(), 1);
+
     if (validranks.count() < tp_size) {
       LOG(INFO) << "InitKvtClient: tp_size changes: old=" << tp_size << ";new=" << validranks.count();
       tp_size = validranks.count();

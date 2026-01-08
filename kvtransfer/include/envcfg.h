@@ -62,6 +62,10 @@ std::bitset<MAX_TP_SIZE> env_p_valid_ranks() noexcept;
 
 int env_gdn_element_size();
 
+int env_gdn_block_num();
+
+uint32_t env_origin_p_tp_size() noexcept;
+
 const std::vector<size_t>* env_ssm_state_shape();
 const std::vector<size_t>* env_conv_state_shape();
 
