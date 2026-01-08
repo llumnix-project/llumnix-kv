@@ -77,6 +77,7 @@ blade_kvt_ext = CMakeExtension("blade_kvt.kvtransfer_ops", src_dir=_kvtransfer_s
 
 
 def _barex_ver():
+    return "unknown"  # 等待 xiaoshi 修复 barex benchmark
     result = subprocess.run(
         ["barex_benchmark", "-V"],
         capture_output=True,
