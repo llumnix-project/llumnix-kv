@@ -11,6 +11,57 @@
 
 namespace blade_llm {
 
+static void parse_fi_like_block(
+  int p_base_blk_idx,
+  int d_base_blk_idx,
+  uint32_t src_ntpb, // ntpb: number tokens per block
+  uint32_t dst_ntpb, 
+  size_t p_token_size,
+  size_t d_token_size,
+  size_t p_block_size,
+  size_t d_block_size,
+  const std::vector<uint32_t>& src_blocks,
+  const std::vector<uint32_t>& dst_blocks,
+  uint32_t wrote_tokens,
+  uint32_t left_tokens,
+  uint32_t attn_group_off,
+  std::vector<IpcBlock> &per_cache_send_blocks
+) {
+  while (left_tokens > 0) {
+    const auto p_blk_idx = p_base_blk_idx + wrote_tokens / src_ntpb;
+    const auto p_token_idx_base = wrote_tokens % src_ntpb;
+    const auto d_blk_idx = d_base_blk_idx + wrote_tokens / dst_ntpb;
+    const auto d_token_idx_base = wrote_tokens % dst_ntpb;
+
+    assert(p_blk_idx < src_blocks.size() && d_blk_idx < dst_blocks.size());
+    const size_t p_blk_off = src_blocks[p_blk_idx] * p_block_size;
+    const size_t d_blk_off = dst_blocks[d_blk_idx] * d_block_size;
+
+    const auto tokens = std::min<uint32_t>(
+      {src_ntpb - p_token_idx_base, dst_ntpb - d_token_idx_base, left_tokens}
+    );
+    // kv分开，除以2
+    const auto token_step_length = p_token_size / 2;
+    assert(token_step_length * 2 == p_token_size);
+    for (uint32_t idx = 0; idx < tokens; ++idx) { // 这里按照p_token_size拆成小包
+      const uint32_t p_token_idx = p_token_idx_base + idx;
+      const uint32_t d_token_idx = d_token_idx_base + idx;
+      const size_t pk_token_off = p_blk_off + p_token_idx * token_step_length;
+      const size_t pv_token_off = pk_token_off + p_block_size/2;
+      const size_t d_token_off = d_blk_off + d_token_idx * d_token_size / 2;
+      const size_t dk_token_off = d_token_off + attn_group_off * token_step_length;
+      const size_t dv_token_off = dk_token_off + d_block_size/2;
+      // K
+      per_cache_send_blocks.emplace_back(pk_token_off, dk_token_off, token_step_length);
+      // V
+      per_cache_send_blocks.emplace_back(pv_token_off, dv_token_off, token_step_length);
+    }
+    wrote_tokens += tokens;
+    left_tokens -= tokens;
+  }
+  return;
+}
+
 static void do_parse_block_send_p_eq_d(
   size_t block_size, size_t token_size,
   const ReqSendTask *task,
@@ -157,38 +208,22 @@ static void do_parse_hybrid_block_send_p_gt_d(
     // kv 复制 case: 仅有效 worker tp rank 参与attn发送.
     return ;
   }
-  while (left_tokens > 0) {
-    const auto p_blk_idx = p_gdn_blks_num + wrote_tokens / src_ntpb;
-    const auto p_token_idx_base = wrote_tokens % src_ntpb;
-    const auto d_blk_idx = d_gdn_blks_num + wrote_tokens / dst_ntpb;
-    const auto d_token_idx_base = wrote_tokens % dst_ntpb;
-
-    assert(p_blk_idx < src_blocks.size() && d_blk_idx < dst_blocks.size());
-    const size_t p_blk_off = src_blocks[p_blk_idx] * p_block_size;
-    const size_t d_blk_off = dst_blocks[d_blk_idx] * d_block_size;
-
-    const auto tokens = std::min<uint32_t>(
-      {src_ntpb - p_token_idx_base, dst_ntpb - d_token_idx_base, left_tokens}
-    );
-    // kv分开，除以2
-    const auto token_step_length = p_token_size / 2;
-    assert(token_step_length * 2 == p_token_size);
-    for (uint32_t idx = 0; idx < tokens; ++idx) { // 这里按照p_token_size拆成小包
-      const uint32_t p_token_idx = p_token_idx_base + idx;
-      const uint32_t d_token_idx = d_token_idx_base + idx;
-      const size_t pk_token_off = p_blk_off + p_token_idx * token_step_length;
-      const size_t pv_token_off = pk_token_off + p_block_size/2;
-      const size_t d_token_off = d_blk_off + d_token_idx * d_token_size / 2;
-      const size_t dk_token_off = d_token_off + attn_group_off * token_step_length;
-      const size_t dv_token_off = dk_token_off + d_block_size/2;
-      // K
-      per_cache_send_blocks.emplace_back(pk_token_off, dk_token_off, token_step_length);
-      // V
-      per_cache_send_blocks.emplace_back(pv_token_off, dv_token_off, token_step_length);
-    }
-    wrote_tokens += tokens;
-    left_tokens -= tokens;
-  }
+  parse_fi_like_block(
+    p_gdn_blks_num,
+    d_gdn_blks_num,
+    src_ntpb,
+    dst_ntpb,
+    p_token_size,
+    d_token_size,
+    p_block_size,
+    d_block_size,
+    src_blocks,
+    dst_blocks,
+    wrote_tokens, 
+    left_tokens, 
+    attn_group_off,
+    per_cache_send_blocks
+  );
   return ;
 }
 
@@ -724,6 +759,110 @@ static void vllm_parse_block_send_multi_tensor_p_lt_d(
   return ;
 }
 
+static void vllm_parse_fi_like_block_send_p_eq_d(
+  const WorkerInfo *p_info,
+  const WorkerInfo *d_info,
+  const ReqSendTask *task,
+  std::vector<std::vector<IpcBlock>> &send_blocks) {
+    auto const validranks = env_p_valid_ranks();
+    if (!validranks[p_info->worker_tp_rank]) {
+      return ;
+    }
+    uint32_t const worker_tp_rank = (validranks << (validranks.size() - p_info->worker_tp_rank)).count();
+    const uint32_t attn_group_n = validranks.count() / d_info->tp_size;
+    const uint32_t attn_group_off = worker_tp_rank % attn_group_n;
+
+    assert(p_info->tp_size == d_info->tp_size);
+    assert(p_info->worker_tp_rank == d_info->worker_tp_rank);
+
+    const auto &token_sizes = p_info->token_sizes;
+    const auto &block_sizes = p_info->block_sizes;
+    // Block Layout:Block[[K1,K2,K3...], [V1,V2,V3...]]
+    // 这里的token size/block size包含了不连续的kv
+    // 但pd tp size相等，可以按照Block进行分配
+    assert(token_sizes == d_info->token_sizes);
+    assert(block_sizes == d_info->block_sizes);
+    assert(token_sizes.size() == block_sizes.size());
+    assert(d_info->token_sizes.size() == d_info->block_sizes.size());
+    // Should only have one cache in one layer for RAGGED_FLASH_CACHE_SHAPE.
+    assert(token_sizes.size() == 1);
+    assert(block_sizes.size() == 1);
+
+    const uint32_t ntpb = block_sizes[0] / token_sizes[0];
+    const auto &src_blocks = task->src_blocks();
+    const auto &dst_blocks = task->dst_blocks();
+    auto wrote_tokens = task->seen_tokens;
+    // tokens to be written, aligned with block size, could oversend in last block
+    auto left_tokens = task->new_tokens;
+
+    send_blocks.resize(1);
+    std::vector<IpcBlock> &per_cache_send_blocks = send_blocks[0];
+    parse_fi_like_block(
+      0, 0,
+      ntpb, ntpb,
+      token_sizes[0], token_sizes[0],
+      block_sizes[0], block_sizes[0],
+      src_blocks, dst_blocks,
+      wrote_tokens, left_tokens,
+      attn_group_off,
+      per_cache_send_blocks
+    );
+    return;
+}
+
+static void vllm_parse_fi_like_block_send_p_gt_d(
+  const WorkerInfo *p_info,
+  const WorkerInfo *d_info,
+  const ReqSendTask *task,
+  std::vector<std::vector<IpcBlock>> &send_blocks) {
+    auto const validranks = env_p_valid_ranks();
+    if (!validranks[p_info->worker_tp_rank]) {
+      return ;
+    }
+    uint32_t const worker_tp_rank = (validranks << (validranks.size() - p_info->worker_tp_rank)).count();
+    const uint32_t attn_group_n = validranks.count() / d_info->tp_size;
+    const uint32_t attn_group_off = worker_tp_rank % attn_group_n;
+    const auto & p_block_sizes = p_info->block_sizes;
+    const auto & d_block_sizes = d_info->block_sizes;
+    const auto & p_token_sizes = p_info->token_sizes;
+    const auto & d_token_sizes = d_info->token_sizes;
+    assert(p_info->tp_size > d_info->tp_size);
+    assert((p_info->tp_size % d_info->tp_size) == 0);
+    assert(worker_tp_rank / attn_group_n == d_info->worker_tp_rank);
+
+    // Should only have one cache in one layer.
+    // Block Layout:Block[[K1,K2,K3...], [V1,V2,V3...]]
+    assert(p_token_sizes.size() == 1);
+    assert(d_token_sizes.size() == 1);
+    assert(p_block_sizes.size() == 1);
+    assert(d_block_sizes.size() == 1);
+    const auto p_token_size = p_token_sizes[0];
+    const auto d_token_size = d_token_sizes[0];
+    const auto p_block_size = p_block_sizes[0];
+    const auto d_block_size = d_block_sizes[0];
+
+    const uint32_t src_ntpb = p_block_size / p_token_size;
+    const uint32_t dst_ntpb = d_block_size / d_token_size;
+    const auto &src_blocks = task->src_blocks();
+    const auto &dst_blocks = task->dst_blocks();
+    auto wrote_tokens = task->seen_tokens;
+    auto left_tokens = task->new_tokens;
+
+    send_blocks.resize(1);
+    std::vector<IpcBlock> &per_cache_send_blocks = send_blocks[0];
+    parse_fi_like_block(
+      0, 0,
+      src_ntpb, dst_ntpb,
+      p_token_size, d_token_size,
+      p_block_size, d_block_size,
+      src_blocks, dst_blocks,
+      wrote_tokens, left_tokens,
+      attn_group_off,
+      per_cache_send_blocks
+    );
+    return;
+}
+
 static void parse_block_send_p_lt_d(
   const WorkerInfo *p_info,
   const WorkerInfo *d_info,
@@ -1122,16 +1261,16 @@ private:
       }
     }
     if (cache_shape == QWEN3_NEXT_FLASH_CACHE_SHAPE) {
-        if (srcinfo.tp_size == self.dstinfo->tp_size) {
-          self.parse_block = vllm_parse_hybrid_block_send_p_eq_d;
-          self.tpkind = TPKind::PEQD;
-          return;
-        }
-        if (srcinfo.tp_size > self.dstinfo->tp_size) {
-          self.parse_block = vllm_parse_hybrid_block_send_p_gt_d;
-          self.tpkind = TPKind::PGTD;
-          return;
-        }
+      if (srcinfo.tp_size == self.dstinfo->tp_size) {
+        self.parse_block = vllm_parse_hybrid_block_send_p_eq_d;
+        self.tpkind = TPKind::PEQD;
+        return;
+      }
+      if (srcinfo.tp_size > self.dstinfo->tp_size) {
+        self.parse_block = vllm_parse_hybrid_block_send_p_gt_d;
+        self.tpkind = TPKind::PGTD;
+        return;
+      }
     }
     if (cache_shape == DPSK_V32_SPARSE_MLA_SHAPE) {
       if (srcinfo.tp_size == self.dstinfo->tp_size) {
@@ -1147,7 +1286,18 @@ private:
       self.parse_block = vllm_parse_block_send_multi_tensor_p_lt_d;
       self.tpkind = TPKind::PEQD;
       return;
-
+    }
+    if (cache_shape == FLASHINFER_CACHE_SHAPE) {
+      if (srcinfo.tp_size == self.dstinfo->tp_size) {
+        self.parse_block = vllm_parse_fi_like_block_send_p_eq_d;
+        self.tpkind = TPKind::PEQD;
+        return;
+      }
+      if (srcinfo.tp_size > self.dstinfo->tp_size) {
+        self.parse_block = vllm_parse_fi_like_block_send_p_gt_d;
+        self.tpkind = TPKind::PGTD;
+        return;
+      }
     }
     throw std::runtime_error("unsupported cache_shape");
   }
