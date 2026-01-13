@@ -32,7 +32,7 @@ constexpr int QWEN3_NEXT_FLASH_CACHE_SHAPE = 3;
 // Each layer contains two tensors: 
 // k tensor for select and mla tensor for attention.
 constexpr int DPSK_V32_SPARSE_MLA_SHAPE = 4;
-// shape:(num_blocks, 2, block_size, num_kv_heads, head_dim)
+// actual storage shape:(num_blocks, 2, num_kv_heads, block_size, head_dim)
 constexpr int FLASHINFER_CACHE_SHAPE = 5;
 
 int env_cache_shape();

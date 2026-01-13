@@ -11,7 +11,9 @@
 
 namespace blade_llm {
 
-static void parse_fi_like_block(
+// Can only used for gdn block parsing
+// rename after
+static void parse_hybrid_attn_block(
   int p_base_blk_idx,
   int d_base_blk_idx,
   uint32_t src_ntpb, // ntpb: number tokens per block
@@ -60,6 +62,102 @@ static void parse_fi_like_block(
     left_tokens -= tokens;
   }
   return;
+}
+
+// actual parsing flashinfer block
+static void parse_flashinfer_block_p_eq_d(
+  size_t token_size,
+  size_t block_size,
+  uint32_t ntpb,
+  const std::vector<uint32_t>& src_blocks,
+  const std::vector<uint32_t>& dst_blocks,
+  uint32_t wrote_tokens,
+  uint32_t left_tokens,
+  std::vector<IpcBlock> &per_cache_send_blocks,
+  const bool reach_last_token
+){
+  while (left_tokens > 0) {
+    const auto blk_idx = wrote_tokens / ntpb;
+    const auto token_idx = wrote_tokens % ntpb;
+
+    assert(blk_idx < src_blocks.size() && blk_idx < dst_blocks.size());
+
+    const size_t p_blk_off = src_blocks[blk_idx] * block_size;
+    const size_t d_blk_off = dst_blocks[blk_idx] * block_size;
+
+    // PD block size should be same
+    auto tokens = std::min(ntpb - token_idx, left_tokens);
+    size_t length = 0;
+    // 按照block传
+    if (tokens != ntpb){
+      // request's last block or chunked prefill first/last block
+      if (reach_last_token){ // request's last block
+        length = block_size;
+      } else if (token_idx == 0) {
+        // chunked prefill last block
+        length = 0;
+      } else { // chunked prefill first block
+        if (token_idx + tokens == ntpb) {
+          // 达到了block的边界，整个block都传输
+          length = block_size;
+        } else {
+          assert(token_idx + tokens < ntpb);
+          // 开头在block中间，结束的token也在block中间，并且请求未完成，顺延到下个step传输
+          length = 0;
+        }
+      }
+    } else { // tokens == ntpb, send full block
+      length = block_size;
+    }
+    if (length > 0) {
+      per_cache_send_blocks.emplace_back(p_blk_off, d_blk_off, length);
+    }
+    wrote_tokens += tokens;
+    left_tokens -= tokens;
+  }
+  return;
+}
+
+static void parse_flashinfer_block_p_gt_d(
+  size_t p_token_size,
+  size_t d_token_size,
+  size_t p_block_size,
+  size_t d_block_size,
+  uint32_t ntpb,
+  const std::vector<uint32_t>& src_blocks,
+  const std::vector<uint32_t>& dst_blocks,
+  uint32_t wrote_tokens,
+  uint32_t left_tokens,
+  uint32_t attn_group_n,
+  uint32_t attn_group_off,
+  std::vector<IpcBlock> &per_cache_send_blocks
+){ // (num_blocks, 2, num_kv_heads, block_size, head_size)
+  while (left_tokens > 0) {
+    auto block_idx = wrote_tokens / ntpb;
+    auto token_idx = wrote_tokens % ntpb;
+    auto p_blk_off = src_blocks[block_idx] * p_block_size;
+    auto d_blk_off = dst_blocks[block_idx] * d_block_size;
+
+    auto tokens = std::min(ntpb - token_idx, left_tokens);
+
+    // TODO？another环境变量么
+    auto p_head_num = 0;
+
+    // 如果按token粒度发送就需要按照head进行分割
+    for (auto head_idx = 0; head_idx < p_head_num; ++head_idx) {
+      auto p_k_off = p_blk_off + head_idx * p_block_size / 2 / p_head_num;
+      auto d_k_off = d_blk_off + attn_group_off * p_block_size / 2 + head_idx * p_block_size / 2 / p_head_num;
+      auto p_v_off = p_blk_off + p_block_size / 2;
+      auto d_v_off = d_blk_off + d_block_size / 2;
+      auto length = p_block_size / 2 / p_head_num / ntpb * tokens;
+
+      per_cache_send_blocks.emplace_back(p_k_off, d_k_off, length);
+      per_cache_send_blocks.emplace_back(p_v_off, d_v_off, length);
+    }
+    wrote_tokens += tokens;
+    left_tokens -= tokens;
+  }
+  return ;
 }
 
 static void do_parse_block_send_p_eq_d(
@@ -208,7 +306,7 @@ static void do_parse_hybrid_block_send_p_gt_d(
     // kv 复制 case: 仅有效 worker tp rank 参与attn发送.
     return ;
   }
-  parse_fi_like_block(
+  parse_hybrid_attn_block(
     p_gdn_blks_num,
     d_gdn_blks_num,
     src_ntpb,
@@ -759,21 +857,13 @@ static void vllm_parse_block_send_multi_tensor_p_lt_d(
   return ;
 }
 
-static void vllm_parse_fi_like_block_send_p_eq_d(
+// TODO：这里的FLashinfer Attn的layout是HND，如果后面有改动的话又需要适配一下，有没有什么比较好的方案解决这种事情
+static void vllm_parse_flashinfer_block_send_p_eq_d(
   const WorkerInfo *p_info,
   const WorkerInfo *d_info,
   const ReqSendTask *task,
   std::vector<std::vector<IpcBlock>> &send_blocks) {
-    auto const validranks = env_p_valid_ranks();
-    if (!validranks[p_info->worker_tp_rank]) {
-      return ;
-    }
-    uint32_t const worker_tp_rank = (validranks << (validranks.size() - p_info->worker_tp_rank)).count();
-    const uint32_t attn_group_n = validranks.count() / d_info->tp_size;
-    const uint32_t attn_group_off = worker_tp_rank % attn_group_n;
-
     assert(p_info->tp_size == d_info->tp_size);
-    assert(p_info->worker_tp_rank == d_info->worker_tp_rank);
 
     const auto &token_sizes = p_info->token_sizes;
     const auto &block_sizes = p_info->block_sizes;
@@ -784,7 +874,6 @@ static void vllm_parse_fi_like_block_send_p_eq_d(
     assert(block_sizes == d_info->block_sizes);
     assert(token_sizes.size() == block_sizes.size());
     assert(d_info->token_sizes.size() == d_info->block_sizes.size());
-    // Should only have one cache in one layer for RAGGED_FLASH_CACHE_SHAPE.
     assert(token_sizes.size() == 1);
     assert(block_sizes.size() == 1);
 
@@ -797,20 +886,19 @@ static void vllm_parse_fi_like_block_send_p_eq_d(
 
     send_blocks.resize(1);
     std::vector<IpcBlock> &per_cache_send_blocks = send_blocks[0];
-    parse_fi_like_block(
-      0, 0,
-      ntpb, ntpb,
-      token_sizes[0], token_sizes[0],
-      block_sizes[0], block_sizes[0],
+    parse_flashinfer_block_p_eq_d(
+      token_sizes[0],
+      block_sizes[0],
+      ntpb,
       src_blocks, dst_blocks,
       wrote_tokens, left_tokens,
-      attn_group_off,
-      per_cache_send_blocks
+      per_cache_send_blocks,
+      task->reach_last_token
     );
     return;
 }
 
-static void vllm_parse_fi_like_block_send_p_gt_d(
+static void vllm_parse_flashinfer_block_send_p_gt_d(
   const WorkerInfo *p_info,
   const WorkerInfo *d_info,
   const ReqSendTask *task,
@@ -843,6 +931,9 @@ static void vllm_parse_fi_like_block_send_p_gt_d(
 
     const uint32_t src_ntpb = p_block_size / p_token_size;
     const uint32_t dst_ntpb = d_block_size / d_token_size;
+
+    assert(src_ntpb == dst_ntpb);
+
     const auto &src_blocks = task->src_blocks();
     const auto &dst_blocks = task->dst_blocks();
     auto wrote_tokens = task->seen_tokens;
@@ -850,13 +941,13 @@ static void vllm_parse_fi_like_block_send_p_gt_d(
 
     send_blocks.resize(1);
     std::vector<IpcBlock> &per_cache_send_blocks = send_blocks[0];
-    parse_fi_like_block(
-      0, 0,
-      src_ntpb, dst_ntpb,
+    parse_flashinfer_block_p_gt_d(
       p_token_size, d_token_size,
       p_block_size, d_block_size,
+      src_ntpb,
       src_blocks, dst_blocks,
       wrote_tokens, left_tokens,
+      attn_group_n,
       attn_group_off,
       per_cache_send_blocks
     );
@@ -1289,12 +1380,12 @@ private:
     }
     if (cache_shape == FLASHINFER_CACHE_SHAPE) {
       if (srcinfo.tp_size == self.dstinfo->tp_size) {
-        self.parse_block = vllm_parse_fi_like_block_send_p_eq_d;
+        self.parse_block = vllm_parse_flashinfer_block_send_p_eq_d;
         self.tpkind = TPKind::PEQD;
         return;
       }
       if (srcinfo.tp_size > self.dstinfo->tp_size) {
-        self.parse_block = vllm_parse_fi_like_block_send_p_gt_d;
+        self.parse_block = vllm_parse_flashinfer_block_send_p_gt_d;
         self.tpkind = TPKind::PGTD;
         return;
       }
