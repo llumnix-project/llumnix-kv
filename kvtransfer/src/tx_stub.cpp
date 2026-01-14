@@ -118,7 +118,8 @@ static void parse_flashinfer_block_p_eq_d(
   return;
 }
 
-static void parse_flashinfer_block_p_gt_d(
+// 需要按照head维度进行分割，不需要区分p gt d还是p eq d
+static void parse_flashinfer_HND_block(
   size_t p_token_size,
   size_t d_token_size,
   size_t p_block_size,
@@ -140,16 +141,18 @@ static void parse_flashinfer_block_p_gt_d(
 
     auto tokens = std::min(ntpb - token_idx, left_tokens);
 
-    // TODO？another环境变量么
-    auto p_head_num = 0;
+    auto p_head_num = env_attn_head_num();
+    const auto p_head_size = p_block_size / 2 / p_head_num;
+    const auto p_k_block_size = p_block_size / 2;
+    const auto d_k_block_size = d_block_size / 2;
 
     // 如果按token粒度发送就需要按照head进行分割
     for (auto head_idx = 0; head_idx < p_head_num; ++head_idx) {
-      auto p_k_off = p_blk_off + head_idx * p_block_size / 2 / p_head_num;
-      auto d_k_off = d_blk_off + attn_group_off * p_block_size / 2 + head_idx * p_block_size / 2 / p_head_num;
-      auto p_v_off = p_blk_off + p_block_size / 2;
-      auto d_v_off = d_blk_off + d_block_size / 2;
-      auto length = p_block_size / 2 / p_head_num / ntpb * tokens;
+      auto p_k_off = p_blk_off + head_idx * p_head_size;
+      auto d_k_off = d_blk_off + attn_group_off * p_k_block_size + head_idx * p_head_size;
+      auto p_v_off = p_blk_off + p_k_block_size;
+      auto d_v_off = d_blk_off + d_k_block_size;
+      auto length = p_head_size / ntpb * tokens;
 
       per_cache_send_blocks.emplace_back(p_k_off, d_k_off, length);
       per_cache_send_blocks.emplace_back(p_v_off, d_v_off, length);
@@ -857,7 +860,6 @@ static void vllm_parse_block_send_multi_tensor_p_lt_d(
   return ;
 }
 
-// TODO：这里的FLashinfer Attn的layout是HND，如果后面有改动的话又需要适配一下，有没有什么比较好的方案解决这种事情
 static void vllm_parse_flashinfer_block_send_p_eq_d(
   const WorkerInfo *p_info,
   const WorkerInfo *d_info,
@@ -865,35 +867,40 @@ static void vllm_parse_flashinfer_block_send_p_eq_d(
   std::vector<std::vector<IpcBlock>> &send_blocks) {
     assert(p_info->tp_size == d_info->tp_size);
 
-    const auto &token_sizes = p_info->token_sizes;
-    const auto &block_sizes = p_info->block_sizes;
-    // Block Layout:Block[[K1,K2,K3...], [V1,V2,V3...]]
-    // 这里的token size/block size包含了不连续的kv
-    // 但pd tp size相等，可以按照Block进行分配
-    assert(token_sizes == d_info->token_sizes);
-    assert(block_sizes == d_info->block_sizes);
-    assert(token_sizes.size() == block_sizes.size());
-    assert(d_info->token_sizes.size() == d_info->block_sizes.size());
-    assert(token_sizes.size() == 1);
-    assert(block_sizes.size() == 1);
+    const auto & p_block_sizes = p_info->block_sizes;
+    const auto & d_block_sizes = d_info->block_sizes;
+    const auto & p_token_sizes = p_info->token_sizes;
+    const auto & d_token_sizes = d_info->token_sizes;
 
-    const uint32_t ntpb = block_sizes[0] / token_sizes[0];
+    assert(p_token_sizes.size() == 1);
+    assert(d_token_sizes.size() == 1);
+    assert(p_block_sizes.size() == 1);
+    assert(d_block_sizes.size() == 1);
+    const auto p_token_size = p_token_sizes[0];
+    const auto d_token_size = d_token_sizes[0];
+    const auto p_block_size = p_block_sizes[0];
+    const auto d_block_size = d_block_sizes[0];
+
+    const uint32_t src_ntpb = p_block_size / p_token_size;
+    const uint32_t dst_ntpb = d_block_size / d_token_size;
+    assert(src_ntpb == dst_ntpb);
+
     const auto &src_blocks = task->src_blocks();
     const auto &dst_blocks = task->dst_blocks();
     auto wrote_tokens = task->seen_tokens;
-    // tokens to be written, aligned with block size, could oversend in last block
     auto left_tokens = task->new_tokens;
 
     send_blocks.resize(1);
     std::vector<IpcBlock> &per_cache_send_blocks = send_blocks[0];
-    parse_flashinfer_block_p_eq_d(
-      token_sizes[0],
-      block_sizes[0],
-      ntpb,
+    parse_flashinfer_HND_block(
+      p_token_size, d_token_size,
+      p_block_size, d_block_size,
+      src_ntpb,
       src_blocks, dst_blocks,
       wrote_tokens, left_tokens,
-      per_cache_send_blocks,
-      task->reach_last_token
+      1, // attn_group_n
+      0, // attn_group_off
+      per_cache_send_blocks
     );
     return;
 }
@@ -931,7 +938,6 @@ static void vllm_parse_flashinfer_block_send_p_gt_d(
 
     const uint32_t src_ntpb = p_block_size / p_token_size;
     const uint32_t dst_ntpb = d_block_size / d_token_size;
-
     assert(src_ntpb == dst_ntpb);
 
     const auto &src_blocks = task->src_blocks();
@@ -941,7 +947,7 @@ static void vllm_parse_flashinfer_block_send_p_gt_d(
 
     send_blocks.resize(1);
     std::vector<IpcBlock> &per_cache_send_blocks = send_blocks[0];
-    parse_flashinfer_block_p_gt_d(
+    parse_flashinfer_HND_block(
       p_token_size, d_token_size,
       p_block_size, d_block_size,
       src_ntpb,

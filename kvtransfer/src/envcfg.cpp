@@ -291,6 +291,16 @@ std::bitset<MAX_TP_SIZE> env_p_valid_ranks() noexcept {
   return val;
 }
 
+int env_attn_head_num(){
+  static constexpr int DEFVAL = -1;
+  static int val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_ATTN_HEAD_NUM", DEFVAL);
+  });
+  return val;
+}
+
 int env_gdn_element_size() {
   static constexpr int DEFVAL = 1;
   static int val = DEFVAL;
