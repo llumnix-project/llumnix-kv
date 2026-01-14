@@ -19,6 +19,61 @@ def is_ninja_available() -> bool:
     return which("ninja") is not None
 
 
+def check_cuda_batch_copy_support() -> bool:
+    """
+    Check if CUDA supports cudaMemcpyBatchAsync by compiling a test program.
+    Returns True if cudaMemcpySrcAccessOrderStream enum is defined (CUDA 12.8+).
+    """
+    import tempfile
+    
+    # Test program to check if cudaMemcpySrcAccessOrderStream enum is available
+    # This enum is available in CUDA 12.8+ which also provides cudaMemcpyBatchAsync
+    test_code = """
+#include <cuda_runtime.h>
+
+int main() {
+#if defined(cudaMemcpySrcAccessOrderStream)
+    // Enum is defined, feature is available
+    return 0;
+#else
+    // Enum is not defined, feature is not available
+    return 1;
+#endif
+}
+"""
+    
+    try:
+        # Check if nvcc is available
+        if not which("nvcc"):
+            print("nvcc not found, assuming CUDA batch copy is not supported")
+            return False
+        
+        # Create temporary directory for test compilation
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_file = os.path.join(tmpdir, "test_cuda_batch.cpp")
+            with open(test_file, 'w') as f:
+                f.write(test_code)
+            
+            # Try to compile the test program
+            result = subprocess.run(
+                ["nvcc", "-o", os.path.join(tmpdir, "test_cuda_batch"), test_file, "-lcudart"],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                print("CUDA batch copy (cudaMemcpyBatchAsync) is supported")
+                return True
+            else:
+                print(f"CUDA batch copy is not supported (CUDA < 12.8)")
+                return False
+                
+    except Exception as e:
+        print(f"Error checking CUDA batch copy support: {e}, assuming not supported")
+        return False
+
+
 class CMakeExtension(Extension):
     def __init__(self, name: str, src_dir: str = ".", build_options: Union[str, List[str]] = None) -> None:
         super().__init__(name, sources=[])
@@ -73,6 +128,15 @@ class CustomBuildExtension(BuildExtension):
 
 _kvtransfer_src = os.path.join(os.getcwd(), "kvtransfer")
 _build_options = ["-DBUILD_TESTS=OFF", "-DBUILD_RDMA=ON", "-DBUILD_PYTHON_BIND=ON"]
+
+# Check CUDA batch copy support and add corresponding CMake option
+if check_cuda_batch_copy_support():
+    _build_options.append("-DENABLE_BATCH_COPY=ON")
+    print("Adding -DENABLE_BATCH_COPY=ON to build options")
+else:
+    _build_options.append("-DENABLE_BATCH_COPY=OFF")
+    print("Adding -DENABLE_BATCH_COPY=OFF to build options")
+
 blade_kvt_ext = CMakeExtension("blade_kvt.kvtransfer_ops", src_dir=_kvtransfer_src, build_options=_build_options)
 
 

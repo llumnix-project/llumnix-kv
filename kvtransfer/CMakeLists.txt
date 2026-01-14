@@ -17,6 +17,7 @@ if (BUILD_TESTS)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage")
 endif ()
 option(BUILD_PYTHON_BIND "build interface expose to python" OFF)
+option(ENABLE_BATCH_COPY "enable CUDA batch copy (cudaMemcpyBatchAsync)" OFF)
 option(USE_PYBIND11 "build pybind use pybind11 or use torch extension" OFF)
 option(CURL_REQUIRED "build with libcurl dependency" ON)
 set(FIND_INCLUDE_PATHS "/usr/include" "/usr/include/x86_64-linux-gnu" "/usr/local/include")
@@ -39,6 +40,14 @@ if (BUILD_RDMA)
             list(APPEND TARGET_INCLUDE_DIRS ${ACCL_BAREX_INCLUDE})
         endif ()
     endif ()
+endif ()
+
+# Enable CUDA batch copy if requested and supported
+if (ENABLE_BATCH_COPY)
+    message(STATUS "ENABLE_BATCH_COPY is ON, enabling CUDA batch copy support")
+    add_compile_definitions(ENABLE_BATCH_COPY)
+else()
+    message(STATUS "ENABLE_BATCH_COPY is OFF, CUDA batch copy will not be compiled")
 endif ()
 
 

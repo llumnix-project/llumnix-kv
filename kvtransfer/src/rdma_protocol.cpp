@@ -1909,7 +1909,7 @@ static void copy_handle_data(
   RTCHECK(cuda_rt_sync == cudaSuccess);
 }
   
-#if defined(cudaMemcpySrcAccessOrderStream)
+#ifdef ENABLE_BATCH_COPY
 static void copy_handle_data_batch(
   char* tensor_buf_ptr,
   void* layer_gpu_ptr,
@@ -1964,7 +1964,7 @@ static void copy_handle_data_batch(
   auto cuda_rt_sync = cudaStreamSynchronize(stream);
   RTCHECK(cuda_rt_sync == cudaSuccess);
 }
-#endif  // CUDA 12.8+ (cudaMemcpySrcAccessOrderStream available)
+#endif  // ENABLE_BATCH_COPY
 
 void TCPServer::start_server(ITransferService *service, Context *ctx) {
   auto &self = *this;
@@ -2098,11 +2098,11 @@ void TCPServer::CtxCallback::handle_kv_cache_data(std::shared_ptr<XChannel>& cha
   void* layer_gpu_ptr = ptrs[layer_idx];
   assert(layer_gpu_ptr != nullptr);
   
-#if defined(cudaMemcpySrcAccessOrderStream)
+#ifdef ENABLE_BATCH_COPY
   copy_handle_data_batch(buf_ptr, layer_gpu_ptr, blocks, tensor_data_size, self.server_->h2d_cpy_stream_);
 #else
   copy_handle_data(buf_ptr, layer_gpu_ptr, blocks, tensor_data_size, self.server_->h2d_cpy_stream_);
-#endif  // CUDA 12.8+ (cudaMemcpySrcAccessOrderStream available)
+#endif  // ENABLE_BATCH_COPY
 
   const auto h2d_end_ts = SteadyClock::now(); // t5
 
@@ -2218,20 +2218,20 @@ void TCPChannel::send_data(size_t layer_idx) {
 
   // Prepare data to send: magic + reqid + layer_idx + metadata (IpcBlock array) + tensor data
   // Format: [magic (uint32_t)] [reqid (uint64_t)] [layer_idx (size_t)] [metadata_size (size_t)] [IpcBlock array] [tensor data]
-  uint32_t magic = KV_CACHE_DATA_MAGIC;
-  uint64_t reqid = new_id();
-  size_t metadata_size = data.size();
-  size_t header_bytes = RPC_HEADER + sizeof(size_t);  // magic + reqid + layer_idx
-  size_t metadata_bytes = sizeof(size_t) + metadata_size * sizeof(IpcBlock);  // metadata_size + IpcBlock array
-  size_t total_send_size = header_bytes + metadata_bytes + self.sb_size_total_;
+  const uint32_t magic = KV_CACHE_DATA_MAGIC;
+  const uint64_t reqid = new_id();
+  const size_t metadata_size = data.size();
+  const size_t header_bytes = RPC_HEADER + sizeof(size_t);  // magic + reqid + layer_idx
+  const size_t metadata_bytes = sizeof(size_t) + metadata_size * sizeof(IpcBlock);  // metadata_size + IpcBlock array
+  const size_t total_send_size = header_bytes + metadata_bytes + self.sb_size_total_;
   
   assert(self.host_buffers_.size() == self.dst_layer_num_ - layer_idx);
   assert(self.host_buffers_.back().buf_len >= total_send_size);
 
   // Copy all GPU data to host_buffer in continuous memory
-  char* buf_ptr = self.host_buffers_.back().buf;
-  char* meta_buf_ptr = buf_ptr + header_bytes;  // Skip header for metadata
-  char* tensor_buf_ptr = buf_ptr + header_bytes + metadata_bytes;  // Skip header and metadata for tensor data
+  char* const buf_ptr = self.host_buffers_.back().buf;
+  char* const meta_buf_ptr = buf_ptr + header_bytes;  // Skip header for metadata
+  char* const tensor_buf_ptr = buf_ptr + header_bytes + metadata_bytes;  // Skip header and metadata for tensor data
 
   const auto& src_mrs = self.ctx_->layer_mrs()[layer_idx];
   const auto& src_mr_guard = src_mrs[0];
@@ -2239,7 +2239,7 @@ void TCPChannel::send_data(size_t layer_idx) {
   
   // Copy GPU data to host buffer and prepare metadata
   const auto d2h_start_ts = SteadyClock::now();   // t2
-#if defined(cudaMemcpySrcAccessOrderStream)
+#ifdef ENABLE_BATCH_COPY
   self.copy_send_data_batch(
     layer_idx, magic, reqid, data, metadata_size, 
     buf_ptr, meta_buf_ptr, tensor_buf_ptr, src_mr_base
@@ -2249,7 +2249,7 @@ void TCPChannel::send_data(size_t layer_idx) {
     layer_idx, magic, reqid, data, metadata_size, 
     buf_ptr, meta_buf_ptr, tensor_buf_ptr, src_mr_base
   );
-#endif  // CUDA 12.8+ (cudaMemcpySrcAccessOrderStream available)
+#endif  // ENABLE_BATCH_COPY
 
   const auto d2h_end_ts = SteadyClock::now(); // t3
 
@@ -2292,14 +2292,19 @@ void TCPChannel::copy_send_data(
   auto &self = *this;
   
   const auto copy_start_ts = SteadyClock::now();
+  const size_t max_layer_blk_size = self.ctx_->layer_blk_sizes[0];
+  const size_t max_dst_blk_size = self.dst_layer_blk_sizes_[0];
   for (const auto &[src_offset, dst_offset, len] : data) {
     assert(len > 0);
-    assert(src_offset < self.ctx_->layer_blk_sizes[0]);
-    assert(len < self.ctx_->layer_blk_sizes[0]);
-    assert(src_offset + len <= self.ctx_->layer_blk_sizes[0]);
-    assert(dst_offset < self.dst_layer_blk_sizes_[0]);
-    assert(dst_offset + len <= self.dst_layer_blk_sizes_[0]);
+    assert(src_offset < max_layer_blk_size);
+    assert(len < max_layer_blk_size);
+    assert(src_offset + len <= max_layer_blk_size);
+    assert(dst_offset < max_dst_blk_size);
+    assert(dst_offset + len <= max_dst_blk_size);
+  }
 
+  // Launch all GPU copies asynchronously
+  for (const auto &[src_offset, dst_offset, len] : data) {
     const void* gpu_src = src_mr_base.buf + src_offset;
     auto cuda_rt = cudaMemcpyAsync(tensor_buf_ptr, gpu_src, len, cudaMemcpyDeviceToHost, self.cpy_stream_);
     RTCHECK(cuda_rt == cudaSuccess);
@@ -2316,7 +2321,6 @@ void TCPChannel::copy_send_data(
   meta_buf_ptr += sizeof(size_t);
   
   memcpy(meta_buf_ptr, data.data(), metadata_size * sizeof(IpcBlock));
-  meta_buf_ptr += metadata_size * sizeof(IpcBlock);
 
   auto cuda_rt_sync = cudaStreamSynchronize(self.cpy_stream_);
   RTCHECK(cuda_rt_sync == cudaSuccess);
@@ -2328,7 +2332,7 @@ void TCPChannel::copy_send_data(
 #endif
 }
 
-#if defined(cudaMemcpySrcAccessOrderStream)
+#ifdef ENABLE_BATCH_COPY
 void TCPChannel::copy_send_data_batch(
     size_t layer_idx,
     uint32_t magic,
@@ -2346,17 +2350,21 @@ void TCPChannel::copy_send_data_batch(
   std::vector<void*> dsts(count);
   std::vector<size_t> sizes(count);
 
+  const size_t max_layer_blk_size = self.ctx_->layer_blk_sizes[0];
+  const size_t max_dst_blk_size = self.dst_layer_blk_sizes_[0];
+  for (const auto &[src_offset, dst_offset, len] : data) {
+    assert(len > 0);
+    assert(src_offset < max_layer_blk_size);
+    assert(len < max_layer_blk_size);
+    assert(src_offset + len <= max_layer_blk_size);
+    assert(dst_offset < max_dst_blk_size);
+    assert(dst_offset + len <= max_dst_blk_size);
+  }
+
   char* current_tensor_buf_ptr = tensor_buf_ptr;
   size_t idx = 0;
 
   for (const auto &[src_offset, dst_offset, len] : data) {
-    assert(len > 0);
-    assert(src_offset < self.ctx_->layer_blk_sizes[0]);
-    assert(len < self.ctx_->layer_blk_sizes[0]);
-    assert(src_offset + len <= self.ctx_->layer_blk_sizes[0]);
-    assert(dst_offset < self.dst_layer_blk_sizes_[0]);
-    assert(dst_offset + len <= self.dst_layer_blk_sizes_[0]);
-
     srcs[idx] = src_mr_base.buf + src_offset;
     dsts[idx] = current_tensor_buf_ptr;
     sizes[idx] = len;
@@ -2394,7 +2402,6 @@ void TCPChannel::copy_send_data_batch(
   meta_buf_ptr += sizeof(size_t);
 
   memcpy(meta_buf_ptr, data.data(), metadata_size * sizeof(IpcBlock));
-  meta_buf_ptr += metadata_size * sizeof(IpcBlock);
 
   // Synchronize stream to ensure all tensor data copies are complete
   auto cuda_rt_sync = cudaStreamSynchronize(self.cpy_stream_);
@@ -2406,7 +2413,7 @@ void TCPChannel::copy_send_data_batch(
             << " blocks=" << metadata_size << " elapsed=" << copy_elapsed_us << " us";
 #endif
 }
-#endif  // CUDA 12.8+ (cudaMemcpySrcAccessOrderStream available)
+#endif  // ENABLE_BATCH_COPY
 
 accl::barex::XChannel *TCPChannel::ch() noexcept {
   return this->sch().get();

@@ -73,10 +73,7 @@ class TCPChannel : public IChannel, public noncopyable {
       char* tensor_buf_ptr,
       const accl::barex::memp_t& src_mr_base);
 
-  // Copy GPU data to host buffer Batch Copy
-  // Only available on CUDA 12.8+ (requires cudaMemcpyAttributes)
-  // Check for cudaMemcpySrcAccessOrderStream enum value (CUDA 12.8+ feature)
-#if defined(cudaMemcpySrcAccessOrderStream)
+#if ENABLE_BATCH_COPY
   void copy_send_data_batch(
       size_t layer_idx,
       uint32_t magic,
@@ -87,7 +84,7 @@ class TCPChannel : public IChannel, public noncopyable {
       char* meta_buf_ptr,
       char* tensor_buf_ptr,
       const accl::barex::memp_t& src_mr_base);
-#endif  // CUDA 12.8+ (cudaMemcpySrcAccessOrderStream available)
+#endif  // ENABLE_BATCH_COPY
 
  private:
   InstanceId const src_inst_id_;
