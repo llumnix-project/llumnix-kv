@@ -193,9 +193,14 @@ std::unique_ptr<KvTransferClient> KvTransferClient::create(std::unique_ptr<Conte
     for (const auto &p : protocols) {
       std::unique_ptr<IProtocolContext> proto_ctx;
       switch (p.type) {
+        case TransferProtocol::TCP:{
+          LOG(INFO) << "KVT client: creating TCP protocol context...";
+          proto_ctx = BarexProtoContext::client_context("KVTClient", TransferProtocol::Kind::TCP);
+          break;
+        }
         case TransferProtocol::RDMA_DIRECT:
 #ifdef ENABLE_RDMA
-          proto_ctx = RDMAProtoContext::client_context("KVTClient");
+          proto_ctx = BarexProtoContext::client_context("KVTClient", TransferProtocol::Kind::RDMA_DIRECT);
 #else
           throw std::runtime_error("RDMA protocol is not enabled in this lib;");
 #endif
@@ -206,7 +211,7 @@ std::unique_ptr<KvTransferClient> KvTransferClient::create(std::unique_ptr<Conte
     }
   } else {
 #ifdef ENABLE_RDMA
-    auto rdma_ctx = RDMAProtoContext::client_context("KVTClient");
+    auto rdma_ctx = BarexProtoContext::client_context("KVTClient", TransferProtocol::Kind::RDMA_DIRECT);
     if (rdma_ctx->check_support()) {
       ctx->register_protocol(std::move(rdma_ctx));
     }

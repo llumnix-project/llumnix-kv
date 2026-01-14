@@ -88,7 +88,7 @@ TEST(RDMAChannelTest, TestSerdeReqNofitfication) {
 
 
 TEST(RDMAChannelTest, TestTransfer) {
-  auto test_rdma_ctx = RDMAProtoContext::client_context("test");
+  auto test_rdma_ctx = BarexProtoContext::client_context("test", TransferProtocol::Kind::RDMA_DIRECT);
   if (!test_rdma_ctx->check_support()) {
     LOG(INFO) << "rdma not support on this node;";
     return;
@@ -178,10 +178,10 @@ TEST(RDMAChannelTest, TestTransfer) {
     };
     ctx.set_layer_info(0, all_layer_infos);
     ctx.set_block_params({block_size}, {token_size}, 4);
-    auto proto_ctx = RDMAProtoContext::client_context("KVTClient");
+    auto proto_ctx = BarexProtoContext::client_context("KVTClient", TransferProtocol::Kind::RDMA_DIRECT);
     auto proto = proto_ctx->protocol();
     ctx.register_protocol(std::move(proto_ctx));
-    auto rdma_ctx = ctx.get_protocol_ctx<RDMAProtoContext>(proto);
+    auto rdma_ctx = ctx.get_protocol_ctx<BarexProtoContext>(proto);
     RDMAChannel channel(ctx.inst_name, ctx.worker_id, rdma_ctx->cli_barex_ctx());
     auto dst_info = naming.get_worker_info("0", 0);
     size_t retry_cnt = 3;

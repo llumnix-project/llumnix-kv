@@ -246,6 +246,16 @@ void init_kv_transfer_server(const std::string &inst_name,
           KV_SERVER = nullptr;
           LOG(INFO) << "KVT: transfer protocol: " + p.to_string() + " not support, try next ...";
         }
+      } else if (supported.is_support(TransferProtocol::Kind::TCP)) {
+        auto p = TransferProtocol::tcp();
+        try {
+          KV_SERVER = create_transfer_server(p);
+          KV_SERVER->start_server(KV_SERVICE, ctx);
+          LOG(INFO) << "KVT: start kvtransfer server with protocol: " + p.to_string();
+        } catch (const std::exception &e) {
+          KV_SERVER = nullptr;
+          LOG(INFO) << "KVT: transfer protocol: " + p.to_string() + " not support, try next ...";
+        }
       }
       if (KV_SERVER == nullptr) {
         throw std::runtime_error("start kvtransfer server failed, because no transfer protocol support");
@@ -326,6 +336,7 @@ PYBIND11_MODULE(kvtransfer_ops, m) {
       .def("__repr__", &blade_llm::TransferProtocol::to_string);
   py::enum_<blade_llm::TransferProtocol::Kind>(protocol, "Kind")
       .value("RDMA_DIRECT", blade_llm::TransferProtocol::Kind::RDMA_DIRECT)
+      .value("TCP", blade_llm::TransferProtocol::Kind::TCP)
       .export_values();
 
   py::class_<blade_llm::ReqMeta>(m, "ReqMeta")

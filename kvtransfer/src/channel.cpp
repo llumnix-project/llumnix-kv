@@ -1,6 +1,7 @@
 #include <stdexcept>
 #include "channel.h"
 #include "protocol/rdma_protocol.h"
+#include "protocol/tcp_channel.h"
 
 namespace blade_llm {
 
@@ -64,9 +65,17 @@ std::unique_ptr<IChannel> create_channel(Context *ctx, const TransferProtocol &p
     throw std::runtime_error("unsupported transfer protocol: " + proto.to_string());
   }
   switch (proto.type) {
+    case TransferProtocol::Kind::TCP: {
+      //llx: RDMAProtoContext改个名字?
+      auto proto_ctx = ctx->get_protocol_ctx<BarexProtoContext>(proto);
+      if (proto_ctx == nullptr) {
+        throw std::runtime_error("tcp channel context not registered;");
+      }
+      return std::make_unique<TCPChannel>(ctx->inst_name, ctx->worker_id, proto_ctx->cli_barex_ctx());
+    }
     case TransferProtocol::Kind::RDMA_DIRECT: {
 #ifdef ENABLE_RDMA
-      auto proto_ctx = ctx->get_protocol_ctx<RDMAProtoContext>(proto);
+      auto proto_ctx = ctx->get_protocol_ctx<BarexProtoContext>(proto);
       if (proto_ctx == nullptr) {
         throw std::runtime_error("RDMA channel context not registered;");
       }

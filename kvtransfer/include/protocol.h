@@ -11,11 +11,13 @@ namespace blade_llm {
 struct TransferProtocol {
  public:
   enum Kind {
-    RDMA_DIRECT = 1
+    RDMA_DIRECT = 1,
+    TCP = 1U << 1
   };
 
   TransferProtocol(Kind p): type(p) {}
   static TransferProtocol rdma_direct();
+  static TransferProtocol tcp();
   [[nodiscard]] std::string to_string() const;
 
   Kind type;

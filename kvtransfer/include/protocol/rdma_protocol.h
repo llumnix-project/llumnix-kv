@@ -109,24 +109,30 @@ class BarexMRGuard : public noncopyable {
   accl::barex::memp_t mr_;
   accl::barex::XSimpleMempool *mp_ = nullptr; // owner: BarexCtx
   bool const release_; // 若为 true 则使用 ReleaseAndDeregBuffer 否则仅使用 DeregUserMr
+  bool const dereg_; // TCP hostbuffers需要release，但不dereg mr
  private:
-  BarexMRGuard(accl::barex::memp_t &&mr, accl::barex::XSimpleMempool *mp, bool r) noexcept:
+  BarexMRGuard(accl::barex::memp_t &&mr, accl::barex::XSimpleMempool *mp, bool r, bool d) noexcept:
       mr_(std::move(mr)),
       mp_(mp),
-      release_(r) {}
+      release_(r),
+      dereg_(d) {}
 
  public:
   static BarexMRGuard RelDeregGuard(accl::barex::memp_t &&mr, accl::barex::XSimpleMempool *mp) noexcept {
-    return BarexMRGuard(std::move(mr), mp, true);
+    return BarexMRGuard(std::move(mr), mp, true, true);
   }
   static BarexMRGuard DeregGuard(accl::barex::memp_t &&mr, accl::barex::XSimpleMempool *mp) noexcept {
-    return BarexMRGuard(std::move(mr), mp, false);
+    return BarexMRGuard(std::move(mr), mp, false, true);
+  }
+  static BarexMRGuard ReleaseGuard(accl::barex::memp_t &&mr, accl::barex::XSimpleMempool *mp) noexcept {
+    return BarexMRGuard(std::move(mr), mp, true, false);
   }
 
   BarexMRGuard(BarexMRGuard &&other) noexcept:
       mr_(std::move(other.mr_)),
       mp_(other.mp_),
-      release_(other.release_) {
+      release_(other.release_),
+      dereg_(other.dereg_) {
     other.mp_ = nullptr;
   }
 
@@ -142,7 +148,8 @@ struct BarexCtx : public noncopyable {
            std::string tp_name,
            int tpcnt,
            Context *ctx,
-           std::unique_ptr<accl::barex::XChannelCallback> ctxcb);
+           std::unique_ptr<accl::barex::XChannelCallback> ctxcb,
+           TransferProtocol::Kind kind);
 
   ~BarexCtx();
 
@@ -189,7 +196,8 @@ struct CliBarexCtx : public BarexCtx {
   CliBarexCtx(std::string mp_name,
               std::string tp_name,
               int tpcnt,
-              Context *ctx);
+              Context *ctx,
+              TransferProtocol::Kind kind);
 
   auto *connector() const noexcept {
     return this->connector_.get();
@@ -205,6 +213,12 @@ struct CliBarexCtx : public BarexCtx {
                           const std::vector<std::vector<IpcBlock>>* data,
                           uint32_t lcrc);
 
+  using OnRespF = std::function<void(accl::barex::Status, char*, size_t)>;
+  void push(uint64_t reqid, OnRespF on_resp) const;
+  // may return empty function
+  OnRespF pop(uint64_t reqid) const;
+  void on_send_error(accl::barex::Status s, uint64_t reqid) const;
+
  private:
    struct RpcCtxCb : public accl::barex::XChannelCallback {
     RpcCtxCb(const CliBarexCtx* clictx) noexcept: cli_ctx_(clictx) {}
@@ -218,12 +232,6 @@ struct CliBarexCtx : public BarexCtx {
   std::unique_ptr<RpcCtxCb> get_ctx_cb() const noexcept {
    return std::make_unique<RpcCtxCb>(this);
   }
-
-   using OnRespF = std::function<void(accl::barex::Status, char*, size_t)>;
-   void push(uint64_t reqid, OnRespF on_resp) const;
-   // may return empty function
-   OnRespF pop(uint64_t reqid) const;
-   void on_send_error(accl::barex::Status s, uint64_t reqid) const;
 
  public:
   // block size of all tensors in one layer, assume all tensors from different
@@ -280,7 +288,7 @@ class RDMAChannel : public IChannel, public noncopyable {
 
   std::string ip_;
   int port_{0};
-  std::vector<size_t> dst_layer_blk_sizes_; // 默认构造，空vector
+  std::vector<size_t> dst_layer_blk_sizes_;
   uint32_t dst_layer_num_{0};
 
   int prev_ch_idx_ = 0;
@@ -350,22 +358,29 @@ class CliCtxCallback : public accl::barex::XChannelCallback {
                   accl::barex::x_msg_header header) override {}
 };
 
-class RDMAProtoContext : public IProtocolContext {
+class BarexProtoContext : public IProtocolContext {
  public:
   const std::string name_prefix;
   const bool is_server;
+  const TransferProtocol::Kind kind;
 
-  static std::unique_ptr<RDMAProtoContext> server_context(std::string &&name,
-                                                          std::unique_ptr<accl::barex::XChannelCallback> &&cb);
+  static std::unique_ptr<BarexProtoContext> server_context(
+    std::string &&name, 
+    std::unique_ptr<accl::barex::XChannelCallback> &&cb,
+    TransferProtocol::Kind kind
+);
 
-  static std::unique_ptr<RDMAProtoContext> client_context(std::string &&name);
+  static std::unique_ptr<BarexProtoContext> client_context(std::string &&name, TransferProtocol::Kind kind);
 
-  RDMAProtoContext(std::string &&name,
+  BarexProtoContext(std::string &&name,
                    bool is_server_,
-                   std::unique_ptr<accl::barex::XChannelCallback> &&cb) :
+                   std::unique_ptr<accl::barex::XChannelCallback> &&cb,
+                   TransferProtocol::Kind kind_) :
       name_prefix(std::move(name)),
       is_server(is_server_),
-      callback_(std::move(cb)) {}
+      kind(kind_),
+      callback_(std::move(cb)),
+      protocol_(kind_) {}
 
   bool check_support() override;
   void init(Context *ctx) override;
@@ -392,7 +407,7 @@ class RDMAProtoContext : public IProtocolContext {
   std::unique_ptr<BarexCtx> barex_ctx_{nullptr};
   std::unique_ptr<CliBarexCtx> cli_barex_ctx_{nullptr};
   std::unique_ptr<accl::barex::XChannelCallback> callback_{nullptr};
-  TransferProtocol protocol_{TransferProtocol::Kind::RDMA_DIRECT};
+  TransferProtocol protocol_;
 };
 #endif  // ENABLE_RDMA
 }  // namespace blade_llm

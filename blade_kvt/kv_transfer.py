@@ -13,6 +13,7 @@ except ImportError:
     @enum.unique
     class KVTransferProtocolType(enum.Enum):
         RDMA_DIRECT = enum.auto()  # make mypy happy~
+        TCP = enum.auto()  # make mypy happy~
         DUMMY = enum.auto()
 
     class ReqMeta:

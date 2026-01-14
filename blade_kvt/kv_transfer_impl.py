@@ -31,12 +31,15 @@ logger = logging.getLogger("blade_kvt")
 @enum.unique
 class KVTransferProtocolType(enum.Enum):
     RDMA_DIRECT = enum.auto()
+    TCP = enum.auto()
     UNKNOWN = enum.auto()
 
     def to_ops_protocol(self) -> TransferProtocol:
         match self:
             case KVTransferProtocolType.RDMA_DIRECT:
                 return TransferProtocol(TransferProtocol.Kind.RDMA_DIRECT)
+            case KVTransferProtocolType.TCP:
+                return TransferProtocol(TransferProtocol.Kind.TCP)
             case _:
                 raise RuntimeError("unknown protocol type: " + self.name)
 
@@ -45,6 +48,8 @@ class KVTransferProtocolType(enum.Enum):
         match protocol_kind:
             case "rdma":
                 return KVTransferProtocolType.RDMA_DIRECT
+            case "tcp":
+                return KVTransferProtocolType.TCP
             case _:
                 return KVTransferProtocolType.UNKNOWN
 
@@ -55,6 +60,8 @@ def support_transfers_protocols() -> List[KVTransferProtocolType]:
         match p.type:
             case TransferProtocol.Kind.RDMA_DIRECT:
                 supports.append(KVTransferProtocolType.RDMA_DIRECT)
+            case TransferProtocol.Kind.TCP:
+                supports.append(KVTransferProtocolType.TCP)
             case _:
                 supports.append(KVTransferProtocolType.UNKNOWN)
     return supports
