@@ -25,20 +25,71 @@ def check_cuda_batch_copy_support() -> bool:
     Returns True if cudaMemcpySrcAccessOrderStream enum is defined (CUDA 12.8+).
     """
     import tempfile
-    
+
     # Test program to check if cudaMemcpySrcAccessOrderStream enum is available
     # This enum is available in CUDA 12.8+ which also provides cudaMemcpyBatchAsync
     test_code = """
-#include <cuda_runtime.h>
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <dlfcn.h>
+#include <string.h>
 
-int main() {
-#if defined(cudaMemcpySrcAccessOrderStream)
-    // Enum is defined, feature is available
-    return 0;
-#else
-    // Enum is not defined, feature is not available
+int main(int argc, char** argv)
+{
+    // 固定要查找的符号
+    const char* symbol = "cudaMemcpyBatchAsync";
+
+    // 自动查找 libcudart.so 的路径列表
+    char lib_paths[10][512];
+    int path_count = 0;
+
+    // 标准路径
+    strcpy(lib_paths[path_count++], "/usr/local/cuda/lib64/libcudart.so");
+    strcpy(lib_paths[path_count++], "/usr/local/cuda/lib/libcudart.so");
+    strcpy(lib_paths[path_count++], "/usr/lib/x86_64-linux-gnu/libcudart.so");
+    strcpy(lib_paths[path_count++], "/usr/lib/libcudart.so");
+    
+    // 检查环境变量中的 CUDA 路径
+    const char* cuda_home = getenv("CUDA_HOME");
+    const char* cuda_path = getenv("CUDA_PATH");
+    
+    if (cuda_home) {
+        snprintf(lib_paths[path_count], sizeof(lib_paths[0]), "%s/lib64/libcudart.so", cuda_home);
+        path_count++;
+        snprintf(lib_paths[path_count], sizeof(lib_paths[0]), "%s/lib/libcudart.so", cuda_home);
+        path_count++;
+    }
+    if (cuda_path) {
+        snprintf(lib_paths[path_count], sizeof(lib_paths[0]), "%s/lib64/libcudart.so", cuda_path);
+        path_count++;
+        snprintf(lib_paths[path_count], sizeof(lib_paths[0]), "%s/lib/libcudart.so", cuda_path);
+        path_count++;
+    }
+
+    for (int i = 0; i < path_count; i++) {
+        const char* lib_path = lib_paths[i];
+        void* handle = dlopen(lib_path, RTLD_LAZY);
+        if (handle) {
+            dlerror();
+            void* sym = dlsym(handle, symbol);
+            const char* err = dlerror();
+
+            if (err) {
+                printf("\nSymbol '%s' NOT found in %s\n", symbol, lib_path);
+            } else {
+                printf("\nSymbol '%s' FOUND at %p\n", symbol, sym);
+                dlclose(handle);
+                return 0;
+            }
+
+            dlclose(handle);
+        } else {
+            printf("  Failed to open: %s\\n", dlerror());
+        }
+    }
+    printf("NOT_FOUND\\n");
     return 1;
-#endif
 }
 """
     
@@ -53,20 +104,32 @@ int main() {
             test_file = os.path.join(tmpdir, "test_cuda_batch.cpp")
             with open(test_file, 'w') as f:
                 f.write(test_code)
-            
-            # Try to compile the test program
-            result = subprocess.run(
-                ["nvcc", "-o", os.path.join(tmpdir, "test_cuda_batch"), test_file, "-lcudart"],
+            test_binary = os.path.join(tmpdir, "test_cuda_batch")
+            compile_result = subprocess.run(
+                ["gcc", "-o", test_binary, test_file, "-ldl"],
                 capture_output=True,
                 text=True,
                 timeout=30
             )
             
-            if result.returncode == 0:
+            if compile_result.returncode != 0:
+                print(f"Failed to compile test program: {compile_result.stderr}")
+                return False
+
+            # Run the test program (it will automatically find libcudart.so and check symbol)
+            run_result = subprocess.run(
+                [test_binary],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            # Check output: "FOUND" means symbol exists, "NOT_FOUND" means it doesn't
+            if run_result.returncode == 0 and "FOUND" in run_result.stdout:
                 print("CUDA batch copy (cudaMemcpyBatchAsync) is supported")
                 return True
             else:
-                print(f"CUDA batch copy is not supported (CUDA < 12.8)")
+                print("CUDA batch copy (cudaMemcpyBatchAsync) is not supported")
                 return False
                 
     except Exception as e:
@@ -130,7 +193,11 @@ _kvtransfer_src = os.path.join(os.getcwd(), "kvtransfer")
 _build_options = ["-DBUILD_TESTS=OFF", "-DBUILD_RDMA=ON", "-DBUILD_PYTHON_BIND=ON"]
 
 # Check CUDA batch copy support and add corresponding CMake option
-if check_cuda_batch_copy_support():
+# If PPU_VERSION_NUM environment variable exists, force disable batch copy
+if "PPU_VERSION_NUM" in os.environ:
+    _build_options.append("-DENABLE_BATCH_COPY=OFF")
+    print(f"PPU_VERSION_NUM={os.environ['PPU_VERSION_NUM']} detected, forcing -DENABLE_BATCH_COPY=OFF")
+elif check_cuda_batch_copy_support():
     _build_options.append("-DENABLE_BATCH_COPY=ON")
     print("Adding -DENABLE_BATCH_COPY=ON to build options")
 else:
@@ -141,7 +208,9 @@ blade_kvt_ext = CMakeExtension("blade_kvt.kvtransfer_ops", src_dir=_kvtransfer_s
 
 
 def _barex_ver():
-    return "unknown"  # 等待 xiaoshi 修复 barex benchmark
+    if "PPU_VERSION_NUM" in os.environ:
+        return "unknown.ppu"
+    return "unknown.cuda" # 等待 xiaoshi 修复 barex benchmark
     result = subprocess.run(
         ["barex_benchmark", "-V"],
         capture_output=True,
@@ -169,7 +238,7 @@ def get_kvt_version() -> str:
     git_describe_command = [
         "git", "describe", "--dirty", "--tags", "--long", "--match",
         "v*[0-9]*[0-9]*[0-9]"
-    ]
+    ]        
     version = get_version(write_to="_version.py",
                           local_scheme=_local_version,
                           git_describe_command=git_describe_command)
