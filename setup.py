@@ -29,7 +29,9 @@ def check_cuda_batch_copy_support() -> bool:
     # Test program to check if cudaMemcpySrcAccessOrderStream enum is available
     # This enum is available in CUDA 12.8+ which also provides cudaMemcpyBatchAsync
     test_code = """
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <dlfcn.h>
@@ -49,11 +51,11 @@ int main(int argc, char** argv)
     strcpy(lib_paths[path_count++], "/usr/local/cuda/lib/libcudart.so");
     strcpy(lib_paths[path_count++], "/usr/lib/x86_64-linux-gnu/libcudart.so");
     strcpy(lib_paths[path_count++], "/usr/lib/libcudart.so");
-    
+
     // 检查环境变量中的 CUDA 路径
     const char* cuda_home = getenv("CUDA_HOME");
     const char* cuda_path = getenv("CUDA_PATH");
-    
+
     if (cuda_home) {
         snprintf(lib_paths[path_count], sizeof(lib_paths[0]), "%s/lib64/libcudart.so", cuda_home);
         path_count++;
@@ -76,16 +78,14 @@ int main(int argc, char** argv)
             const char* err = dlerror();
 
             if (err) {
-                printf("\nSymbol '%s' NOT found in %s\n", symbol, lib_path);
+                printf("Symbol '%s' NOT found in %s\\n", symbol, lib_path);
             } else {
-                printf("\nSymbol '%s' FOUND at %p\n", symbol, sym);
+                printf("FOUND\\n");
                 dlclose(handle);
                 return 0;
             }
 
             dlclose(handle);
-        } else {
-            printf("  Failed to open: %s\\n", dlerror());
         }
     }
     printf("NOT_FOUND\\n");
