@@ -6,6 +6,10 @@ import subprocess
 logger = logging.getLogger("blade_kvt")
 
 
+def support_async_sched() -> bool:
+    return True
+
+
 @functools.cache
 def is_nv_gpu() -> bool:
     import torch

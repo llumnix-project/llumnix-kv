@@ -46,8 +46,8 @@ Step::~Step() noexcept {
             << ",SubmitQueueUs=" << elapse_us(self.start_send_ts, self.submit_ts)
             << ",PythonExecUs=" << elapse_us(self.start_send_ts, self.flush_send_ts)
             << ",WaitLayerQueueUs=" << elapse_us(self.start_send_ts, self.wait_layers_start_ts)
-            << ",WaitLayerExecUs=" << elapse_us(self.wait_layers_start_ts, self.wait_layers_end_ts)
-            << ",SendNonoverlapUs=" << ielapse_us(self.flush_send_ts, last_send_ts)
+            << ",ForwardExecUs=" << elapse_us(self.wait_layers_start_ts, self.wait_layers_end_ts)
+            << ",SendNonoverlapUs=" << ielapse_us(self.wait_layers_end_ts, last_send_ts)
             << ",LastSendFlushTs=" << last_send_ts.time_since_epoch().count();  // send stub id
 }
 
@@ -90,8 +90,6 @@ std::shared_ptr<Step> &StepGuard::step() {
 }
 void StepGuard::layer_ready_all() {
   after_record_all();
-  auto val = step_->notify_layer_ready(num_layers);
-  assert(val == num_layers);
 }
 
 
