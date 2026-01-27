@@ -1,4 +1,4 @@
-from setuptools import setup, Extension
+from setuptools import setup, Extension, find_packages
 from setuptools_scm import get_version
 from setuptools_scm.version import get_local_node_and_date
 
@@ -248,7 +248,7 @@ def get_kvt_version() -> str:
 setup(
     name="blade_kvt",
     version=get_kvt_version(),
-    packages=["blade_kvt"],
+    packages=find_packages(where='.', include=['blade_kvt', 'blade_kvt.*']),
     author="Alibaba PAI Team",
     ext_modules=[blade_kvt_ext],
     cmdclass={

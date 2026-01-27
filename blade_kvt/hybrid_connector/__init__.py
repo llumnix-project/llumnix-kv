@@ -390,7 +390,8 @@ def _put_abort_resp(
     load_output[req.client_index].append(
         EngineCoreOutput(request_id=req.request_id,
                          new_token_ids=[req.eos_token_id or 0],
-                         finish_reason=FinishReason.ABORT))
+                         finish_reason=FinishReason.ABORT,
+                         queue_server_address=req.queue_server_address))
     return
 
 

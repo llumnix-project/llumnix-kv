@@ -181,6 +181,7 @@ def req2corereq(req: Request) -> EngineCoreRequest:
         prompt_embeds=req.prompt_embeds,
         priority=req.priority,
         trace_headers=req.trace_headers,
+        queue_server_address=req.queue_server_address,
     )
 
 

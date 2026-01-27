@@ -154,7 +154,6 @@ class MigrationBackend(HybridBackend):
             return
 
         self._cfg = vllm_config
-        self.max_model_len = vllm_config.scheduler_config.max_model_len
         self._loop = get_hybrid_sched_loop()
         self._inst_id = get_inst_id(vllm_config)
         tpsize = vllm_config.parallel_config.tensor_parallel_size
