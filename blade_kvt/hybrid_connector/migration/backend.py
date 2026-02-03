@@ -198,13 +198,13 @@ class MigrationBackend(HybridBackend):
         # migration in limits
         self.max_migrate_in_reqs = envs.LLUMNIX_MAX_REQ_MIG_IN
         max_migrate_in_tokens = envs.LLUMNIX_MAX_TOKEN_MIG_IN
-        max_migrate_in_block_ratio = envs.LLUMNIX_MAX_BLOCK_RATIO_MIG_IN
+        max_migrate_in_kv_cache_usage_ratio = envs.LLUMNIX_MAX_KV_CACHE_USAGE_RATIO_MIG_IN
         total_tokens = self._cfg.cache_config.num_gpu_blocks * \
             self._cfg.cache_config.block_size
         # Only works when LLUMNIX_DETAILED_MIG_STATUS is True
         self.max_migrate_in_tokens = min(
             max_migrate_in_tokens,
-            int(total_tokens * max_migrate_in_block_ratio))
+            int(total_tokens * max_migrate_in_kv_cache_usage_ratio))
 
         global _g_backend
         _g_backend = self
