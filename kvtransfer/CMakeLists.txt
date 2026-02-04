@@ -91,6 +91,7 @@ endif ()
 
 file(GLOB_RECURSE SRCS CONFIGURE_DEPENDS src/*.cpp)
 
+set(Python3_EXECUTABLE "/usr/bin/python3")
 find_package (Python3 COMPONENTS Interpreter Development)
 list(APPEND TARGET_INCLUDE_DIRS ${Python3_INCLUDE_DIRS})
 list(APPEND TARGET_LINK_LIBS ${TORCH_PYTHON_LIBRARY} ${Python3_LIBRARIES})

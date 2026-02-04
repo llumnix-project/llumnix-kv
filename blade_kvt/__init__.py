@@ -5,6 +5,7 @@ import subprocess
 
 logger = logging.getLogger("blade_kvt")
 
+import blade_kvt.kvtransfer_ops
 
 def support_async_sched() -> bool:
     return True
