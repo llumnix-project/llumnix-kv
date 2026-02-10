@@ -44,7 +44,7 @@ def generate():
         _do_generate_nic_affinity_file(FILEPATH)
         return
     except Exception:
-        logger.exception("do_generate_nic_affinity_file failed")
+        logger.warning("do_generate_nic_affinity_file failed")
 
     # use fallback logic
     aff_data = {str(rank): "UNKNOWN-NIC-NAME" for rank in range(129)}
