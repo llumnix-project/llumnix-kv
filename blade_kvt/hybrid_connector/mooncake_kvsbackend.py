@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import torch
-from mooncake.store import MooncakeDistributedStore
+from mooncake.store import MooncakeDistributedStore, ReplicateConfig
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -16,12 +16,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.utils import EventPool
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from . import BackendMeta, HybridBackend, IoRet
-from ..engine_proxy import (
+from .engine_proxy import (
     get_p_node_pop_len,
     sched_get_kvblk_ids,
 )
@@ -29,6 +28,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 
 from . import HCSchedOutput, hybridsched
+from .utils import EventPool
 
 DEFAULT_GLOBAL_SEGMENT_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 16 * 1024 * 1024  # 16 MB
@@ -163,6 +163,7 @@ class MooncakeKVSBackendMetadata(BackendMeta):
     def __bool__(self) -> bool:
         return bool(self.metas)
 
+
 class MooncakeKVSBackend(HybridBackend):
     def __init__(
         self,
@@ -219,6 +220,11 @@ class MooncakeKVSBackend(HybridBackend):
         self.tp_rank = None
         self.request_saved_blocks: dict[str, int] = {}
         self.init_mooncake(role)
+
+        # NOTE(sunbiao.sun): enforce local-first put
+        self.replica_config = ReplicateConfig()
+        self.replica_config.replica_num = 1
+        self.replica_config.preferred_segment = self.store.get_hostname()
 
     def init_mooncake(self, role):
         if role == KVConnectorRole.SCHEDULER:
@@ -283,21 +289,21 @@ class MooncakeKVSBackend(HybridBackend):
             "The number of kv caches is not equal to the number of layers"
         )
         self.kv_caches = kv_caches
-        ret = self.store.register_kv_caches(list(kv_caches.values()), self.tp_rank)
-        assert(all(x == 0 for x in ret))
+
         for layer_name, cache_tensor in kv_caches.items():
             self.layer_name_to_index[layer_name] = extract_layer_index(layer_name)
+            buffer_ptr = cache_tensor.data_ptr()
+            buffer_size = cache_tensor.numel() * cache_tensor.element_size()
+            ret_code = self.store.register_buffer(buffer_ptr, buffer_size)
+            if ret_code != 0:
+                raise RuntimeError(
+                    f"Failed to register buffer for {layer_name}: {ret_code}"
+                )
+
         sample_tensor = list(kv_caches.values())[0]
-        if len(sample_tensor.shape) == 5:
-            sample_block = sample_tensor[0, 0]
-            self.block_bytes = sample_block.numel() * sample_block.element_size()
-            self.load_bytes_on_success = self.block_bytes * self.num_layers * 2
-        elif len(sample_tensor.shape) == 3:
-            sample_block = sample_tensor[0]
-            self.block_bytes = sample_block.numel() * sample_block.element_size()
-            self.load_bytes_on_success = self.block_bytes * self.num_layers
-        else:
-            raise ValueError("Unsupported kv cache tensor shape.")
+        sample_block = sample_tensor[0, 0]
+        self.block_bytes = sample_block.numel() * sample_block.element_size()
+        self.load_bytes_on_success = self.block_bytes * self.num_layers * 2
 
     def warmup(self):
         warmup_key = "sglang_mooncake_store_warmup_key" + uuid.uuid4().hex
@@ -309,8 +315,6 @@ class MooncakeKVSBackend(HybridBackend):
     async def async_load_kv(self, metadata: BackendMeta) -> AsyncGenerator[IoRet, None]:
         assert isinstance(metadata, MooncakeKVSBackendMetadata)
         metas = [meta for meta in metadata.metas if not meta.is_store]
-        loop = asyncio.get_running_loop()
-        tasks = []
 
         for meta in metas:
             assert len(meta.block_hashes) == len(meta.block_ids)
@@ -318,42 +322,55 @@ class MooncakeKVSBackend(HybridBackend):
                 yield IoRet(reqid=meta.request_id, n=0)
                 continue
 
-            meta_futures = [loop.create_future() for _ in range(len(meta.block_ids))]
-            self.store.batch_load_kv_async(meta.block_ids, meta.block_hashes,
-                                           loop, meta_futures)
+            all_keys = [
+                hash_val + "_" + str(self.tp_rank) for hash_val in meta.block_hashes
+            ]
+            exists_results = self.store.batch_is_exist(all_keys)
 
-            async def meta_worker(meta, futures_for_meta):
-                results = await asyncio.gather(*futures_for_meta)
-                num_loaded_block = 0
-                for get_bytes in results:
-                    if get_bytes == self.load_bytes_on_success:
-                        num_loaded_block += 1
-                    else:
-                        break
+            keys = []
+            multi_buffer_ptrs = []
+            multi_buffer_bytes = []
 
-                num_loaded_token = min(
-                    num_loaded_block * self.block_size, len(meta.token_ids)
-                )
-                if (num_loaded_token + meta.num_cached_tokens_local
-                        == len(meta.token_ids)):
-                    num_loaded_token -= 1
-                return IoRet(reqid=meta.request_id, n=num_loaded_token)
+            for idx, (block_id, hash_val, exist) in enumerate(
+                zip(meta.block_ids, meta.block_hashes, exists_results)
+            ):
+                if exist != 1:
+                    break
 
-            task = asyncio.create_task(
-                meta_worker(meta, meta_futures)
+                buffer_ptrs = []
+                for layer_name, cache_tensor in self.kv_caches.items():
+                    k_cache = cache_tensor[0, block_id]
+                    v_cache = cache_tensor[1, block_id]
+                    buffer_ptrs.append(k_cache.data_ptr())
+                    buffer_ptrs.append(v_cache.data_ptr())
+
+                key = hash_val + "_" + str(self.tp_rank)
+                keys.append(key)
+                multi_buffer_ptrs.append(buffer_ptrs)
+                multi_buffer_bytes.append([self.block_bytes] * len(buffer_ptrs))
+
+            if not keys:
+                yield IoRet(reqid=meta.request_id, n=0)
+                continue
+
+            ret = self.store.batch_get_into_multi_buffers(
+                keys, multi_buffer_ptrs, multi_buffer_bytes
             )
-            tasks.append(task)
-        if not tasks:
-            return
 
-        pending = set(tasks)
-        while pending:
-            done, pending = await asyncio.wait(
-                pending, return_when=asyncio.FIRST_COMPLETED
+            num_loaded_block = 0
+            for get_bytes in ret:
+                if get_bytes == self.load_bytes_on_success:
+                    num_loaded_block += 1
+                else:
+                    break
+
+            num_loaded_token = min(
+                num_loaded_block * self.block_size, len(meta.token_ids)
             )
-            for t in done:
-                io_ret = t.result()
-                yield io_ret
+            if (num_loaded_token + meta.num_cached_tokens_local
+                    == len(meta.token_ids)):
+                num_loaded_token -= 1
+            yield IoRet(reqid=meta.request_id, n=num_loaded_token)
 
     def async_save_kv_layer(
         self, layer_name: str, kv_layer: torch.Tensor, metadata: BackendMeta
@@ -372,7 +389,6 @@ class MooncakeKVSBackend(HybridBackend):
         event.record(forward_stream)
 
         async def _save_kv_layer(event) -> AsyncGenerator[str, None]:
-            loop = asyncio.get_running_loop()
             layer_idx = self.layer_name_to_index[layer_name]
             if layer_idx < self.num_layers - 1:
                 for meta in metas:
@@ -380,8 +396,9 @@ class MooncakeKVSBackend(HybridBackend):
                         yield meta.request_id
                 return
 
-            hash_values = []
-            block_ids_to_save = []
+            filtered_keys = []
+            filtered_multi_buffer_ptrs = []
+            filtered_multi_buffer_bytes = []
             requests_to_yield = set()
 
             for meta in metas:
@@ -406,22 +423,42 @@ class MooncakeKVSBackend(HybridBackend):
                 self.request_saved_blocks[meta.request_id] = (
                         maybe_saved_blocks + blocks_to_save
                 )
-                meta_hash_values = meta.block_hashes[
-                    maybe_saved_blocks : maybe_saved_blocks + blocks_to_save]
-                meta_block_ids_to_save = meta.block_ids[
-                    maybe_saved_blocks : maybe_saved_blocks + blocks_to_save]
 
-                hash_values.extend(meta_hash_values)
-                block_ids_to_save.extend(meta_block_ids_to_save)
+                keys = []
+                multi_buffer_ptrs = []
+                for idx in range(blocks_to_save):
+                    buffer_ptrs = []
+                    block_id = meta.block_ids[maybe_saved_blocks + idx]
+                    for loop_layer_name, cache_tensor in self.kv_caches.items():
+                        k_cache = cache_tensor[0, block_id]
+                        v_cache = cache_tensor[1, block_id]
+                        buffer_ptrs.append(k_cache.data_ptr())
+                        buffer_ptrs.append(v_cache.data_ptr())
+
+                    key = meta.block_hashes[maybe_saved_blocks + idx] + "_" + str(self.tp_rank)
+                    keys.append(key)
+                    multi_buffer_ptrs.append(buffer_ptrs)
+
+                exists_result = self.store.batch_is_exist(keys)
+                for key, ptrs, exist in zip(keys, multi_buffer_ptrs, exists_result):
+                    if exist != 1:
+                        filtered_keys.append(key)
+                        filtered_multi_buffer_ptrs.append(ptrs)
+                        filtered_multi_buffer_bytes.append(
+                            [self.block_bytes] * len(ptrs)
+                        )
 
             await asyncio.to_thread(event.synchronize)
             self.event_pool.put_event(event)
 
-            meta_futures = [loop.create_future() for _ in range(len(block_ids_to_save))]
-            self.store.batch_save_kv_async(block_ids_to_save, hash_values,
-                                           loop, meta_futures)
+            if filtered_keys:
+                self.store.batch_put_from_multi_buffers(
+                    filtered_keys,
+                    filtered_multi_buffer_ptrs,
+                    filtered_multi_buffer_bytes,
+                    self.replica_config, # enforce local-first put
+                )
 
-            results = await asyncio.gather(*meta_futures)  # noqa: F841
             for request_id in requests_to_yield:
                 self.request_saved_blocks.pop(request_id, None)
                 yield request_id
@@ -450,7 +487,7 @@ class MooncakeKVSBackend(HybridBackend):
         keys = []
         for hash in uncomputed_blocks_hashes:
             for i in range(self.tp_size):
-                keys.append(hash + "_" +str(i))
+                keys.append(hash + "_" + str(i))
 
         ret = self.store.batch_is_exist(keys)
 
@@ -569,9 +606,12 @@ class MooncakeKVSBackend(HybridBackend):
             h.hex() for h in request.block_hashes[:num_populated_blocks]
         ]
 
+        # NOTE(sunbiao.sun): vllm oss request does not have cache_control_params field
         udc_ttl = (
             300
-            if (request.cache_control_params is not None and "NOCPFS" not in request_id)
+            if (hasattr(request, "cache_control_params")
+                and request.cache_control_params is not None
+                and "NOCPFS" not in request_id)
             else 0
         )
 
@@ -623,7 +663,8 @@ def should_save(req: Request) -> bool:
         return False
     if req.num_prompt_tokens <= envs.VLLM_KVS_ON_MIN_LENGTH + 1:
         return False
-    return not req.prefill_done
+    # NOTE(sunbiao.sun): vllm oss request does not have prefill_done field
+    return not (req.num_computed_tokens >= req.num_prompt_tokens)
 
 
 def should_load(req: Request) -> bool:

@@ -5,7 +5,7 @@ import struct
 import threading
 import time
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from typing import Any, Callable, Coroutine, Optional
 
@@ -463,6 +463,42 @@ class IoState:
                 ret.n = wio.n
         return ret
 
+
+class EventPool:
+    def __init__(self, reserve_num_events: int, device: torch.device):
+        self.reserve_num_events = reserve_num_events
+        self.event_queue: deque[torch.cuda.Event] = deque()
+        self.device = device
+        with torch.cuda.device(device):
+            for i in range(reserve_num_events):
+                event = torch.cuda.Event()
+                # create the detail new event
+                event.record()
+                event.synchronize()
+                self.event_queue.append(event)
+
+    def get_event(self) -> torch.cuda.Event:
+        if len(self.event_queue) == 0:
+            with torch.cuda.device(self.device):
+                event = torch.cuda.Event()
+                # create the detail new event
+                event.record()
+                event.synchronize()
+                self.event_queue.append(event)
+        return self.event_queue.popleft()
+
+    def put_event(self, event: torch.cuda.Event):
+        self.event_queue.append(event)
+
+    def get_events(self, num_events: int) -> list[torch.cuda.Event]:
+        ret = []
+        for i in range(num_events):
+            ret.append(self.get_event())
+        return ret
+
+    def put_events(self, events: list[torch.cuda.Event]):
+        for event in events:
+            self.event_queue.append(event)
 
 def try_advance(
     state_dict: dict[str, Any], ioret: IoRet, worker_tprank: int, tpsize: int

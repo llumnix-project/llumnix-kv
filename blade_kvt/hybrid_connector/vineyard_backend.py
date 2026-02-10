@@ -20,7 +20,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.splitwise.sidecar import SidecarClient, run_sidecar
 from vllm.splitwise.splitwise import EXTRA_DATA_NBYTES
-from vllm.utils import EventPool
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_kv_cache_torch_dtype
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -29,6 +28,8 @@ from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, Schedul
 from . import BackendMeta, HybridBackend, IoRet
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheSpec
 from vllm.v1.request import Request
+
+from .utils import EventPool
 
 logger = init_logger(__name__)
 

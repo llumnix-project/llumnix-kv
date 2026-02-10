@@ -16,12 +16,11 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.tracing import TraceWrapper
-from vllm.utils import EventPool
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from . import BackendMeta, HybridBackend, IoRet
-from ..engine_proxy import (
+from .engine_proxy import (
     get_p_node_pop_len,
     sched_get_kvblk_ids,
 )
@@ -29,6 +28,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 
 from . import HCSchedOutput, hybridsched
+from .utils import EventPool
 
 logger = init_logger(__name__)
 
