@@ -11,8 +11,7 @@
 
 namespace blade_llm {
 
-// Can only used for gdn block parsing
-// rename after
+// used for gdn block parsing
 static void parse_hybrid_attn_block(
   int p_base_blk_idx,
   int d_base_blk_idx,
@@ -42,10 +41,10 @@ static void parse_hybrid_attn_block(
     const auto tokens = std::min<uint32_t>(
       {src_ntpb - p_token_idx_base, dst_ntpb - d_token_idx_base, left_tokens}
     );
-    // kv分开，除以2
+    // kv is not contiguous
     const auto token_step_length = p_token_size / 2;
     assert(token_step_length * 2 == p_token_size);
-    for (uint32_t idx = 0; idx < tokens; ++idx) { // 这里按照p_token_size拆成小包
+    for (uint32_t idx = 0; idx < tokens; ++idx) {
       const uint32_t p_token_idx = p_token_idx_base + idx;
       const uint32_t d_token_idx = d_token_idx_base + idx;
       const size_t pk_token_off = p_blk_off + p_token_idx * token_step_length;
@@ -64,61 +63,7 @@ static void parse_hybrid_attn_block(
   return;
 }
 
-// actual parsing flashinfer block
-static void parse_flashinfer_block_p_eq_d(
-  size_t token_size,
-  size_t block_size,
-  uint32_t ntpb,
-  const std::vector<uint32_t>& src_blocks,
-  const std::vector<uint32_t>& dst_blocks,
-  uint32_t wrote_tokens,
-  uint32_t left_tokens,
-  std::vector<IpcBlock> &per_cache_send_blocks,
-  const bool reach_last_token
-){
-  while (left_tokens > 0) {
-    const auto blk_idx = wrote_tokens / ntpb;
-    const auto token_idx = wrote_tokens % ntpb;
-
-    assert(blk_idx < src_blocks.size() && blk_idx < dst_blocks.size());
-
-    const size_t p_blk_off = src_blocks[blk_idx] * block_size;
-    const size_t d_blk_off = dst_blocks[blk_idx] * block_size;
-
-    // PD block size should be same
-    auto tokens = std::min(ntpb - token_idx, left_tokens);
-    size_t length = 0;
-    // 按照block传
-    if (tokens != ntpb){
-      // request's last block or chunked prefill first/last block
-      if (reach_last_token){ // request's last block
-        length = block_size;
-      } else if (token_idx == 0) {
-        // chunked prefill last block
-        length = 0;
-      } else { // chunked prefill first block
-        if (token_idx + tokens == ntpb) {
-          // 达到了block的边界，整个block都传输
-          length = block_size;
-        } else {
-          assert(token_idx + tokens < ntpb);
-          // 开头在block中间，结束的token也在block中间，并且请求未完成，顺延到下个step传输
-          length = 0;
-        }
-      }
-    } else { // tokens == ntpb, send full block
-      length = block_size;
-    }
-    if (length > 0) {
-      per_cache_send_blocks.emplace_back(p_blk_off, d_blk_off, length);
-    }
-    wrote_tokens += tokens;
-    left_tokens -= tokens;
-  }
-  return;
-}
-
-// 需要按照head维度进行分割，不需要区分p gt d还是p eq d
+// need to split by head dimension, no need to distinguish p gt d or p eq d
 static void parse_flashinfer_HND_block(
   size_t p_token_size,
   size_t d_token_size,
@@ -146,7 +91,7 @@ static void parse_flashinfer_HND_block(
     const auto p_k_block_size = p_block_size / 2;
     const auto d_k_block_size = d_block_size / 2;
 
-    // 如果按token粒度发送就需要按照head进行分割
+    // send by token granularity, need to split by head
     for (auto head_idx = 0; head_idx < p_head_num; ++head_idx) {
       auto p_k_off = p_blk_off + head_idx * p_head_size;
       auto d_k_off = d_blk_off + attn_group_off * p_k_block_size + head_idx * p_head_size;
@@ -275,16 +220,15 @@ static void do_parse_hybrid_block_send_p_gt_d(
 
   const auto p_gdn_blks_num = env_gdn_block_num();
   const auto d_gdn_blks_num = p_gdn_blks_num;
-  // 现在develop修改了排列顺序，先 GDN Block 再 Attn Block
   const auto p_gdn_blk_idx = 0;
   const auto d_gdn_blk_idx = 0;
-  // 这里要重新算gdn的offset，因为pd block size不一样
-  // 讲道理，现在是先算GDN，不过反正传的数据量也不多，先等最后一起传，后面再说
+  //  need to recalculate the offset of gdn, because pd block size is different
+  // GDN blocks will be update in-place, so send it when prefill is finished
   if (task->reach_last_token){
     std::vector<size_t> conv_state_shape = *env_conv_state_shape();
     std::vector<size_t> ssm_state_shape = *env_ssm_state_shape();
     uint32_t gdn_element_size = env_gdn_element_size();
-    // TODO: Not elegant, refactor this later
+    // TODO(llx): Not elegant, refactor this later
     const auto p_conv_block_size = conv_state_shape[1] * conv_state_shape[2] * gdn_element_size;
     const auto p_ssm_block_size = ssm_state_shape[1] * ssm_state_shape[2] * ssm_state_shape[3] * gdn_element_size;
     for (auto i = 0; i < p_gdn_blks_num; ++i) {
@@ -293,7 +237,7 @@ static void do_parse_hybrid_block_send_p_gt_d(
       // GDN Block:[[Conv][SSM][Padding]]
       const size_t p_gdn_off = src_blocks[p_blk_idx] * p_block_size;
       const size_t d_gdn_off = dst_blocks[d_blk_idx] * d_block_size;
-      // conv state在最后一维分割，需要分成conv_state_shape[1]个小包
+      // conv state is split along the last dimension, need to split into conv_state_shape[1] small packets
       const auto conv_step_length = conv_state_shape[2] * gdn_element_size;
       for (size_t conv_dim = 0; conv_dim < conv_state_shape[1]; ++conv_dim) {
         const size_t p_conv_off = p_gdn_off + conv_dim * conv_step_length;
@@ -306,7 +250,6 @@ static void do_parse_hybrid_block_send_p_gt_d(
     }
   }
   if (!validranks[p_tp_rank]) {
-    // kv 复制 case: 仅有效 worker tp rank 参与attn发送.
     return ;
   }
   parse_hybrid_attn_block(
@@ -479,7 +422,7 @@ static void vllm_parse_hybrid_block_send_p_gt_d(
     assert(src_worker_info->tp_size > dst_worker_info->tp_size);
     assert(src_worker_info->tp_size % dst_worker_info->tp_size == 0);
 
-    // GDN不会受到head < tp size的困扰
+    // GDN will not be affected by head < tp size
     const uint32_t p_origin_tp_size = env_origin_p_tp_size();
     const uint32_t gdn_group_n = p_origin_tp_size / dst_worker_info->tp_size;
     assert(src_worker_info->worker_tp_rank / gdn_group_n == dst_worker_info->worker_tp_rank);
@@ -536,6 +479,13 @@ static void parse_block_send_gt(
   assert(p_k_size == p_token_size || p_k_size * 2 == p_token_size);
   const size_t p_block_size = p_token_size * ntpb;
   const size_t d_block_size = d_token_size * ntpb;
+
+  auto cast2fp8 = env_bf162fp8_conversion();
+  // When cast2fp8 is enabled: cast buffer p (bf16) to buffer d (fp8).
+  // Sizing: d_k_size = p_k_size / 2, need use d_k_size to calculate offset
+  if (cast2fp8) {
+    p_k_size = p_k_size / 2;
+  }
 
   per_cache_send_blocks.reserve(per_cache_send_blocks.size() + left_tokens);
   while (left_tokens > 0) {
@@ -807,15 +757,12 @@ static void vllm_parse_block_send_multi_tensor_p_gt_d(
   const ReqSendTask *task,
   std::vector<std::vector<IpcBlock>> &send_blocks) {
   if (p_info->token_sizes == d_info->token_sizes) {
-    // 此时表明 kvcache 在各个 P rank 之间是完全一样的.
-    // 只需要 tp rank=0 的 worker 传输 kvcache 即可.
-    // 后续这里可以让所有 worker 都参与进来, 每个 worker 传 1 部分.
     if (p_info->worker_tp_rank != 0) {
       return ;
     }
 
     assert(d_info->worker_tp_rank == 0);
-    // PD Block 包含的token数需要一致
+    // block size of PD Block should be the same
     assert(p_info->block_sizes == d_info->block_sizes);
     auto &token_sizes = p_info->token_sizes;
     auto &block_sizes = p_info->block_sizes;

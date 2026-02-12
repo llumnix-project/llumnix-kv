@@ -92,13 +92,13 @@ int main(int argc, char** argv)
     return 1;
 }
 """
-    
+
     try:
         # Check if nvcc is available
         if not which("nvcc"):
             print("nvcc not found, assuming CUDA batch copy is not supported")
             return False
-        
+
         # Create temporary directory for test compilation
         with tempfile.TemporaryDirectory() as tmpdir:
             test_file = os.path.join(tmpdir, "test_cuda_batch.cpp")
@@ -111,7 +111,7 @@ int main(int argc, char** argv)
                 text=True,
                 timeout=30
             )
-            
+
             if compile_result.returncode != 0:
                 print(f"Failed to compile test program: {compile_result.stderr}")
                 return False
@@ -131,7 +131,7 @@ int main(int argc, char** argv)
             else:
                 print("CUDA batch copy (cudaMemcpyBatchAsync) is not supported")
                 return False
-                
+
     except Exception as e:
         print(f"Error checking CUDA batch copy support: {e}, assuming not supported")
         return False
@@ -208,11 +208,9 @@ blade_kvt_ext = CMakeExtension("blade_kvt.kvtransfer_ops", src_dir=_kvtransfer_s
 
 
 def _barex_ver():
-    if "PPU_VERSION_NUM" in os.environ:
-        return "unknown.ppu"
-    return "unknown.cuda" # 等待 xiaoshi 修复 barex benchmark
     result = subprocess.run(
-        ["barex_benchmark", "-V"],
+        "strings `which barex_benchmark` | grep -F 'Git Message'",
+        shell=True,
         capture_output=True,
         text=True,
         check=True
@@ -230,6 +228,7 @@ def _local_version(version) -> str:
     version_parts = [local_ver]
     if int(os.environ.get("BLADELLM_CMAKE_DEBUG", 0)):
         version_parts.append('debug')
+    # 这里是对 python local ver 的滥用... 待修正
     version_parts.append(f"barex.{_barex_ver()}")
     return '.'.join(version_parts)
 
@@ -238,7 +237,7 @@ def get_kvt_version() -> str:
     git_describe_command = [
         "git", "describe", "--dirty", "--tags", "--long", "--match",
         "v*[0-9]*[0-9]*[0-9]"
-    ]        
+    ]
     version = get_version(write_to="_version.py",
                           local_scheme=_local_version,
                           git_describe_command=git_describe_command)

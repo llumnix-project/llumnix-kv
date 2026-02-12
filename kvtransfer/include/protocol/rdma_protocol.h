@@ -149,7 +149,8 @@ struct BarexCtx : public noncopyable {
            int tpcnt,
            Context *ctx,
            std::unique_ptr<accl::barex::XChannelCallback> ctxcb,
-           TransferProtocol::Kind kind);
+           TransferProtocol::Kind kind,
+           bool is_server);
 
   ~BarexCtx();
 
@@ -170,8 +171,19 @@ struct BarexCtx : public noncopyable {
   auto *mp() const noexcept {
     return this->mp_;
   }
+  
+  [[nodiscard]] int device_id() const noexcept {
+    return this->device_id_;
+  }
+  
+  [[nodiscard]] bool is_server() const noexcept {
+    return this->is_server_;
+  }
+  
  private:
   // 记得这里的顺序决定了析构顺序, 要注意成员放置顺序.
+  int device_id_{-1};  // Device ID from Context, set via ctx->device_id()
+  bool is_server_{true};  // Flag indicating if initialized by BarexCtx itself (true) or CliBarexCtx (false)
   accl::barex::XSimpleMempool* mp_ = nullptr;
   std::unique_ptr<accl::barex::XThreadpool, XThreadpoolDeleter> tp_;
   std::unique_ptr<accl::barex::XContext> xctx_;

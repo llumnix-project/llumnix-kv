@@ -89,7 +89,10 @@ elseif (CURL_REQUIRED)
     add_compile_definitions(ENABLE_CURL)
 endif ()
 
-file(GLOB_RECURSE SRCS CONFIGURE_DEPENDS src/*.cpp)
+file(GLOB_RECURSE SRCS CONFIGURE_DEPENDS src/*.cpp src/*.cu)
+# Exclude test files and standalone implementations from production build
+list(FILTER SRCS EXCLUDE REGEX ".*/benchmarks/.*/test_.*\\.cpp$")
+list(FILTER SRCS EXCLUDE REGEX ".*/benchmarks/.*/d2h_stream_impl\\.cpp$")
 
 set(Python3_EXECUTABLE "/usr/bin/python3")
 find_package (Python3 COMPONENTS Interpreter Development)

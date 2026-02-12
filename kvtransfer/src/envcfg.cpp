@@ -65,6 +65,16 @@ int env_conn_tpsize() {
   return val;
 }
 
+int env_h2d_sync_tpsize() {
+  static constexpr int DEFVAL = 4;
+  static int val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_H2D_SYNC_TPSIZE", DEFVAL);
+  });
+  return val;
+}
+
 int env_fsnaming_keepalive_interval_s() {
   static constexpr int DEFVAL = 3;
   static int val = DEFVAL;
@@ -401,6 +411,43 @@ uint32_t env_origin_p_tp_size() noexcept {
     if (valenv != nullptr) {
       val = static_cast<uint32_t>(atoi(valenv));
     }
+  });
+  return val;
+}
+
+size_t env_kernel_copy_max_block_num() noexcept {
+  static constexpr size_t DEFVAL = 8192;
+  static size_t val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = static_cast<size_t>(env2posint("BLLM_KVTRANS_KERNEL_COPY_MAX_BLOCK_NUM", static_cast<int>(DEFVAL)));
+  });
+  return val;
+}
+
+double env_kernel_copy_sm_usage() noexcept {
+  static constexpr double DEFVAL = 1.0;  // 1.0 means use all SMs
+  static double val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    const char* valstr = getenv("BLLM_KVTRANS_KERNEL_COPY_SM_USAGE");
+    if (valstr != nullptr) {
+      double tmp = atof(valstr);
+      if (tmp > 0.0 && tmp <= 1.0) {
+        val = tmp;
+      }
+    }
+  });
+  return val;
+}
+
+
+bool env_bf162fp8_conversion() noexcept {
+  static constexpr bool DEFVAL = false;  // Disabled by default
+  static bool val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_BF162FP8_CONV", static_cast<int>(DEFVAL)) != 0;
   });
   return val;
 }

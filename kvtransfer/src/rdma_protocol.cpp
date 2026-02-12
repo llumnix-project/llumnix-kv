@@ -13,9 +13,12 @@
 #include <fstream>
 #include <iomanip>
 #include <mutex>
+#include <thread>
 #include <numeric>
+#include <functional>
 #include <zlib.h>
 #include "fault_inject.h"
+#include "copy_kernels.h"
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
 
@@ -33,6 +36,134 @@ using namespace accl::barex;
 #endif
 
 namespace blade_llm {
+
+// Thread-local context for kernel copy operations
+struct CopyKernelCtx : public noncopyable {
+  // GPU buffer for kernel copy metadata (src_offsets, dst_offsets, lengths)
+  // Size: 3 * sizeof(int64_t) * env_kernel_copy_max_block_num()
+  char* device_blk_buffer = nullptr; // on device
+  char* host_blk_buffer = nullptr; // on host
+  int device_id = -1;
+  bool initialized = false;
+  
+  cudaStream_t h2d_stream = nullptr;
+  cudaStream_t d2h_stream = nullptr;
+
+  CopyKernelCtx() = default;
+
+  CopyKernelCtx(const CopyKernelCtx&) = delete;
+  CopyKernelCtx& operator=(const CopyKernelCtx&) = delete;
+  CopyKernelCtx(CopyKernelCtx&&) = delete;
+  CopyKernelCtx& operator=(CopyKernelCtx&&) = delete;
+
+  // Initialize buffer for the given device
+  cudaError_t init(int dev_id) {
+    if (initialized && this->device_id == dev_id) {
+      return cudaSuccess;
+    }
+
+    if (device_blk_buffer != nullptr) {
+      cudaFree(device_blk_buffer);
+      device_blk_buffer = nullptr;
+    }
+    if (host_blk_buffer != nullptr) {
+      cudaFreeHost(host_blk_buffer);
+      host_blk_buffer = nullptr;
+    }
+
+    auto buffer_num = 3;
+    size_t buffer_size = buffer_num * sizeof(int64_t) * env_kernel_copy_max_block_num();
+
+    cudaError_t err = cudaSetDevice(dev_id);
+    RTASSERT(err == cudaSuccess);
+
+    err = cudaMalloc(&device_blk_buffer, buffer_size);
+    RTASSERT(err == cudaSuccess);
+    err = cudaMallocHost(&host_blk_buffer, buffer_size);
+    RTASSERT(err == cudaSuccess);
+
+    LOG(INFO) << "CopyKernelCtx: initialized for device " << dev_id
+              << ", block num=" << env_kernel_copy_max_block_num()
+              << ", bf162fp8_conversion=" << (env_bf162fp8_conversion() ? "true" : "false")
+              << ", buffer_num=" << buffer_num
+              << ", buffer_size=" << buffer_size;
+
+    this->device_id = dev_id;
+    initialized = true;
+    return cudaSuccess;
+  }
+
+  std::pair<char*, char*> get_buffers() const {
+    return std::make_pair(device_blk_buffer, host_blk_buffer);
+  }
+
+  cudaStream_t get_h2d_stream() {
+    if (h2d_stream == nullptr) {
+      auto cuda_rt = cudaStreamCreateWithFlags(&h2d_stream, cudaStreamNonBlocking);
+      RTCHECK(cuda_rt == cudaSuccess);
+    }
+    return h2d_stream;
+  }
+
+  void destroy_h2d_stream() {
+    if (h2d_stream != nullptr) {
+      cudaError_t err = cudaStreamDestroy(h2d_stream);
+      if (err != cudaSuccess) {
+        LOG(ERROR) << "CopyKernelCtx: Failed to destroy h2d_stream: " << cudaGetErrorString(err);
+      }
+      h2d_stream = nullptr;
+    }
+  }
+
+  cudaStream_t get_d2h_stream() {
+    if (d2h_stream == nullptr) {
+      auto cuda_rt = cudaStreamCreateWithFlags(&d2h_stream, cudaStreamNonBlocking);
+      RTCHECK(cuda_rt == cudaSuccess);
+    }
+    return d2h_stream;
+  }
+
+  void destroy_d2h_stream() {
+    if (d2h_stream != nullptr) {
+      cudaError_t err = cudaStreamDestroy(d2h_stream);
+      if (err != cudaSuccess) {
+        LOG(ERROR) << "CopyKernelCtx: Failed to destroy d2h_stream: " << cudaGetErrorString(err);
+      }
+      d2h_stream = nullptr;
+    }
+  }
+
+  ~CopyKernelCtx() {
+    if (device_blk_buffer != nullptr) {
+      cudaFree(device_blk_buffer);
+      device_blk_buffer = nullptr;
+    }
+    if (host_blk_buffer != nullptr) {
+      cudaFreeHost(host_blk_buffer);
+      host_blk_buffer = nullptr;
+    }
+    destroy_h2d_stream();
+    destroy_d2h_stream();
+  }
+};
+
+// Thread-local context instance
+// each thread from barex thread pool will have its own context
+thread_local CopyKernelCtx g_copy_kernel_ctx;
+
+std::pair<char*, char*> get_kernel_copy_buffer(int device_id) {
+  cudaError_t err = g_copy_kernel_ctx.init(device_id);
+  if (err != cudaSuccess) {
+    LOG(ERROR) << "get_kernel_copy_buffer: failed to initialize buffer for device " << device_id
+                << ", error=" << cudaGetErrorString(err);
+    return std::make_pair(nullptr, nullptr);
+  }
+  return g_copy_kernel_ctx.get_buffers();
+}
+
+cudaStream_t TCPServer::get_h2d_stream() {
+  return g_copy_kernel_ctx.get_h2d_stream();
+}
 
 // rpc req/resp
 // +-------+-------+------------+
@@ -531,8 +662,13 @@ BarexCtx::BarexCtx(std::string mp_name,
                    int tpcnt,
                    Context *ctx,
                    std::unique_ptr<accl::barex::XChannelCallback> ctxcb,
-                   TransferProtocol::Kind kind) {
+                   TransferProtocol::Kind kind,
+                   bool is_server) {
   auto &self = *this;
+  // Set device_id from Context
+  self.device_id_ = ctx->device_id();
+  self.is_server_ = is_server;
+  LOG(INFO) << "BarexCtx: device_id=" << self.device_id_;
   auto [nic_dev, mp] = g_mp_manager.get_gpu_ctx(ctx->device_id(), kind);
   self.mp_ = mp;
   mp_reserve(mp);
@@ -618,6 +754,23 @@ BarexCtx::BarexCtx(std::string mp_name,
   self.xctx_.reset(context);
 
   context->Start();
+
+  // Initialize thread-local kernel copy buffer for all threads in the thread pool
+  // Only for Decode node using TCP protocol
+  // prefill node will init at target_thdpool_
+  if (kind == TransferProtocol::Kind::TCP && is_server) {
+    int thread_pool_size = tpcnt;
+    // Submit one initialization task per thread to ensure each thread initializes its buffer
+    // Each task uses a different thread_hint (0 to thread_pool_size-1) to distribute across threads
+    for (int i = 0; i < thread_pool_size; ++i) {
+      int device_id_val = self.device_id_;
+      threadpool->Submit([device_id_val]() {
+        get_kernel_copy_buffer(device_id_val);
+      }, i);
+    }
+    LOG(INFO) << "BarexCtx: submitted kernel copy buffer initialization tasks for " 
+              << thread_pool_size << " thread pool threads (TCP protocol)";
+  }
 }
 
 BarexCtx::~BarexCtx() {
@@ -630,7 +783,7 @@ CliBarexCtx::CliBarexCtx(std::string mp_name,
   int tpcnt,
   Context *ctx,
   TransferProtocol::Kind kind) :
-BarexCtx(std::move(mp_name), std::move(tp_name), tpcnt, ctx, this->get_ctx_cb(), kind),
+BarexCtx(std::move(mp_name), std::move(tp_name), tpcnt, ctx, this->get_ctx_cb(), kind, false),
   layer_blk_sizes([ctx]() {
     const auto layer_blocks = static_cast<uint64_t>(ctx->layer_num_blocks());
     auto block_sizes = ctx->block_sizes();
@@ -713,15 +866,18 @@ struct SendKVCacheData {
 private:
   uint64_t const reqid_;
   std::shared_ptr<Promise> pr_;
-  SteadyClock::time_point send_data_start_ts_;
-  SteadyClock::time_point d2h_start_ts_;
-  SteadyClock::time_point d2h_end_ts_;
+  std::chrono::system_clock::time_point send_data_start_ts_;
+  std::chrono::system_clock::time_point d2h_start_ts_;
+  std::chrono::system_clock::time_point d2h_end_ts_;
+  uint64_t recv_start_;
+  uint32_t recv_time_;
+  uint32_t onrecv_queue_us_;
 public:
   SendKVCacheData(
     uint64_t r, std::shared_ptr<Promise> pr, 
-    SteadyClock::time_point send_data_start_ts, 
-    SteadyClock::time_point d2h_start_ts, 
-    SteadyClock::time_point d2h_end_ts) noexcept:
+    std::chrono::system_clock::time_point send_data_start_ts, 
+    std::chrono::system_clock::time_point d2h_start_ts, 
+    std::chrono::system_clock::time_point d2h_end_ts) noexcept:
     reqid_(r),
     pr_(std::move(pr)),
     send_data_start_ts_(send_data_start_ts),
@@ -741,11 +897,22 @@ public:
     RTASSERT(reqid == self.reqid_);
     // Server sends h2d_start_ts and h2d_end_ts in the response
     // Response format: [RPC_HEADER] [h2d_start_ts (time_point)] [h2d_end_ts (time_point)]
-    SteadyClock::time_point h2d_start_ts;
-    SteadyClock::time_point h2d_end_ts;
+    std::chrono::system_clock::time_point h2d_start_ts;
+    std::chrono::system_clock::time_point h2d_end_ts;
+    uint64_t recv_start;
+    uint32_t recv_time;
+    uint32_t onrecv_queue_us;
     if (len >= RPC_HEADER + sizeof(h2d_start_ts) + sizeof(h2d_end_ts)) {
-      memcpy(&h2d_start_ts, buf + RPC_HEADER, sizeof(h2d_start_ts));
-      memcpy(&h2d_end_ts, buf + RPC_HEADER + sizeof(h2d_start_ts), sizeof(h2d_end_ts));
+      auto buf_ptr = buf + RPC_HEADER;
+      memcpy(&recv_start, buf_ptr, sizeof(recv_start));
+      buf_ptr += sizeof(recv_start);
+      memcpy(&recv_time, buf_ptr, sizeof(recv_time));
+      buf_ptr += sizeof(recv_time);
+      memcpy(&onrecv_queue_us, buf_ptr, sizeof(onrecv_queue_us));
+      buf_ptr += sizeof(onrecv_queue_us);
+      memcpy(&h2d_start_ts, buf_ptr, sizeof(h2d_start_ts));
+      buf_ptr += sizeof(h2d_start_ts);
+      memcpy(&h2d_end_ts, buf_ptr, sizeof(h2d_end_ts));
     } else {
       auto ex = std::make_exception_ptr(std::runtime_error("SendKVCacheData ERR: No h2d_start_ts or h2d_end_ts in response"));
       self.pr_->set_exception(std::move(ex));
@@ -757,7 +924,10 @@ public:
     time_points.d2h_end_ts_ = self.d2h_end_ts_;
     time_points.h2d_start_ts = h2d_start_ts;
     time_points.h2d_end_ts = h2d_end_ts;
-    
+    time_points.recv_start_ = recv_start;
+    time_points.recv_time_ = recv_time;
+    time_points.onrecv_queue_us_ = onrecv_queue_us;
+  
     self.pr_->set_value(std::move(time_points));
     return ;
   }
@@ -860,14 +1030,16 @@ uint32_t CliBarexCtx::get_remote_crc(std::shared_ptr<XChannel>& dst, const std::
   auto& self = *this;
   uint64_t const reqid = new_id();
 
-  // 计算总大小：tensor数量 + 每个tensor的IpcBlock数量 + 所有offset/length对
+  // calculate total size: tensor count + block count per tensor + all offset/length pairs
   uint32_t tensor_cnt = static_cast<uint32_t>(data->size());
   uint32_t total_blocks = 0;
   for (const auto& per_tensor_data : *data) {
     total_blocks += static_cast<uint32_t>(per_tensor_data.size());
   }
 
-  // 协议格式: (magic + reqid) + lcrc + tensor_cnt + [tensor0_block_cnt + off1+len1 + off2+len2 + ...] + [tensor1_block_cnt + ...] + ...
+  // protocol format: 
+  // (magic + reqid) + lcrc + tensor_cnt 
+  // + [tensor0_block_cnt + off1+len1 + off2+len2 + ...] + [tensor1_block_cnt + ...] + ...
   const auto bodysize = sizeof(uint32_t) + // tensor_cnt
                         tensor_cnt * sizeof(uint32_t) + // 每个tensor的block数量
                         total_blocks * (sizeof(uint64_t) + sizeof(uint64_t)); // 所有offset/length对
@@ -955,7 +1127,7 @@ void RDMAServer::CtxCallback::resp_remote_crc(std::shared_ptr<XChannel>& channel
     }
   }
   const auto tp2 = SteadyClock::now();
-  // 根据layer_idx, tensor_idx找到对应的layer_desc并重建CRC
+  // rebuild crc based on layer_descs and tensor_offlens
   crc_enabled = !layer_descs.empty();
   uint32_t remote_crc = crc32_z(0L, Z_NULL, 0);
   for (size_t layer_idx = 0; layer_idx < layer_mrs.size(); ++layer_idx) {
@@ -975,8 +1147,7 @@ void RDMAServer::CtxCallback::resp_remote_crc(std::shared_ptr<XChannel>& channel
         break;
       }
       const Bytef *const tensor_cpu_ptr = (Bytef *)tensor_desc->cpu_ptr();
-      // crc_enabled为false时，tensor_offlens中的
-      // vector<std::pair<uint64_t, uint64_t>>为空，因此不会进入循环
+
       for (const auto &[off, len] : tensor_offlens[tensor_idx]) {
         remote_crc = crc32_z(remote_crc, tensor_cpu_ptr + off, len);
       }
@@ -1782,7 +1953,8 @@ void BarexProtoContext::init(Context *ctx) {
       env_ctx_tpsize(),
       ctx,
       std::move(callback_),
-      kind
+      kind,
+      true
     );
   } else {
     cli_barex_ctx_ = std::make_unique<CliBarexCtx>(
@@ -1870,101 +2042,14 @@ PyObject* alloc_phy_cont_mem(size_t size, PyObject* device) {
 // TCP Channel
 // -----------------------------------------------------------------------------
 TCPChannel::~TCPChannel() {
-  if (cpy_stream_ != nullptr) {
-    cudaStreamDestroy(cpy_stream_);
-    cpy_stream_ = nullptr;
-  }
   delete_channels(this->ctx_, std::move(this->chs_));
   assert(this->chs_.empty());
   return;
 }
 
-static void copy_handle_data(
-  char* tensor_buf_ptr,
-  void* layer_gpu_ptr,
-  const std::vector<IpcBlock>& blocks,
-  size_t tensor_data_size,
-  cudaStream_t stream
-){
-  // Copy tensor data from CPU to GPU according to IpcBlock
-  // The tensor data in buffer is continuous, arranged in the same order as blocks
-  char* tensor_data_ptr = tensor_buf_ptr;
-  size_t tensor_offset = 0;
-  
-  for (const auto& block : blocks) {
-    assert(block.length > 0);
-    assert(tensor_offset + block.length <= tensor_data_size);
-    void* gpu_dst = reinterpret_cast<char*>(layer_gpu_ptr) + block.dst_offset;
-    const void* cpu_src = tensor_data_ptr + tensor_offset;
-    
-    auto cuda_rt = cudaMemcpyAsync(gpu_dst, cpu_src, block.length, cudaMemcpyHostToDevice, stream);
-    if (cuda_rt != cudaSuccess) {
-      LOG(ERROR) << "TCP copy_handle_data: cudaMemcpyAsync failed, error=" << cudaGetErrorString(cuda_rt);
-      RTCHECK(cuda_rt == cudaSuccess);
-    }
-    tensor_offset += block.length;
-  }
-  assert(tensor_offset == tensor_data_size);
-  auto cuda_rt_sync = cudaStreamSynchronize(stream);
-  RTCHECK(cuda_rt_sync == cudaSuccess);
+cudaStream_t TCPChannel::get_d2h_stream() {
+  return g_copy_kernel_ctx.get_d2h_stream();
 }
-  
-#ifdef ENABLE_BATCH_COPY
-static void copy_handle_data_batch(
-  char* tensor_buf_ptr,
-  void* layer_gpu_ptr,
-  const std::vector<IpcBlock>& blocks,
-  size_t tensor_data_size,
-  cudaStream_t stream
-) {
-  const size_t count = blocks.size();
-  std::vector<void*> srcs(count);
-  std::vector<void*> dsts(count);
-  std::vector<size_t> sizes(count);
-  char* tensor_data_ptr = tensor_buf_ptr;
-  size_t tensor_offset = 0;
-  size_t idx = 0;
-  
-  for (const auto& block : blocks) {
-    assert(block.length > 0);
-    assert(tensor_offset + block.length <= tensor_data_size);
-    void* gpu_dst = reinterpret_cast<char*>(layer_gpu_ptr) + block.dst_offset;
-    const void* cpu_src = tensor_data_ptr + tensor_offset;
-    srcs[idx] = const_cast<void*>(cpu_src);  // Source: CPU buffer
-    dsts[idx] = gpu_dst;                     // Destination: GPU memory
-    sizes[idx] = block.length;
-    
-    tensor_offset += block.length;
-    ++idx;
-  }
-  assert(tensor_offset == tensor_data_size);
-
-  cudaMemcpyAttributes attrs = {};
-  attrs.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
-  std::vector<size_t> attrsIdxs(count, 0);
-  size_t failIdx = 0;
-  
-  auto cuda_rt = cudaMemcpyBatchAsync(
-    dsts.data(),      // void** - destination pointers (GPU)
-    srcs.data(),      // void** - source pointers (CPU)
-    sizes.data(),     // size_t* - sizes array
-    count,            // size_t - number of copies
-    &attrs,           // cudaMemcpyAttributes* - pointer to attributes array
-    attrsIdxs.data(), // size_t* - attributes indices array (all point to attrs[0])
-    1,                // size_t - number of attributes
-    &failIdx,         // size_t* - failure index output
-    stream            // cudaStream_t - stream
-  );
-  
-  if (cuda_rt != cudaSuccess) {
-    LOG(ERROR) << "TCP copy_handle_data_batch: cudaMemcpyBatchAsync failed with error: " 
-                << cudaGetErrorString(cuda_rt) << " at index: " << failIdx;
-    RTCHECK(cuda_rt == cudaSuccess);
-  }
-  auto cuda_rt_sync = cudaStreamSynchronize(stream);
-  RTCHECK(cuda_rt_sync == cudaSuccess);
-}
-#endif  // ENABLE_BATCH_COPY
 
 void TCPServer::start_server(ITransferService *service, Context *ctx) {
   auto &self = *this;
@@ -1985,6 +2070,7 @@ void TCPServer::start_server(ITransferService *service, Context *ctx) {
   WorkerInfo *winfo = ctx->worker_info_mutable();
   auto layer_num_blocks = ctx->layer_num_blocks();
   auto layer_ptr = ctx->layer_data_address();
+
   auto proto = TransferProtocol::tcp();
   auto proto_ctx = ctx->get_protocol_ctx<BarexProtoContext>(proto);
   if (proto_ctx == nullptr) {
@@ -1993,8 +2079,11 @@ void TCPServer::start_server(ITransferService *service, Context *ctx) {
   auto barex_ctx = proto_ctx->barex_ctx();
   assert(barex_ctx != nullptr);
   self.ctx_ = barex_ctx;
+  self.num_layers_ = winfo->num_layers;
+
 
   info.ptrs.reserve(layer_ptr.size());
+  // Decode 目前按照 1 layer n tensor初始化
   for (size_t layer_idx = 0; layer_idx < layer_ptr.size(); ++layer_idx) {
     auto &layer_mrs = barex_ctx->layer_mrs()[layer_idx];
     RTASSERT(layer_ptr[layer_idx].size() <= MAX_CACHE_NUM_PER_LAYER);
@@ -2032,12 +2121,18 @@ void TCPServer::start_server(ITransferService *service, Context *ctx) {
   self.listener_.reset(listener);
   result = self.listener_->Listen();
   RTASSERT(result == accl::barex::BAREX_SUCCESS);
-
-  auto cuda_rt = cudaStreamCreateWithFlags(&self.h2d_cpy_stream_, cudaStreamNonBlocking);
-  RTCHECK(cuda_rt == cudaSuccess);
+  // Initialize thread pool for async CUDA stream synchronization
+  // size_t sync_thread_pool_size = static_cast<size_t>(env_h2d_sync_tpsize());
+  // result = accl::barex::XThreadpool::NewInstance(self.sync_thread_pool_, sync_thread_pool_size, "tcpsync");
+  // RTASSERT(result == accl::barex::BAREX_SUCCESS);
+  // LOG(INFO) << "TCPServer: initialized sync thread pool with " << sync_thread_pool_size << " threads";
 }
 
 void TCPServer::CtxCallback::OnRecvCall(std::shared_ptr<XChannel> ch, char *in_buf, size_t len, x_msg_header _header) noexcept {
+  auto recv_start = _header.c_start;
+  auto recv_time = _header.s_on_recv;
+  auto onrecv_queue_us = _header.s_on_recv_call - recv_time;
+
   // Check if this is KV cache data
   if (len < sizeof(uint32_t)) {
     LOG(ERROR) << "TCP OnRecvCall: message too short, len=" << len;
@@ -2047,13 +2142,17 @@ void TCPServer::CtxCallback::OnRecvCall(std::shared_ptr<XChannel> ch, char *in_b
   memcpy(&magic, in_buf, sizeof(uint32_t));
   
   if (magic == KV_CACHE_DATA_MAGIC) {
-    return this->handle_kv_cache_data(ch, in_buf, len);
+    return this->handle_kv_cache_data(ch, in_buf, len, recv_start, recv_time, onrecv_queue_us);
   }
   return;
 }
 
-void TCPServer::CtxCallback::handle_kv_cache_data(std::shared_ptr<XChannel>& channel, char *in_buf, size_t len) {
-  const auto h2d_start_ts = SteadyClock::now(); // t4
+void TCPServer::CtxCallback::handle_kv_cache_data(
+  std::shared_ptr<XChannel>& channel, char *in_buf, size_t len,
+  uint64_t recv_start,
+  uint32_t recv_time,
+  uint32_t onrecv_queue_us) {
+  const auto h2d_start_ts = std::chrono::system_clock::now(); // t4
   
   auto& self = *this;
   // Parse header: [magic (uint32_t)] [reqid (uint64_t)] [layer_idx (size_t)] 
@@ -2090,6 +2189,7 @@ void TCPServer::CtxCallback::handle_kv_cache_data(std::shared_ptr<XChannel>& cha
   }
   buf_ptr += metadata_bytes;
   size_t tensor_data_size = len - expected_len;
+
   auto& ptrs = self.server_->info_.ptrs;
   if (layer_idx >= ptrs.size()) {
     LOG(ERROR) << "TCP handle_kv_cache_data: invalid layer_idx=" << layer_idx << " max=" << ptrs.size();
@@ -2098,30 +2198,95 @@ void TCPServer::CtxCallback::handle_kv_cache_data(std::shared_ptr<XChannel>& cha
   void* layer_gpu_ptr = ptrs[layer_idx];
   assert(layer_gpu_ptr != nullptr);
   
-#ifdef ENABLE_BATCH_COPY
-  copy_handle_data_batch(buf_ptr, layer_gpu_ptr, blocks, tensor_data_size, self.server_->h2d_cpy_stream_);
-#else
-  copy_handle_data(buf_ptr, layer_gpu_ptr, blocks, tensor_data_size, self.server_->h2d_cpy_stream_);
-#endif  // ENABLE_BATCH_COPY
+  // Get thread-local preallocated buffer for kernel metadata
+  int device_id = self.server_->ctx_->device_id();
+  auto [device_blk_buffer, host_blk_buffer] = get_kernel_copy_buffer(device_id);
+  int64_t* device_blk_buffer_ptr = reinterpret_cast<int64_t*>(device_blk_buffer);
+  int64_t* host_blk_buffer_ptr = reinterpret_cast<int64_t*>(host_blk_buffer);
 
-  const auto h2d_end_ts = SteadyClock::now(); // t5
+  // Use thread-local stream to allow concurrent H2D copies from different threads
+  cudaStream_t h2d_stream = TCPServer::get_h2d_stream();
 
-  // Send response with same reqid after copy_handle_data_batch completes
-  memp_t resp_buf = AllocCPUBuffer(channel, RPC_HEADER+sizeof(h2d_start_ts)+sizeof(h2d_end_ts));
-  ser_rpc_header(resp_buf.buf, magic, reqid);
-  memcpy(resp_buf.buf + RPC_HEADER, &h2d_start_ts, sizeof(h2d_start_ts));
-  memcpy(resp_buf.buf + RPC_HEADER + sizeof(h2d_start_ts), &h2d_end_ts, sizeof(h2d_end_ts));
+  cudaError_t cuda_rt = copy_handle_data_with_kernel(
+    buf_ptr, layer_gpu_ptr, 
+    blocks, 
+    tensor_data_size, 
+    CopyDirection::H2D, 
+    device_id, 
+    h2d_stream,
+    device_blk_buffer_ptr,
+    host_blk_buffer_ptr
+  );
+  RTASSERT(cuda_rt == cudaSuccess);
+
+  // TODO: add resp code to check success
+  // Send response after copy operation completes
+  auto buffer_size = RPC_HEADER 
+                    + sizeof(h2d_start_ts) * 2 // h2d_start_ts and h2d_end_ts
+                    + sizeof(recv_start) + sizeof(recv_time) 
+                    + sizeof(onrecv_queue_us);
+
+  memp_t resp_buf = AllocCPUBuffer(channel, buffer_size);
+  auto resp_buf_ptr = resp_buf.buf;
+  ser_rpc_header(resp_buf_ptr, magic, reqid);
+  resp_buf_ptr += RPC_HEADER;
+  memcpy(resp_buf_ptr, &recv_start, sizeof(recv_start));
+  resp_buf_ptr += sizeof(recv_start);
+  memcpy(resp_buf_ptr, &recv_time, sizeof(recv_time));
+  resp_buf_ptr += sizeof(recv_time);
+  memcpy(resp_buf_ptr, &onrecv_queue_us, sizeof(onrecv_queue_us));
+  resp_buf_ptr += sizeof(onrecv_queue_us);
+  memcpy(resp_buf_ptr, &h2d_start_ts, sizeof(h2d_start_ts));
+  resp_buf_ptr += sizeof(h2d_start_ts);
+
+  // Log before synchronization for debugging
+  // Check stream status before synchronization
+  cudaError_t stream_query_err = cudaStreamQuery(h2d_stream);
+  if (stream_query_err != cudaSuccess && stream_query_err != cudaErrorNotReady) {
+    LOG(ERROR) << "TCP handle_kv_cache_data: cudaStreamQuery failed before sync, "
+               << "reqid=" << reqid
+               << ", error=" << cudaGetErrorString(stream_query_err)
+               << " (" << stream_query_err << ")";
+  }
   
-  return Send(channel, std::move(resp_buf), [] (Status s) {
+  // Check for any pending CUDA errors before synchronization
+  cudaError_t pending_err = cudaGetLastError();
+  if (pending_err != cudaSuccess) {
+    LOG(ERROR) << "TCP handle_kv_cache_data: pending CUDA error before sync, "
+               << "reqid=" << reqid
+               << ", error=" << cudaGetErrorString(pending_err)
+               << " (" << pending_err << ")";
+  }
+
+  auto cuda_rt_sync = cudaStreamSynchronize(h2d_stream);
+  if (cuda_rt_sync != cudaSuccess) {
+    LOG(ERROR) << "TCP handle_kv_cache_data: cudaStreamSynchronize failed, "
+               << "reqid=" << reqid
+               << ", layer_idx=" << layer_idx
+               << ", device_id=" << device_id
+               << ", h2d_stream=" << reinterpret_cast<void*>(h2d_stream)
+               << ", tensor_data_size=" << tensor_data_size
+               << ", blocks_count=" << blocks.size()
+               << ", error=" << cudaGetErrorString(cuda_rt_sync)
+               << " (" << cuda_rt_sync << ")";
+  }
+  RTASSERT(cuda_rt_sync == cudaSuccess);
+  const auto h2d_end_ts = std::chrono::system_clock::now(); // t5
+  memcpy(resp_buf_ptr, &h2d_end_ts, sizeof(h2d_end_ts));
+
+  Send(channel, std::move(resp_buf), [] (Status s) {
     if (s.IsOk()) {
       return;
     }
     LOG(ERROR) << "TCP handle_kv_cache_data: send response err=" << s.ErrMsg();
   });
+  // });
+  return;
 }
 
 void TCPChannel::register_data(std::vector<std::vector<IpcBlock>>& data, TPKind kind) {
   auto& self = *this;
+
   assert(!data.empty());
   // TCP Currently not support dpsk v32
   assert(data.size() == 1);
@@ -2179,24 +2344,52 @@ void TCPChannel::register_data(std::vector<std::vector<IpcBlock>>& data, TPKind 
   }
   assert(self.merged_sb_num_ > 0);
   assert(self.merged_sb_num_ <= self.origin_sb_num_);
+  // both fp8 length
   assert(total_len_debug == self.sb_size_total_);
+
+  if (self.cast2fp8_) {
+    // block's length generated by parse_block is fp8 dtype length
+    // multiply by 2 to get the actual length
+    self.sb_size_total_ *= 2;
+  }
 
   const auto& tensor_data = data[0];
 
-  // Allocate CPU buffer if not already allocated // TODO: TCP adopt multi-tensor per layer
+  // TODO: TCP adopt multi-tensor per layer
+  // Allocate CPU buffer for each thread, and use as thread-local buffer
   if (self.host_buffers_.size() == 0 && self.sb_size_total_ > 0) {
     self.host_buffers_.reserve(self.dst_layer_num_); // prepare for each layer previously
     size_t metadata_size = tensor_data.size();
-    size_t header_bytes = sizeof(uint32_t) + sizeof(size_t);  // magic + layer_idx
+    size_t header_bytes = RPC_HEADER + sizeof(size_t);  // magic + reqid + layer_idx
     size_t metadata_bytes = sizeof(size_t) + metadata_size * sizeof(IpcBlock);
-    size_t total_bytes = header_bytes + metadata_bytes + self.sb_size_total_;
+    const size_t tensor_bytes = self.cast2fp8_ ? (self.sb_size_total_ / 2) : self.sb_size_total_;
+
+    size_t total_bytes = header_bytes + metadata_bytes + tensor_bytes;
     
+    uint64_t alloc_us_min = UINT64_MAX, alloc_us_max = 0, alloc_us_total = 0;
+
     for (size_t i = 0; i < self.dst_layer_num_; ++i) {
+      auto alloc_start = std::chrono::system_clock::now();
       memp_t buffer_mr = AllocCudaHostBuffer(self.ch(), total_bytes);
+      auto alloc_end = std::chrono::system_clock::now();
+      auto alloc_elapsed_us = elapse_us_system(alloc_start, alloc_end);
       RTCHECK(buffer_mr.buf != nullptr);
       RTCHECK(buffer_mr.buf_len >= total_bytes);
       self.host_buffers_.emplace_back(std::move(buffer_mr));
+      alloc_us_min = std::min(alloc_us_min, alloc_elapsed_us);
+      alloc_us_max = std::max(alloc_us_max, alloc_elapsed_us);
+      alloc_us_total += alloc_elapsed_us;
     }
+    LOG(INFO) << "TCPChannel::do_init: alloc cuda host buffer total_bytes=" << total_bytes
+              << " time min=" << alloc_us_min 
+              << " max=" << alloc_us_max 
+              << " total=" << alloc_us_total
+              << " avg=" << alloc_us_total / self.dst_layer_num_ << " us"
+              << " dst_layer_num=" << self.dst_layer_num_
+              << " metadata_size=" << metadata_size
+              << " header_bytes=" << header_bytes
+              << " metadata_bytes=" << metadata_bytes
+              << " tensor_bytes=" << tensor_bytes;
   }
   assert(self.host_buffers_.size() == self.dst_layer_num_);
   return ;
@@ -2214,7 +2407,7 @@ void TCPChannel::send_data(size_t layer_idx) {
   const auto& data = (*self.data_)[0];
   assert(!data.empty());
 
-  const auto send_data_start_ts = SteadyClock::now();  // t1
+  const auto send_data_start_ts = std::chrono::system_clock::now();  // t1
 
   // Prepare data to send: magic + reqid + layer_idx + metadata (IpcBlock array) + tensor data
   // Format: [magic (uint32_t)] [reqid (uint64_t)] [layer_idx (size_t)] [metadata_size (size_t)] [IpcBlock array] [tensor data]
@@ -2223,42 +2416,91 @@ void TCPChannel::send_data(size_t layer_idx) {
   const size_t metadata_size = data.size();
   const size_t header_bytes = RPC_HEADER + sizeof(size_t);  // magic + reqid + layer_idx
   const size_t metadata_bytes = sizeof(size_t) + metadata_size * sizeof(IpcBlock);  // metadata_size + IpcBlock array
-  const size_t total_send_size = header_bytes + metadata_bytes + self.sb_size_total_;
   
+  const bool cast2fp8 = self.cast2fp8_;
+  const size_t tensor_send_size = cast2fp8 ? (self.sb_size_total_ / 2) : self.sb_size_total_;
+  
+  const size_t total_send_size = header_bytes + metadata_bytes + tensor_send_size;
   assert(self.host_buffers_.size() == self.dst_layer_num_ - layer_idx);
   assert(self.host_buffers_.back().buf_len >= total_send_size);
 
   // Copy all GPU data to host_buffer in continuous memory
-  char* const buf_ptr = self.host_buffers_.back().buf;
-  char* const meta_buf_ptr = buf_ptr + header_bytes;  // Skip header for metadata
-  char* const tensor_buf_ptr = buf_ptr + header_bytes + metadata_bytes;  // Skip header and metadata for tensor data
+  char* buf_ptr = self.host_buffers_.back().buf;
+  char* meta_buf_ptr = buf_ptr + header_bytes;  // Skip header for metadata
+  char* tensor_buf_ptr = buf_ptr + header_bytes + metadata_bytes;  // Skip header and metadata for tensor data
 
   const auto& src_mrs = self.ctx_->layer_mrs()[layer_idx];
   const auto& src_mr_guard = src_mrs[0];
   const auto& src_mr_base = src_mr_guard.mr();
   
   // Copy GPU data to host buffer and prepare metadata
-  const auto d2h_start_ts = SteadyClock::now();   // t2
-#ifdef ENABLE_BATCH_COPY
-  self.copy_send_data_batch(
-    layer_idx, magic, reqid, data, metadata_size, 
-    buf_ptr, meta_buf_ptr, tensor_buf_ptr, src_mr_base
-  );
-#else
-  self.copy_send_data(
-    layer_idx, magic, reqid, data, metadata_size, 
-    buf_ptr, meta_buf_ptr, tensor_buf_ptr, src_mr_base
-  );
-#endif  // ENABLE_BATCH_COPY
+  const auto d2h_start_ts = std::chrono::system_clock::now();   // t2
+  
+  std::vector<IpcBlock> kernel_blocks;
+  kernel_blocks.reserve(metadata_size);
+  for (const auto& block : data) {
+    kernel_blocks.emplace_back(0, block.src_offset, block.length * (cast2fp8 ? 2 : 1));
+  }
+  
+  int device_id = self.ctx_->device_id();
 
-  const auto d2h_end_ts = SteadyClock::now(); // t3
+  void* gpu_src_ptr = reinterpret_cast<void*>(const_cast<char*>(src_mr_base.buf));
+
+  // Get thread-local preallocated buffer for kernel metadata
+  auto [device_blk_buffer, host_blk_buffer] = get_kernel_copy_buffer(device_id);
+  int64_t* device_blk_buffer_ptr = reinterpret_cast<int64_t*>(device_blk_buffer);
+  int64_t* host_blk_buffer_ptr = reinterpret_cast<int64_t*>(host_blk_buffer);
+
+  cudaStream_t d2h_stream = TCPChannel::get_d2h_stream();
+
+  cudaError_t cuda_rt;
+  if (cast2fp8) {
+    cuda_rt = copy_d2h_bf16_to_fp8(
+      tensor_buf_ptr,           // CPU destination buffer (FP8 E4M3)
+      gpu_src_ptr,               // GPU source base pointer (BF16)
+      kernel_blocks,             // Blocks: src_offset=CPU offset, dst_offset=GPU src_offset
+      self.sb_size_total_,       // Total BF16 tensor data size (in bytes)
+      device_id,                 // Target CUDA device ID
+      d2h_stream,                // CUDA stream
+      device_blk_buffer_ptr,     // Preallocated GPU buffer for metadata
+      host_blk_buffer_ptr        // Preallocated host pinned buffer for metadata
+    );
+  } else {
+    cuda_rt = copy_handle_data_with_kernel(
+      tensor_buf_ptr,           // CPU destination buffer (contiguous)
+      gpu_src_ptr,              // GPU source base pointer
+      kernel_blocks,            // Blocks: src_offset=CPU offset, dst_offset=GPU src_offset
+      self.sb_size_total_,      // Total tensor data size
+      CopyDirection::D2H,       // D2H direction
+      device_id,                // Target CUDA device ID
+      d2h_stream,               // CUDA stream
+      device_blk_buffer_ptr,    // Preallocated GPU buffer for metadata
+      host_blk_buffer_ptr       // Preallocated host pinned buffer for metadata
+    );
+  }
+  RTCHECK(cuda_rt == cudaSuccess);
+
+  // Write RPC header: magic + reqid
+  ser_rpc_header(buf_ptr, magic, reqid);
+  buf_ptr += RPC_HEADER;
+  // Write layer_idx
+  memcpy(buf_ptr, &layer_idx, sizeof(size_t));
+  buf_ptr += sizeof(size_t);
+  
+  // Write metadata: metadata_size + IpcBlock array
+  memcpy(meta_buf_ptr, &metadata_size, sizeof(size_t));
+  meta_buf_ptr += sizeof(size_t);
+  memcpy(meta_buf_ptr, data.data(), metadata_size * sizeof(IpcBlock));
+  
+  auto cuda_rt_sync = cudaStreamSynchronize(d2h_stream);
+  RTCHECK(cuda_rt_sync == cudaSuccess);
+  const auto d2h_end_ts = std::chrono::system_clock::now(); // t3
 
   self.host_buffers_.back().buf_len = total_send_size;
 
   auto pr = std::make_shared<SendKVCacheData::Promise>();
   auto time_fut = pr->get_future();
 
-  // Register callback for response
   self.ctx_->push(reqid, SendKVCacheData(
     reqid, pr, send_data_start_ts, d2h_start_ts, d2h_end_ts
   ));
@@ -2268,152 +2510,14 @@ void TCPChannel::send_data(size_t layer_idx) {
 
   // After send, send_buf(host_buffer_) will be released.
   Send(self.sch(), std::move(send_buf), [&self, reqid](Status s) mutable {
-    if (s.IsOk()) {
+    if (!s.IsOk()) {
+      self.ctx_->on_send_error(std::move(s), reqid);
       return;
     }
-    // Send error handling
-    self.ctx_->on_send_error(std::move(s), reqid);
   });
-  
   self.write_futs_.emplace_back(std::move(time_fut));
   return;
 }
-
-void TCPChannel::copy_send_data(
-    size_t layer_idx,
-    uint32_t magic,
-    uint64_t reqid,
-    const std::vector<IpcBlock>& data,
-    size_t metadata_size,
-    char* buf_ptr,
-    char* meta_buf_ptr,
-    char* tensor_buf_ptr,
-    const accl::barex::memp_t& src_mr_base) {
-  auto &self = *this;
-  
-  const auto copy_start_ts = SteadyClock::now();
-  const size_t max_layer_blk_size = self.ctx_->layer_blk_sizes[0];
-  const size_t max_dst_blk_size = self.dst_layer_blk_sizes_[0];
-  for (const auto &[src_offset, dst_offset, len] : data) {
-    assert(len > 0);
-    assert(src_offset < max_layer_blk_size);
-    assert(len < max_layer_blk_size);
-    assert(src_offset + len <= max_layer_blk_size);
-    assert(dst_offset < max_dst_blk_size);
-    assert(dst_offset + len <= max_dst_blk_size);
-  }
-
-  // Launch all GPU copies asynchronously
-  for (const auto &[src_offset, dst_offset, len] : data) {
-    const void* gpu_src = src_mr_base.buf + src_offset;
-    auto cuda_rt = cudaMemcpyAsync(tensor_buf_ptr, gpu_src, len, cudaMemcpyDeviceToHost, self.cpy_stream_);
-    RTCHECK(cuda_rt == cudaSuccess);
-    tensor_buf_ptr += len;
-  }
-  // Write RPC header: magic + reqid
-  ser_rpc_header(buf_ptr, magic, reqid);
-  buf_ptr += RPC_HEADER;
-  // Write layer_idx
-  memcpy(buf_ptr, &layer_idx, sizeof(size_t));
-  buf_ptr += sizeof(size_t);
-  
-  memcpy(meta_buf_ptr, &metadata_size, sizeof(size_t));
-  meta_buf_ptr += sizeof(size_t);
-  
-  memcpy(meta_buf_ptr, data.data(), metadata_size * sizeof(IpcBlock));
-
-  auto cuda_rt_sync = cudaStreamSynchronize(self.cpy_stream_);
-  RTCHECK(cuda_rt_sync == cudaSuccess);
-  
-  auto copy_elapsed_us = static_cast<uint64_t>(elapse_us(copy_start_ts, SteadyClock::now()));
-#ifndef NDEBUG
-  LOG(INFO) << "TCP copy_send_data: copy and prepare time for layer=" << layer_idx 
-            << " blocks=" << metadata_size << " elapsed=" << copy_elapsed_us << " us";
-#endif
-}
-
-#ifdef ENABLE_BATCH_COPY
-void TCPChannel::copy_send_data_batch(
-    size_t layer_idx,
-    uint32_t magic,
-    uint64_t reqid,
-    const std::vector<IpcBlock>& data,
-    size_t metadata_size,
-    char* buf_ptr,
-    char* meta_buf_ptr,
-    char* tensor_buf_ptr,
-    const accl::barex::memp_t& src_mr_base) {
-  auto &self = *this;
-  const auto copy_start_ts = SteadyClock::now();
-  const size_t count = data.size();
-  std::vector<void*> srcs(count);
-  std::vector<void*> dsts(count);
-  std::vector<size_t> sizes(count);
-
-  const size_t max_layer_blk_size = self.ctx_->layer_blk_sizes[0];
-  const size_t max_dst_blk_size = self.dst_layer_blk_sizes_[0];
-  for (const auto &[src_offset, dst_offset, len] : data) {
-    assert(len > 0);
-    assert(src_offset < max_layer_blk_size);
-    assert(len < max_layer_blk_size);
-    assert(src_offset + len <= max_layer_blk_size);
-    assert(dst_offset < max_dst_blk_size);
-    assert(dst_offset + len <= max_dst_blk_size);
-  }
-
-  char* current_tensor_buf_ptr = tensor_buf_ptr;
-  size_t idx = 0;
-
-  for (const auto &[src_offset, dst_offset, len] : data) {
-    srcs[idx] = src_mr_base.buf + src_offset;
-    dsts[idx] = current_tensor_buf_ptr;
-    sizes[idx] = len;
-    current_tensor_buf_ptr += len;
-    ++idx;
-  }
-  cudaMemcpyAttributes attrs = {};
-  attrs.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
-  std::vector<size_t> attrsIdxs(count, 0);
-  size_t failIdx = 0;
-  auto cuda_rt = cudaMemcpyBatchAsync(
-    dsts.data(),      // void** - destination pointers
-    srcs.data(),      // void** - source pointers
-    sizes.data(),     // size_t* - sizes array
-    count,            // size_t - number of copies
-    &attrs,           // cudaMemcpyAttributes* - pointer to attributes array
-    attrsIdxs.data(), // size_t* - attributes indices array (all point to attrs[0])
-    1,                // size_t - number of attributes
-    &failIdx,         // size_t* - failure index output
-    self.cpy_stream_  // cudaStream_t - stream
-  );
-  
-  if (cuda_rt != cudaSuccess) {
-    LOG(ERROR) << "TCP copy_send_data_batch: cudaMemcpyBatchAsync failed with error: " 
-               << cudaGetErrorString(cuda_rt) << " at index: " << failIdx;
-    RTCHECK(cuda_rt == cudaSuccess);
-  }
-  // Write RPC header: magic + reqid
-  ser_rpc_header(buf_ptr, magic, reqid);
-  buf_ptr += RPC_HEADER;
-  memcpy(buf_ptr, &layer_idx, sizeof(size_t));
-  buf_ptr += sizeof(size_t);
-
-  memcpy(meta_buf_ptr, &metadata_size, sizeof(size_t));
-  meta_buf_ptr += sizeof(size_t);
-
-  memcpy(meta_buf_ptr, data.data(), metadata_size * sizeof(IpcBlock));
-
-  // Synchronize stream to ensure all tensor data copies are complete
-  auto cuda_rt_sync = cudaStreamSynchronize(self.cpy_stream_);
-  RTCHECK(cuda_rt_sync == cudaSuccess);
-
-  auto copy_elapsed_us = static_cast<uint64_t>(elapse_us(copy_start_ts, SteadyClock::now()));
-#ifndef NDEBUG
-  LOG(INFO) << "TCP copy_send_data_batch: copy and prepare time for layer=" << layer_idx 
-            << " blocks=" << metadata_size << " elapsed=" << copy_elapsed_us << " us";
-#endif
-}
-#endif  // ENABLE_BATCH_COPY
 
 accl::barex::XChannel *TCPChannel::ch() noexcept {
   return this->sch().get();
@@ -2465,12 +2569,6 @@ void TCPChannel::do_init() {
   tmp_chs.swap(self.chs_);
   delete_channels(self.ctx_, std::move(tmp_chs));
   
-  // Create CUDA stream for asynchronous memory copy if not already created
-  if (self.cpy_stream_ == nullptr) {
-    auto cuda_rt = cudaStreamCreateWithFlags(&self.cpy_stream_, cudaStreamNonBlocking);
-    RTCHECK(cuda_rt == cudaSuccess);
-  }
-
   auto init_time = TimeWatch();
   const int sp = env_send_parallel();
   assert(sp > 0);
@@ -2520,6 +2618,9 @@ void TCPChannel::flush(std::string& outstr) {
   uint64_t send_us_min = UINT64_MAX, d2h_us_min = UINT64_MAX, h2d_us_min = UINT64_MAX, trans_us_min = UINT64_MAX;
   uint64_t send_us_max = 0, d2h_us_max = 0, h2d_us_max = 0, trans_us_max = 0;
   uint64_t send_us_total = 0, d2h_us_total = 0, h2d_us_total = 0, trans_us_total = 0;
+  uint64_t link_tx_us_min = UINT64_MAX, link_tx_us_max = 0, link_tx_us_total = 0;
+  uint64_t recv_us_min = UINT64_MAX, recv_us_max = 0, recv_us_total = 0;
+  uint64_t onrecv_queue_us_min = UINT64_MAX, onrecv_queue_us_max = 0, onrecv_queue_us_total = 0;
   for (auto& fut : self.write_futs_) {
     TCPTimePoints time_points = {};
     try {
@@ -2528,10 +2629,14 @@ void TCPChannel::flush(std::string& outstr) {
       outstr = std::move(out).str();
       throw;
     }
-    auto send_us = elapse_us(time_points.send_data_start_ts_, time_points.h2d_end_ts);
-    auto d2h_us = elapse_us(time_points.d2h_start_ts_, time_points.d2h_end_ts_);
-    auto h2d_us = elapse_us(time_points.h2d_start_ts, time_points.h2d_end_ts);
-    auto trans_us = elapse_us(time_points.d2h_end_ts_, time_points.h2d_start_ts);
+    auto send_us = elapse_us_system(time_points.send_data_start_ts_, time_points.h2d_end_ts);
+    auto d2h_us = elapse_us_system(time_points.d2h_start_ts_, time_points.d2h_end_ts_);
+    auto h2d_us = elapse_us_system(time_points.h2d_start_ts, time_points.h2d_end_ts);
+    auto trans_us = elapse_us_system(time_points.d2h_end_ts_, time_points.h2d_start_ts);
+    auto link_tx_us = time_points.recv_start_ - time_point_to_microseconds(time_points.d2h_end_ts_);
+    uint64_t recv_us = static_cast<uint64_t>(time_points.recv_time_);
+    uint64_t onrecv_queue_us = static_cast<uint64_t>(time_points.onrecv_queue_us_);
+
     send_us_min = std::min(send_us_min, send_us);
     send_us_max = std::max(send_us_max, send_us);
     send_us_total += send_us;
@@ -2544,6 +2649,15 @@ void TCPChannel::flush(std::string& outstr) {
     trans_us_min = std::min(trans_us_min, trans_us);
     trans_us_max = std::max(trans_us_max, trans_us);
     trans_us_total += trans_us;
+    link_tx_us_min = std::min(link_tx_us_min, link_tx_us);
+    link_tx_us_max = std::max(link_tx_us_max, link_tx_us);
+    link_tx_us_total += link_tx_us;
+    recv_us_min = std::min(recv_us_min, recv_us);
+    recv_us_max = std::max(recv_us_max, recv_us);
+    recv_us_total += recv_us;
+    onrecv_queue_us_min = std::min(onrecv_queue_us_min, onrecv_queue_us);
+    onrecv_queue_us_max = std::max(onrecv_queue_us_max, onrecv_queue_us);
+    onrecv_queue_us_total += onrecv_queue_us;
   }
   self.write_futs_.clear();
   // After send done, host_buffer_ mempt's buffer should be released by Send callback.
@@ -2560,7 +2674,16 @@ void TCPChannel::flush(std::string& outstr) {
       << ",H2DUsAvg=" << h2d_us_total / float(inflyn)
       << ",TransUsMin=" << trans_us_min
       << ",TransUsMax=" << trans_us_max
-      << ",TransUsAvg=" << trans_us_total / float(inflyn);
+      << ",TransUsAvg=" << trans_us_total / float(inflyn)
+      << ",LinkTxUsMin=" << link_tx_us_min
+      << ",LinkTxUsMax=" << link_tx_us_max
+      << ",LinkTxUsAvg=" << link_tx_us_total / float(inflyn)
+      << ",RecvUsMin=" << recv_us_min
+      << ",RecvUsMax=" << recv_us_max
+      << ",RecvUsAvg=" << recv_us_total / float(inflyn)
+      << ",OnRecvQueueUsMin=" << onrecv_queue_us_min
+      << ",OnRecvQueueUsMax=" << onrecv_queue_us_max
+      << ",OnRecvQueueUsAvg=" << onrecv_queue_us_total / float(inflyn);
   outstr = std::move(out).str();
   return;
 }

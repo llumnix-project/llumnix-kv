@@ -88,3 +88,4 @@ hip_compat.h
 # debug files
 tensors/
 /_version.py
+logs/

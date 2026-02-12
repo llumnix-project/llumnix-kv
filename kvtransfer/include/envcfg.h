@@ -11,6 +11,7 @@ int env_heap_prof();
 int env_send_parallel();
 int env_ctx_tpsize();
 int env_conn_tpsize();
+int env_h2d_sync_tpsize();
 int env_fsnaming_keepalive_interval_s();
 int env_fsnaming_tolerate_interval_s();
 // tx stub 发送失败率: (RETURN - 1) / 100
@@ -69,6 +70,17 @@ int env_gdn_element_size();
 int env_gdn_block_num();
 
 uint32_t env_origin_p_tp_size() noexcept;
+
+size_t env_kernel_copy_max_block_num() noexcept;
+
+// SM usage ratio for copy kernel (0.0 to 1.0)
+// Default: 1.0 means use all SMs
+// Set to 0.5 to use 50% of SMs, etc.
+double env_kernel_copy_sm_usage() noexcept;
+
+// Enable BF16 to FP8 conversion during D2H transfer
+// 0 = disabled (default), 1 = enabled
+bool env_bf162fp8_conversion() noexcept;
 
 const std::vector<size_t>* env_ssm_state_shape();
 const std::vector<size_t>* env_conv_state_shape();

@@ -1,6 +1,7 @@
 #include "common.h"
 #include "context.h"
 #include "channel.h"
+#include "envcfg.h"
 #include "server.h"
 #include "utils/timer.h"
 #include <string.h>
@@ -16,6 +17,7 @@
 #include <unordered_map>
 #include "thrid_party/logging.h"
 #include "protocol/rdma_protocol.h"
+#include "utils/thread_pool.h"
 #include <cuda_runtime.h>
 
 #include <accl/barex/barex.h>
@@ -30,12 +32,19 @@
 
 namespace blade_llm {
 
+static constexpr uint32_t KERNEL_LAUNCH_ERROR = 505;
+// KERNEL_COPY_MAX_BLOCK_NUM is now obtained from environment variable via env_kernel_copy_max_block_num()
+// Default value is 8192 if BLLM_KVTRANS_KERNEL_COPY_MAX_BLOCK_NUM is not set
+
 struct TCPTimePoints {
-  SteadyClock::time_point send_data_start_ts_;
-  SteadyClock::time_point d2h_start_ts_;
-  SteadyClock::time_point d2h_end_ts_;
-  SteadyClock::time_point h2d_start_ts;
-  SteadyClock::time_point h2d_end_ts;
+  std::chrono::system_clock::time_point send_data_start_ts_;
+  std::chrono::system_clock::time_point d2h_start_ts_;
+  std::chrono::system_clock::time_point d2h_end_ts_;
+  std::chrono::system_clock::time_point h2d_start_ts;
+  std::chrono::system_clock::time_point h2d_end_ts;
+  uint64_t recv_start_ = 0;
+  uint32_t recv_time_ = 0;
+  uint32_t onrecv_queue_us_ = 0;
 };
 
 class TCPChannel : public IChannel, public noncopyable {
@@ -56,35 +65,14 @@ class TCPChannel : public IChannel, public noncopyable {
   using IChannel::send_notification;
 
  private:
+  // Get thread-local CUDA stream for D2H copy, lazily created on first use
+  // Stream is created on the current device context when first accessed
+  static cudaStream_t get_d2h_stream();
+
   // do real connect.
   void do_init();
   accl::barex::XChannel *ch() noexcept;
   std::shared_ptr<accl::barex::XChannel>& sch() noexcept;
-
-  // Copy GPU data to host buffer and prepare metadata for sending
-  void copy_send_data(
-      size_t layer_idx,
-      uint32_t magic,
-      uint64_t reqid,
-      const std::vector<IpcBlock>& data,
-      size_t metadata_size,
-      char* buf_ptr,
-      char* meta_buf_ptr,
-      char* tensor_buf_ptr,
-      const accl::barex::memp_t& src_mr_base);
-
-#if ENABLE_BATCH_COPY
-  void copy_send_data_batch(
-      size_t layer_idx,
-      uint32_t magic,
-      uint64_t reqid,
-      const std::vector<IpcBlock>& data,
-      size_t metadata_size,
-      char* buf_ptr,
-      char* meta_buf_ptr,
-      char* tensor_buf_ptr,
-      const accl::barex::memp_t& src_mr_base);
-#endif  // ENABLE_BATCH_COPY
 
  private:
   InstanceId const src_inst_id_;
@@ -113,8 +101,7 @@ class TCPChannel : public IChannel, public noncopyable {
   std::vector<BarexChannel> chs_;   // owner: ctx_.connector_
   // CPU buffer for storing KV cache tensor data
   std::vector<accl::barex::memp_t> host_buffers_;
-  // CUDA stream for asynchronous memory copy
-  cudaStream_t cpy_stream_{nullptr};
+  const bool cast2fp8_ = env_bf162fp8_conversion(); // cast bf16 to fp8 before sending
 };
 
 struct TCPInfo {
@@ -130,7 +117,7 @@ class TCPServer: public ITransferServer {
  private:
   class CtxCallback : public accl::barex::XChannelCallback {
     ITransferService* const ser_ = nullptr;   // owner: KV_SERVICE
-    const TCPServer* const server_ = nullptr;   // owner: KV_SERVER
+    TCPServer* const server_ = nullptr;   // owner: KV_SERVER
 
    public:
     CtxCallback(ITransferService *s, TCPServer* v) noexcept:
@@ -149,14 +136,20 @@ class TCPServer: public ITransferServer {
                     accl::barex::x_msg_header header) noexcept override;
 
    private:
-    void handle_kv_cache_data(std::shared_ptr<accl::barex::XChannel>& channel, char *in_buf, size_t len);
+    void handle_kv_cache_data(std::shared_ptr<accl::barex::XChannel>& channel, char *in_buf, size_t len,
+                               uint64_t recv_start, uint32_t recv_time, uint32_t onrecv_queue_us);
   };
 
  private:
+  // Get thread-local CUDA stream for H2D copy, lazily created on first use
+  static cudaStream_t get_h2d_stream();
+
+ private:
   TCPInfo info_;
-  cudaStream_t h2d_cpy_stream_{nullptr};
   BarexCtx* ctx_ = nullptr;  // OWNER: KvTransferService.ctx_
+  uint32_t num_layers_ = 0;  // OWNER: KvTransferService.ctx (for num_layers access)
   std::unique_ptr<accl::barex::XListener, XListenerDeleter> listener_;
+  // accl::barex::XThreadpool* sync_thread_pool_ = nullptr; // Thread pool for async CUDA stream synchronization
 };
 
 }
