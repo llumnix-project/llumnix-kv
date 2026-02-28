@@ -51,6 +51,7 @@ from .engine_proxy import (
     sched_finish_req,
     sched_free_blocks,
     sched_get_blocks,
+    sched_set_blocks,
     sched_get_req,
     sched_rpc_server,
     sched_rpc_server_port,
@@ -526,14 +527,15 @@ class HybridScheduler:
         return
 
     # core thread
-    def _try_teardown_save(self, reqid: str):
+    def _try_teardown_save(self, reqid: str, free_blocks: bool = True):
         state = self._saving.pop(reqid, None)
         if state is None:
             logger.info("teardown save twice: reqid=%s", reqid)
             # assert not has_setup_save(state._req)
             return
         assert has_setup_save(state._req)
-        sched_free_blocks(state.kvblks)
+        if free_blocks:
+            sched_free_blocks(state.kvblks)
         set_param(state._req, _SAVE_PREPARED, False)
         return
 
@@ -542,11 +544,22 @@ class HybridScheduler:
         while self._waiting:
             # In pd disagg, load means decode, save means prefill
             req, load_count, save_count = self._waiting[0]
-            gamma = get_p_node_pop_len(self._cfg) - 1
-            prealloc = get_param(req, PREALLOC_KEY, 0)
-            # need notify prefill node to allocate slot for poped gamma+1 tokens
-            kvblks = sched_allocate_slots(
-                req, load_count > 0, save_count > 0, prealloc, gamma)
+
+            from blade_kvt.hybrid_connector.kvtbackend import D_LOCAL_PREFILL
+            if get_param(req, D_LOCAL_PREFILL, False):
+                saving_state = self._saving.get(req.request_id, None)
+                kvblks: KVCacheBlocks | None = None
+                if saving_state is not None:
+                    kvblks = saving_state.kvblks
+                assert kvblks is not None and len(kvblks.get_block_ids()) > 0 and len(kvblks.get_block_ids()[0]) > 0
+                self._try_teardown_save(req.request_id, free_blocks=False)
+                sched_set_blocks(req.request_id, kvblks)
+            else:
+                gamma = get_p_node_pop_len(self._cfg) - 1
+                prealloc = get_param(req, PREALLOC_KEY, 0)
+                # need notify prefill node to allocate slot for poped gamma+1 tokens
+                kvblks = sched_allocate_slots(
+                    req, load_count > 0, save_count > 0, prealloc, gamma)
 
             # Only log on first attempt or successful allocation to avoid noise
             if kvblks is not None or not get_param(req, ADD_REQ_LOGGED_KEY, False):
@@ -570,12 +583,16 @@ class HybridScheduler:
                 self._setup_save(req, kvblks, save_count)
 
             if load_count > 0:
-                _inc_cleanup_rc(req)
-                assert req.request_id not in self._loading
-                self._loading[req.request_id] = _LoadingReq(req)
-                self._add_ts(req, "load_enqueue")
-                coro = self._on_add_req(req, kvblks)
-                asyncio.run_coroutine_threadsafe(coro, self.loop)
+                if get_param(req, D_LOCAL_PREFILL, False):
+                    set_param(req, HB_IORET, IoRet(n=req.num_tokens-1))
+                    self._loaded.append(req)
+                else:
+                    _inc_cleanup_rc(req)
+                    assert req.request_id not in self._loading
+                    self._loading[req.request_id] = _LoadingReq(req)
+                    self._add_ts(req, "load_enqueue")
+                    coro = self._on_add_req(req, kvblks)
+                    asyncio.run_coroutine_threadsafe(coro, self.loop)
             else:
                 # fastpath for num_external_tokens = 0.
                 # In this case, async load operation is not required, the

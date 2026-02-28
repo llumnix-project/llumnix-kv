@@ -119,6 +119,11 @@ def sched_get_blocks(reqid: str) -> KVCacheBlocks:
     assert _blk_check(oblks, nblks)
     return KVCacheBlocks(nblks)
 
+def sched_set_blocks(reqid: str, blks: KVCacheBlocks):
+    self = _sched()
+    
+    for manager, blocks in zip(self.kv_cache_manager.coordinator.single_type_managers, blks.blocks):
+        manager.req_to_blocks[reqid] = list(blocks)
 
 # sched_release_blocks
 def sched_free_blocks(blks: KVCacheBlocks):

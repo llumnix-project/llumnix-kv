@@ -101,6 +101,7 @@ logger = get_logger(__name__)
 D_DISAGG = "ali_llumnix_disagg"
 P_REMOTE_DECODE = "do_remote_decode"
 D_REMOTE_PREFILL = "do_remote_prefill"
+D_LOCAL_PREFILL = "do_local_prefill"
 
 # value: str, p instance id.
 D_PID = "_hbkvtpid"
@@ -1821,6 +1822,9 @@ class DBackend(HybridBackend):
         # and the characteristics of the request itself.
         if req.num_prompt_tokens <= 1:
             return 0, 0
+
+        if get_param(req, D_LOCAL_PREFILL):
+            return 1, 0
 
         if get_param(req, D_REMOTE_PREFILL):
             assert get_param(req, "remote_host") is not None
