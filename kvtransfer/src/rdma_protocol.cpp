@@ -547,8 +547,6 @@ static XDevice* choose_nic(const std::vector<XDevice *> &nic_devs, int gpu_dev) 
     }
   }
 
-  // https://project.aone.alibaba-inc.com/v2/project/664220/req/61087840
-  // 如 aone 所示, XPU 要求必须亲和网卡, 这里 kvtransfer 可能无法发送数据.
   auto* dev = uint32_t(gpu_dev) >= nic_devs.size() ? nic_devs[0] : nic_devs[gpu_dev];
   LOG(WARNING) << "choose_nic fallback, may not work on XPU. gpu_dev=" << gpu_dev
                << ", dev=" << dev->GetName();

@@ -37,7 +37,6 @@ static const std::string EAS_POST_API{"/api/message"};
 static const std::string EAS_GET_API{"/api/messages"};
 static const std::string EAS_LIST_API{"/api/instances"};
 static const std::string EAS_INSTANCE_KEY{"__instance__"};
-// https://project.aone.alibaba-inc.com/v2/project/664220/req/76900958
 // REAL VERSION KEY: __timestamp__
 static const std::string EAS_VERSION_KEY{"__timestamp__"};
 static const std::string EAS_LOCAL_ENDPOINT{"http://127.0.0.1:9900"};

@@ -373,7 +373,6 @@ size_t KvTransferClient::start_send() {
   auto ctx = context();
   auto step_guard = std::make_shared<StepGuard>(ctx, std::move(step));
   single_thd_.spawn([step_guard]() {
-    // see https://project.aone.alibaba-inc.com/v2/project/664220/req/60271832
     fault_inject_sleep(10 * 1000);
 
     step_guard->step()->wait_layers_start_ts = SteadyClock::now();
