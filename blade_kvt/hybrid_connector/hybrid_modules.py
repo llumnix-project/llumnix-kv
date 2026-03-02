@@ -49,6 +49,7 @@ from .engine_proxy import (
     sched_finish_req,
     sched_free_blocks,
     sched_get_blocks,
+    sched_set_blocks,
     sched_get_req,
     sched_rpc_server,
     sched_rpc_server_port,
@@ -586,16 +587,12 @@ class HybridScheduler:
                 self._setup_save(req, kvblks, save_count)
 
             if load_count > 0:
-                if get_param(req, D_LOCAL_PREFILL, False):
-                    set_param(req, HB_IORET, IoRet(n=req.num_tokens-1))
-                    self._loaded.append(req)
-                else:
-                    _inc_cleanup_rc(req)
-                    assert req.request_id not in self._loading
-                    self._loading[req.request_id] = _LoadingReq(req)
-                    self._add_ts(req, "load_enqueue")
-                    coro = self._on_add_req(req, kvblks)
-                    asyncio.run_coroutine_threadsafe(coro, self.loop)
+                _inc_cleanup_rc(req)
+                assert req.request_id not in self._loading
+                self._loading[req.request_id] = _LoadingReq(req)
+                self._add_ts(req, "load_enqueue")
+                coro = self._on_add_req(req, kvblks)
+                asyncio.run_coroutine_threadsafe(coro, self.loop)
             else:
                 # fastpath for num_external_tokens = 0.
                 # In this case, async load operation is not required, the

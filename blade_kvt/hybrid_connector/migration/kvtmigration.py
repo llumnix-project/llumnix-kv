@@ -26,6 +26,7 @@ from ..kvtbackend import (
     P_KVT_STATE,
     P_REMOTE_DECODE,
     PREFILL_RESP,
+    D_LOCAL_PREFILL,
     DBackend,
     PBackend,
     RKVTDInfo,
@@ -101,7 +102,10 @@ class KVTMigration(HybridBackend):
     async def async_update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ) -> Optional[IoRet]:
-        if get_param(request, SRC_INFO):
+        if get_param(request, D_LOCAL_PREFILL, False):
+            r = IoRet(n=request.num_tokens-1)
+            self._p._dash_done.pop(request.request_id, None)
+        elif get_param(request, SRC_INFO):
             r = await self._m.async_update_state_after_alloc(
                 request, blocks, num_external_tokens
             )
