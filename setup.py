@@ -39,20 +39,20 @@ def check_cuda_batch_copy_support() -> bool:
 
 int main(int argc, char** argv)
 {
-    // 固定要查找的符号
+    // Symbol to search for
     const char* symbol = "cudaMemcpyBatchAsync";
 
-    // 自动查找 libcudart.so 的路径列表
+    // Automatically search for libcudart.so paths
     char lib_paths[10][512];
     int path_count = 0;
 
-    // 标准路径
+    // Standard paths
     strcpy(lib_paths[path_count++], "/usr/local/cuda/lib64/libcudart.so");
     strcpy(lib_paths[path_count++], "/usr/local/cuda/lib/libcudart.so");
     strcpy(lib_paths[path_count++], "/usr/lib/x86_64-linux-gnu/libcudart.so");
     strcpy(lib_paths[path_count++], "/usr/lib/libcudart.so");
 
-    // 检查环境变量中的 CUDA 路径
+    // Check CUDA paths from environment variables
     const char* cuda_home = getenv("CUDA_HOME");
     const char* cuda_path = getenv("CUDA_PATH");
 
@@ -228,7 +228,7 @@ def _local_version(version) -> str:
     version_parts = [local_ver]
     if int(os.environ.get("BLADELLM_CMAKE_DEBUG", 0)):
         version_parts.append('debug')
-    # 这里是对 python local ver 的滥用... 待修正
+    # This is a misuse of python local version... needs fixing
     version_parts.append(f"barex.{_barex_ver()}")
     return '.'.join(version_parts)
 

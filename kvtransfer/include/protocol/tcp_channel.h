@@ -105,7 +105,7 @@ class TCPChannel : public IChannel, public noncopyable {
 };
 
 struct TCPInfo {
-  char ip[INET_ADDRSTRLEN]{'\0'};  // decode listen ip, 以 '\0' 结尾.
+  char ip[INET_ADDRSTRLEN]{'\0'};  // Decode listen IP, null-terminated.
   int port = 0;  // decode listen port
   std::vector<void *> ptrs;
 };

@@ -7,7 +7,7 @@
 
 namespace blade_llm {
 
-// url 格式 '//ip:port'
+// URL format: '//ip:port'
 static std::pair<std::string, int> parse_url(const std::string& url) {
   auto pos = url.find(':', 2);
   if (pos == std::string::npos) {

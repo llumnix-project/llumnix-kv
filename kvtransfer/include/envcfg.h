@@ -14,12 +14,12 @@ int env_conn_tpsize();
 int env_h2d_sync_tpsize();
 int env_fsnaming_keepalive_interval_s();
 int env_fsnaming_tolerate_interval_s();
-// tx stub 发送失败率: (RETURN - 1) / 100
+// tx stub send failure rate: (RETURN - 1) / 100
 int env_debug_tx_failrate();
 int env_debug_tx_delay_ms();
 
-// RETURN addr 指向着某处全局空间, 不要修改.
-// NULL 意味着不使用 send done 机制.
+// RETURN addr points to some global memory; do not modify.
+// NULL means the send-done mechanism is not used.
 const struct sockaddr_in* env_send_done_addr();
 
 // sync with kv_transfer_impl._get_layer_num_blocks
@@ -42,8 +42,8 @@ constexpr int SEND_DONE_HEAD_KIND = 1;
 constexpr int SEND_SAVE_DONE_HEAD_KIND = 2;
 int env_send_done_head_kind();
 
-// RETURN addr 指向着某处全局空间, 不要修改.
-// 示例: "4096,8000;8192,1000;" 意味着预先分配 8000 个 4096byte 的内存, 1000 个 8192 byte 的内存.
+// RETURN addr points to some global memory; do not modify.
+// Example: "4096,8000;8192,1000;" means pre-allocate 8000 chunks of 4096 bytes and 1000 chunks of 8192 bytes.
 const std::vector<std::pair<uint64_t, int>>* env_reserve();
 
 int env_rpc_timeout_s();

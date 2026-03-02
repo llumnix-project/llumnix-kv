@@ -359,7 +359,7 @@ static void vllm_parse_block_send_p_eq_d(
 
   size_t const src_layer_size = k_block_size * src_worker_info->layer_num_blocks;
   size_t const dst_layer_size = k_block_size * dst_worker_info->layer_num_blocks;
-  // src_layer_size, dst_layer_size 并不一定要相等.
+  // src_layer_size and dst_layer_size are not necessarily equal.
 
   send_blocks.resize(kv_token_sizes.size());
   std::vector<IpcBlock> &per_cache_send_blocks = send_blocks[0];
@@ -649,7 +649,7 @@ static void vllm_parse_block_send_p_gt_d(
   std::vector<std::vector<IpcBlock>> &send_blocks) {
   auto const validranks = env_p_valid_ranks();
   if (!validranks[p_info->worker_tp_rank]) {
-    // kv 复制 case: 仅有效 worker tp rank 参与发送.
+    // kv copy case: only valid worker tp ranks participate in sending.
     return ;
   }
   uint32_t const worker_tp_rank = (validranks << (validranks.size() - p_info->worker_tp_rank)).count();
@@ -711,15 +711,15 @@ static void parse_block_send_p_gt_d_dpsk(
   const ReqSendTask *task,
   std::vector<std::vector<IpcBlock>> &send_blocks) {
   assert(p_info->token_sizes == d_info->token_sizes);
-  // 此时表明 kvcache 在各个 P rank 之间是完全一样的.
-  // 只需要 tp rank=0 的 worker 传输 kvcache 即可.
-  // 后续这里可以让所有 worker 都参与进来, 每个 worker 传 1 部分.
+  // At this point the kvcache is identical across all P ranks.
+  // Only the worker with tp rank=0 needs to transfer kvcache.
+  // In the future, all workers could participate, each transferring a portion.
   if (p_info->worker_tp_rank != 0) {
     return ;
   }
 
   assert(d_info->worker_tp_rank == 0);
-  // PD Block 包含的token数需要一致
+  // PD blocks must contain the same number of tokens
   assert(p_info->block_sizes == d_info->block_sizes);
   auto &token_sizes = p_info->token_sizes;
   auto &block_sizes = p_info->block_sizes;
@@ -1154,7 +1154,7 @@ private:
     uint32_t num_req = reqs.size();
 
     // len('cfb0aa74-6752-9bcd-879e-19d1d1cf368b-ee5d8cdc-57d1-478f-a1d7-5b0c05bd8fb3')
-    // == 73 一个典型的 dash reqid 长度.
+    // == 73, a typical dual-request reqid length.
     self.send_done_buf.reserve((4 + 4 + 4 + num_req * (4 + 73 + 4 + 4)) * 2ul);
 
     self.send_done_buf.resize(4 + 4 + 4);
@@ -1183,8 +1183,8 @@ private:
       respsize = 8;
     }
 
-    // 考虑到我们使用的是一个长链接, 其可能已经失效了, 这里会在需要的时候,
-    // 进行重试, 重新创建一个连接. 当然, 一次就好~
+    // Since we use a persistent connection that may have become stale,
+    // we retry and recreate the connection if needed. Just once though.
     try {
       self.do_rpc_send_done(respsize);
       return ;
@@ -1229,7 +1229,7 @@ private:
       TimeWatch wait_start;
       batch.step->wait_layer_ready(i);
       self.wait_time_us += wait_start.get_elapse_us();
-      // NOTE: write 可能是异步的! write 返回并不意味着数据发送了!
+      // NOTE: write may be asynchronous! Returning from write does not mean data has been sent!
       self.ch->send_data(i);
     }
     fault_inject_throw();

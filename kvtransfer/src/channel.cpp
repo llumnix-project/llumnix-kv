@@ -48,7 +48,7 @@ std::tuple<size_t, size_t, size_t, size_t> merge_interval(std::vector<IpcBlock> 
     total_size += prev_len;
     cnt += 1;
   }
-  // 暂没必要..
+  // Not necessary for now..
   // std::remove_if(input, [] len == 0)
   return {min_size, max_size, total_size, cnt};
 }
@@ -66,7 +66,7 @@ std::unique_ptr<IChannel> create_channel(Context *ctx, const TransferProtocol &p
   }
   switch (proto.type) {
     case TransferProtocol::Kind::TCP: {
-      //llx: RDMAProtoContext改个名字?
+      //llx: Rename RDMAProtoContext?
       auto proto_ctx = ctx->get_protocol_ctx<BarexProtoContext>(proto);
       if (proto_ctx == nullptr) {
         throw std::runtime_error("tcp channel context not registered;");

@@ -108,8 +108,8 @@ private:
 class BarexMRGuard : public noncopyable {
   accl::barex::memp_t mr_;
   accl::barex::XSimpleMempool *mp_ = nullptr; // owner: BarexCtx
-  bool const release_; // 若为 true 则使用 ReleaseAndDeregBuffer 否则仅使用 DeregUserMr
-  bool const dereg_; // TCP hostbuffers需要release，但不dereg mr
+  bool const release_; // If true, use ReleaseAndDeregBuffer; otherwise use DeregUserMr only
+  bool const dereg_; // TCP host buffers need release but not MR deregistration
  private:
   BarexMRGuard(accl::barex::memp_t &&mr, accl::barex::XSimpleMempool *mp, bool r, bool d) noexcept:
       mr_(std::move(mr)),
@@ -181,7 +181,7 @@ struct BarexCtx : public noncopyable {
   }
   
  private:
-  // 记得这里的顺序决定了析构顺序, 要注意成员放置顺序.
+  // Member declaration order determines destruction order; be careful with placement.
   int device_id_{-1};  // Device ID from Context, set via ctx->device_id()
   bool is_server_{true};  // Flag indicating if initialized by BarexCtx itself (true) or CliBarexCtx (false)
   accl::barex::XSimpleMempool* mp_ = nullptr;
@@ -193,10 +193,10 @@ struct BarexCtx : public noncopyable {
   std::vector<std::vector<std::unique_ptr<GdrMemDesc>>> layer_gdrcpy_mem_;
 };
 
-// 每层layer最多包含的cache tensor数量
+// Maximum number of cache tensors per layer
 static constexpr size_t MAX_CACHE_NUM_PER_LAYER = 2;
 
-// 为了保证RDMAMemHandle 可以 memcpy，用固定大小的array保存
+// Use fixed-size arrays so that RDMAMemHandle is memcpy-safe
 struct RDMAMemHandle {
   std::array<void*, MAX_CACHE_NUM_PER_LAYER> ptrs{};
   std::array<uint32_t, MAX_CACHE_NUM_PER_LAYER> rkeys{};
@@ -259,7 +259,7 @@ struct CliBarexCtx : public BarexCtx {
 
 static constexpr int LAYER_NUM_MAX = 150;
 struct RDMAInfo {
-  char ip[INET_ADDRSTRLEN]{'\0'};  // decode listen ip, 以 '\0' 结尾.
+  char ip[INET_ADDRSTRLEN]{'\0'};  // Decode listen IP, null-terminated.
   int port = 0;  // decode listen port
   std::vector<RDMAMemHandle> handles;
 };
@@ -274,9 +274,9 @@ class RDMAChannel : public IChannel, public noncopyable {
 
   ~RDMAChannel();
 
-  // connect 在主线程调用, 尽量不要阻塞.
-  // write 在后台线程调用, 可以阻塞,
-  // 上层会确保 connect happen-before write.
+  // connect is called on the main thread; avoid blocking.
+  // write is called on a background thread; blocking is acceptable.
+  // The caller ensures connect happens-before write.
   void connect(const WorkerInfo &dst_info) override;
 
   void register_data(std::vector<std::vector<IpcBlock>>& data, TPKind kind) override;
@@ -363,7 +363,7 @@ class RDMAServer : public ITransferServer {
 
 class CliCtxCallback : public accl::barex::XChannelCallback {
  public:
-  // prefill 端 callback, 并不需要做什么.
+  // Prefill-side callback; nothing needs to be done.
   void OnRecvCall(accl::barex::XChannel *channel,
                   char *in_buf,
                   size_t len,

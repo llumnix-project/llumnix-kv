@@ -713,7 +713,6 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
       EXPECT_EQ(layer1.data.value().dst_offset, 4 * bs);
       EXPECT_EQ(layer1.data.value().length, 8 * KB);
     }else { // FLASH_CACHE_SHAPE
-      // 为啥是5?
       EXPECT_EQ(q->size(), 5);
       auto layer0_k = q->front();
       q->pop();
@@ -1128,7 +1127,7 @@ TEST(SendStubTest, MergeIntervalTest) {
   }
 
   {
-    // prompt cache 可能会生成重叠的区间.
+    // Prompt cache may generate overlapping ranges.
     std::vector<IpcBlock> edata{{1, 1, 2}, {1, 3, 3}, {2, 4, 0}};
     std::vector<IpcBlock> data{{1, 1, 2}, {1, 3, 1}, {2, 4, 2}};
     auto [min_size, max_size, total_size, cnt] = merge_interval(data);

@@ -169,7 +169,7 @@ cudaStream_t TCPServer::get_h2d_stream() {
 // +-------+-------+------------+
 // | magic | reqid |  rpc body  |
 // rpc header: magic: 4 bytes. reqid: 8 bytes.
-// rpc body: rep/resp body 根据 magic 解码.
+// rpc body: req/resp body is decoded according to magic.
 static constexpr size_t RPC_HEADER = sizeof(uint32_t) + sizeof(uint64_t);
 static constexpr uint32_t MEM_HANDLES_REQ_MAGIC = 0x20181218;
 
@@ -191,7 +191,7 @@ static void ser_rpc_header(char* buf, uint32_t magic, uint64_t reqid) noexcept {
 // +--------+---------+--------+--------+--------+--------+
 //    crc       cnt       off1     len1    off2     len2
 // crc: uint32_t.
-// cnt: uint32_t 指定了后续 off/len 个数.
+// cnt: uint32_t specifying the number of subsequent off/len pairs.
 // off, len; uint64_t.
 // resp:
 // crc: uint32_t
@@ -201,9 +201,9 @@ static constexpr uint32_t SEND_MAGIC = 0x53456e64; /* SEnd */
 
 static constexpr uint32_t KV_CACHE_DATA_MAGIC = 0x4B564361;  /* KVCa (KV Cache data) */
 
-// magic, inst_id_len, worker_id, num_block 都是 4 字节.
-// num_block 指定了 block_ids 中 block 个数, 每个 block 4 字节.
-// reqid 以 0 结尾的 C 字符串.
+// magic, inst_id_len, worker_id, num_block are all 4 bytes.
+// num_block specifies the number of blocks in block_ids, each block is 4 bytes.
+// reqid is a null-terminated C string.
 // +-------+-------------+-----------+-----------+---------+-----------+-------+
 // | magic | inst_id_len | worker_id | num_block | inst_id | block_ids | reqid |
 //
@@ -458,8 +458,8 @@ BarexMRGuard::~BarexMRGuard() {
   RTASSERT(result == accl::barex::BAREX_SUCCESS);
 }
 
-// GPU 0 对应 NIC: RET[0]
-// filename 格式: vsolar_1,vsolar_1,vsolar_1,vsolar_1,vsolar_0,vsolar_0,vsolar_0,vsolar_0
+// GPU 0 maps to NIC: RET[0]
+// filename format: vsolar_1,vsolar_1,vsolar_1,vsolar_1,vsolar_0,vsolar_0,vsolar_0,vsolar_0
 static std::vector<std::string> load_nic_affinity(const char* filename) {
   auto file = std::ifstream(filename);
   if (!file.is_open()) {
@@ -492,7 +492,7 @@ static const std::vector<std::string>& get_nic_affinity() noexcept {
 }
 
 // CUDA_VISIBLE_DEVICES=4,5,6,7
-// 返回空若 CUDA_VISIBLE_DEVICES 未设置.
+// Returns empty if CUDA_VISIBLE_DEVICES is not set.
 static std::vector<int> parse_cuda_visible_devs() {
   const char* env_data = getenv("CUDA_VISIBLE_DEVICES");
   if (env_data == nullptr) {
@@ -672,10 +672,10 @@ BarexCtx::BarexCtx(std::string mp_name,
   mp_reserve(mp);
 
   const auto &layer_infos = ctx->all_layer_infos();
-  // accl.barex 注册 MR 个数最大为 65536, 即要求注册的cache tensor数 <= 65536.
-  // 考虑到 LAYER_NUM_MAX 远小于 65536, 所以只需要 LAYER_NUM_MAX 限制即可.
+  // accl.barex allows registering at most 65536 MRs, i.e. cache tensor count <= 65536.
+  // Since LAYER_NUM_MAX is much smaller than 65536, the LAYER_NUM_MAX limit suffices.
   RTASSERT(layer_infos.size() * layer_infos[0].size() <= LAYER_NUM_MAX);
-  // 每个 mr 默认大小限制为 1GB.
+  // Default max MR size is 1GB.
   size_t max_mr_size = 1L * 1024 * 1024 * 1024;
   const char *max_mr_gb_str = getenv("ACCL_MAX_USER_MR_GB");
   if (max_mr_gb_str != nullptr) {
@@ -690,7 +690,7 @@ BarexCtx::BarexCtx(std::string mp_name,
     auto layer_blk_size = block_sizes[i] * ctx->layer_num_blocks();
     LOG(INFO) << "layer size(layer_blk_size) = " << layer_blk_size
                           << ", max_mr_size = " << max_mr_size;
-    // 如果这里跪了, 需要配置环境变量 ACCL_MAX_USER_MR_GB
+    // If this fails, set the ACCL_MAX_USER_MR_GB environment variable
     RTASSERT(layer_blk_size <= max_mr_size);
   }
 
@@ -705,8 +705,8 @@ BarexCtx::BarexCtx(std::string mp_name,
       auto layer_blk_p = reinterpret_cast<void *>(info.layer_addr);
       auto layer_blk_size = info.block_size * ctx->layer_num_blocks(); // size_t * uint32_t = size_t
       if (kind == TransferProtocol::Kind::RDMA_DIRECT){
-        // 虽然注释上提到 RegUserMr 要求对齐. 但钉钉确认了, 只要是 cudaMalloc
-        // 返回的地址都可以. llx: layer_blk_size of each tensor in one layer may
+        // Although the docs say RegUserMr requires alignment, it was confirmed that
+        // any address returned by cudaMalloc is acceptable. llx: layer_blk_size of each tensor in one layer may
         // not be the same so we need to register each tensor as a separate mr
         auto result = self.mp_->RegUserMr(out, layer_blk_p, layer_blk_size, GPU,
                                           ctx->device_id());
@@ -718,7 +718,7 @@ BarexCtx::BarexCtx(std::string mp_name,
         LOG(INFO) << "RegUserMr. layer_blk_p=" << layer_blk_p
                   << ", layer_blk_size=" << layer_blk_size
                   << ", gpuid=" << ctx->device_id();
-        if (env_crc()) { // TODO:TCP 的crc可以简化一些？直接用分配的cpu buffer进行对比？
+        if (env_crc()) { // TODO: CRC for TCP could be simplified? Compare directly using allocated cpu buffer?
           auto desc = gdrcpy_mmap(layer_blk_p, layer_blk_size);
           layer_gdrcpy_mem.emplace_back(std::move(desc));
         } else {
@@ -1039,8 +1039,8 @@ uint32_t CliBarexCtx::get_remote_crc(std::shared_ptr<XChannel>& dst, const std::
   // (magic + reqid) + lcrc + tensor_cnt 
   // + [tensor0_block_cnt + off1+len1 + off2+len2 + ...] + [tensor1_block_cnt + ...] + ...
   const auto bodysize = sizeof(uint32_t) + // tensor_cnt
-                        tensor_cnt * sizeof(uint32_t) + // 每个tensor的block数量
-                        total_blocks * (sizeof(uint64_t) + sizeof(uint64_t)); // 所有offset/length对
+                        tensor_cnt * sizeof(uint32_t) + // block count per tensor
+                        total_blocks * (sizeof(uint64_t) + sizeof(uint64_t)); // all offset/length pairs
   memp_t bufmr = AllocCPUBuffer(dst, RPC_HEADER + sizeof(uint32_t) + bodysize);
   ser_rpc_header(bufmr.buf, REMOTE_CRC_REQ_MAGIC, reqid);
   char* bufstart = bufmr.buf + RPC_HEADER;
@@ -1241,7 +1241,7 @@ void RDMAServer::CtxCallback::OnRecvCall(std::shared_ptr<XChannel> ch, char *in_
   std::vector<uint32_t> block_ids;
 
   if (decode_notification(in_buf, len, inst_id, worker_id, req_id, block_ids)) {
-    // OnRecvCall 在 barex 线程池中调用. 注意 data race.
+    // OnRecvCall is invoked in the barex thread pool. Beware of data races.
     this->ser_->on_recv(inst_id, worker_id, req_id, std::move(block_ids));
   }
   return;
@@ -1276,7 +1276,7 @@ static int get_port() {
   return portno;
 }
 
-// barex listen 实现是 bind INADDR_ANY, 因此我们随便返回一个对外可用的 ip 地址均可.
+// barex listen binds to INADDR_ANY, so any externally reachable IP address will do.
 static void get_ip(char *info_ip, size_t bufcap) {
   const auto* vllm_host_ip = getenv("VLLM_HOST_IP");
   if (vllm_host_ip != nullptr && vllm_host_ip[0] != '\0') {
@@ -1437,7 +1437,7 @@ Connect(XConnector &self, std::string server_addr, int port) {
 static void delete_channels(CliBarexCtx* ctx, std::vector<BarexChannel> chs) {
   auto& tp = ctx->close_tp();
   tp.spawn([chs=std::move(chs)] () {
-    // 在后台线程析构 chs.
+    // Destruct chs in the background thread.
   });
   assert(chs.empty());
   return;
@@ -1543,7 +1543,7 @@ WriteSingle(XChannel *ch, memp_t sdata, uint64_t raddr, uint32_t rkey) {
   const auto write_start_ts = SteadyClock::now();
   auto result = ch->WriteBatch(std::move(datas),
                                [pr = std::move(pr), d = std::move(datasp), write_start_ts](Status s) mutable {
-                                 // WriteBatch 要求 datasp 直至 callback 中才能回收.
+                                 // WriteBatch requires datasp to stay alive until this callback.
                                  if (!s.IsOk()) {
                                    auto ex = std::make_exception_ptr(std::runtime_error("Write ERR: " + s.ErrMsg()));
                                    pr->set_exception(std::move(ex));
@@ -1572,10 +1572,10 @@ std::shared_ptr<accl::barex::XChannel>& RDMAChannel::sch() noexcept {
   return self.chs_[idx].sch();
 }
 
-// group 之后, input 呈现出:
+// After grouping, the input looks like:
 // <src_off_1, dst_off_0, len1>
 // <src_off_2, dst_off_0, len2>
-// 这里意味着 src_off_1, len1; src_off_2, len2 的内容要写入 dst_off_0
+// This means the contents at src_off_1,len1 and src_off_2,len2 are written to dst_off_0
 // <src_off_3, dst_off_1, len3>
 // <src_off_4, dst_off_1, len4>
 // <src_off_5, dst_off_1, len5>
@@ -1734,7 +1734,7 @@ void RDMAChannel::send_data(size_t layer_idx) {
     assert(tensor_cnt < dst_layer_handle.ptrs.size());
     assert(tensor_cnt < temp_src_mrs.size());
 
-    // 获取当前tensor的CPU指针用于CRC计算
+    // Get the CPU pointer of the current tensor for CRC calculation
     const Bytef *const tensor_cpu_ptr = get_layer_tensor_cpu_ptr(self.ctx_, layer_idx, tensor_cnt);
     if (tensor_cpu_ptr == nullptr && self.enable_crc_) {
       LOG(WARNING) << "disable crc check. layer_idx=" << layer_idx << ", tensor_cnt=" << tensor_cnt;
@@ -1807,7 +1807,7 @@ void RDMAChannel::send_data(size_t layer_idx) {
       /* signal_peer */ false,
       /* imm_data */ 0,
       [prefills = std::move(prefills), pr = std::move(pr), start_ts](Status s) {
-        // WriteBySgList 要求 prefills 直至 callback 中才能回收.
+        // WriteBySgList requires prefills to stay alive until this callback.
         if (!s.IsOk()) {
           auto ex = std::make_exception_ptr(
               std::runtime_error("Write ERR: " + s.ErrMsg())
@@ -1898,7 +1898,7 @@ void RDMAChannel::send_notification(
 
     const auto &reqid = r->req_id();
     const auto &block_ids = r->dst_blocks();
-    // 编码规则见 RDMAServer::CtxCallback::OnRecvCall
+    // See RDMAServer::CtxCallback::OnRecvCall for encoding rules
     auto const msglen = get_encode_size(src_inst_id_, src_worker_id_, reqid, block_ids);
     auto& use_ch = self.sch();
     assert(use_ch->GetMempool() == self.ctx_->mp());
@@ -1984,7 +1984,7 @@ struct DataPtrCtx {
 public:
   DataPtrCtx(void* p, XAllocator* a, int g, size_t s) noexcept:
     ptr(p), allocator(a), gpu_id(g), size(s) {
-    // DataPtrCtx 构造场景也非常稀疏, 打印点日志没关系的.
+    // DataPtrCtx construction is very infrequent, so logging here is fine.
     auto& self = *this;
     LOG(INFO) << "DataPtrCtx. ptr=" << self.ptr
               << ", allocator=" << self.allocator
@@ -1996,7 +1996,7 @@ public:
   ~DataPtrCtx() {
     auto& self = *this;
     self.allocator->Release(self.ptr);
-    // DataPtrCtx 析构场景非常稀疏. 打印点日志没关系的.
+    // DataPtrCtx destruction is very infrequent. Logging here is fine.
     LOG(INFO) << "~DataPtrCtx. ptr=" << self.ptr
               << ", allocator=" << self.allocator
               << ", gpu_id=" << self.gpu_id
@@ -2021,7 +2021,7 @@ PyObject* alloc_phy_cont_mem(size_t size, PyObject* device) {
   auto [_, mp] = g_mp_manager.get_gpu_ctx(gpu_id, TransferProtocol::Kind::RDMA_DIRECT);
   auto result = mp->GetXAllocator(gpu_allocator, GPU);
   RTASSERT(result == accl::barex::BAREX_SUCCESS);
-  // cudaMalloc 至少 256 对齐. align 在 PPU 上不生效, 即 PPU 上 kvcache 不保证对齐.
+  // cudaMalloc guarantees at least 256-byte alignment. align has no effect on PPU, i.e. kvcache alignment is not guaranteed on PPU.
   void* const buf = gpu_allocator->Alloc(size, gpu_id, nullptr /* attr */, 512 /* align */);
   auto* dpctx = new DataPtrCtx(buf, gpu_allocator, gpu_id, size);
   auto data_ptr = c10::DataPtr(buf, dpctx, DataPtrCtxDeleter, dev->device);
@@ -2081,7 +2081,7 @@ void TCPServer::start_server(ITransferService *service, Context *ctx) {
 
 
   info.ptrs.reserve(layer_ptr.size());
-  // Decode 目前按照 1 layer n tensor初始化
+  // Decode currently initializes as 1 layer with n tensors
   for (size_t layer_idx = 0; layer_idx < layer_ptr.size(); ++layer_idx) {
     auto &layer_mrs = barex_ctx->layer_mrs()[layer_idx];
     RTASSERT(layer_ptr[layer_idx].size() <= MAX_CACHE_NUM_PER_LAYER);

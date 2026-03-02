@@ -25,7 +25,7 @@ class XThreadpool;
 
 namespace blade_llm {
 
-// 这里 value 长度一般是 p_info->tp_size / d_info->tp_size; 约 1/2/4.
+// The value length here is typically p_info->tp_size / d_info->tp_size; roughly 1/2/4.
 using StepTasks = std::unordered_map<InstanceId, std::vector<std::pair<WorkerId, BatchSendTask>>>;
 
 struct ReqMeta {
@@ -56,7 +56,7 @@ class KvTransferClient : public noncopyable {
                   const std::optional<std::string> &dst_worker_info = std::nullopt);
   void remove_target(const InstanceId &, const WorkerId &);
 
-  // ReqMeta 会被 moved.
+  // ReqMeta will be moved.
   // thread safe
   void start_req_send(std::vector<ReqMeta>& metas);
 
@@ -121,7 +121,7 @@ class KvTransferClient : public noncopyable {
     }
   };
 
-  // 所有操作状态变更都发生在 mgr_thd_ 中.
+  // All state transitions happen on mgr_thd_.
   class TargetMgr {
     // OWNER: GLOBAL
     Context* const ctx_ = nullptr;
@@ -180,8 +180,8 @@ class KvTransferClient : public noncopyable {
   static_assert(std::atomic<size_t>::is_always_lock_free);
   std::unique_ptr<Context> ctx_;
   std::unordered_map<RequestId, std::vector<std::shared_ptr<RequestInfo>>> reqs_;
-  // 用来临时暂存 submit_req_send/submit_delta_send 创建的 send task.
-  // start_send() 会清空该字段.
+  // Temporary buffer for send tasks created by submit_req_send/submit_delta_send.
+  // start_send() clears this field.
   StepTasks targets_tasks_buf_;
   std::shared_ptr<StepGuard> last_step_guard_;  // may be null.
   ThreadPool single_thd_;

@@ -38,7 +38,7 @@ static std::ostream& operator<<(std::ostream& os, const StepMetrics& self) {
 }
 
 Step::~Step() noexcept {
-  // 当 step 析构时, 意味着 step 所有相关活动都结束了, 此时适合输出 metric.
+  // When step is destructed, all related activities are finished; emit metrics here.
   auto& self = *this;
   const auto last_send_ts = self.last_send_finish_ts();
   LOG(INFO) << std::fixed << std::setprecision(3)

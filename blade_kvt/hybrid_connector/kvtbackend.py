@@ -327,12 +327,12 @@ def _get_inst_id(cfg: VllmConfig, fake_naming: bool = False) -> str:
     return r
 
 
-# for dash
+# for dual-request mode
 def _isfakereq(req: EngineCoreRequest) -> bool:
     return len(req.prompt_token_ids) <= 0
 
 
-# for dash
+# for dual-request mode
 def _try_wakeup_core(q: deque):
     if len(q) != 1:
         return
@@ -341,7 +341,7 @@ def _try_wakeup_core(q: deque):
     return
 
 
-# for dash
+# for dual-request mode
 def _fakecorereq(req: Request) -> EngineCoreRequest:
     return EngineCoreRequest(
         request_id=req.request_id,
@@ -501,7 +501,7 @@ class _SendingReq(IoState):
         return
 
 
-class DashReq:
+class DualReq:
     def __init__(self, req: Request, pblkids: list[int], finished=False):
         self.req = req
         self.finished = finished
@@ -556,7 +556,7 @@ class PBackend(HybridBackend):
             self._kvtreqdec = msgspec.msgpack.Decoder(RKVTDInfo)
 
             # R/W: core thread
-            self._dash_done: dict[str, DashReq] = dict()
+            self._dual_req_done: dict[str, DualReq] = dict()
             self._infly_kvt: dict[str, PReqMeta] = dict()
 
             self._dinfoq: deque[RKVTDInfo] = deque()
@@ -734,15 +734,15 @@ class PBackend(HybridBackend):
         await writer.drain()
         return
 
-    def _dash_transfer_req(self, reqid: str, kvtstate: KVTState, ret: list[PReqMeta]):
+    def _dual_req_transfer(self, reqid: str, kvtstate: KVTState, ret: list[PReqMeta]):
         assert not kvtstate.untouched
-        dashreq = self._dash_done.pop(reqid)
+        dual_req = self._dual_req_done.pop(reqid)
         dinfo = kvtstate.dinfo
         new_tokens = kvtstate.maxtokens - dinfo.cached_tokens
         pmeta = PReqMeta(
-            reqid=dashreq.req.request_id,
+            reqid=dual_req.req.request_id,
             d_inst_id=dinfo.instid,
-            p_block_ids=dashreq.pblkids,
+            p_block_ids=dual_req.pblkids,
             d_block_ids=dinfo.blkids,
             seen_tokens=dinfo.cached_tokens,
             new_tokens=new_tokens,
@@ -753,24 +753,24 @@ class PBackend(HybridBackend):
         ret.append(pmeta)
         return
 
-    def _dash_finish_req(self, reqid: str, ret: list[PReqMeta]):
-        dashreq = self._dash_done.get(reqid, None)
-        if dashreq is None:
+    def _dual_req_finish(self, reqid: str, ret: list[PReqMeta]):
+        dual_req = self._dual_req_done.get(reqid, None)
+        if dual_req is None:
             return
-        if dashreq.finished:
+        if dual_req.finished:
             return
-        dashreq.finished = True
-        kvtstate: Optional[KVTState] = get_param(dashreq.req, P_KVT_STATE)
+        dual_req.finished = True
+        kvtstate: Optional[KVTState] = get_param(dual_req.req, P_KVT_STATE)
         if kvtstate is None:
             return
         assert kvtstate.untouched
         kvtstate.untouched = False
-        self._dash_transfer_req(reqid, kvtstate, ret)
+        self._dual_req_transfer(reqid, kvtstate, ret)
         return
 
     # isdone?
-    def _dash_get_req(self, reqid: str) -> tuple[Optional[Request], bool]:
-        req = self._dash_done.get(reqid, None)
+    def _dual_req_get(self, reqid: str) -> tuple[Optional[Request], bool]:
+        req = self._dual_req_done.get(reqid, None)
         if req is None:
             sreq = self.get_request(reqid)
             return sreq, False
@@ -805,7 +805,7 @@ class PBackend(HybridBackend):
             rdinfo = self._dinfoq.popleft()
             dinfo = rdinfo.dinfo
 
-            req, isdone = self._dash_get_req(rdinfo.reqid)
+            req, isdone = self._dual_req_get(rdinfo.reqid)
             if req is None:
                 loop = get_hybrid_sched_loop()
                 ioret = IoRet(
@@ -827,7 +827,7 @@ class PBackend(HybridBackend):
                 ioret = IoRet(reqid=req.request_id, n=dinfo.cached_tokens)
                 loop.call_soon_threadsafe(self._mark_send_done, ioret)
                 try_teardown_save(req)
-                self._dash_done.pop(req.request_id, None)
+                self._dual_req_done.pop(req.request_id, None)
                 continue
 
             if not isdone:
@@ -846,10 +846,10 @@ class PBackend(HybridBackend):
                 logger.error("Aborting request due to token mismatch: %s", reason)
                 core_abort_req(req.request_id, reason, True)
                 continue
-            self._dash_transfer_req(req.request_id, kvtstat, ret)
+            self._dual_req_transfer(req.request_id, kvtstat, ret)
         return
 
-    def _update_dash_done(self,
+    def _update_dual_req_done(self,
                           req: Request,
                           islast: bool,
                           pblkids: Optional[list[int]],
@@ -858,7 +858,7 @@ class PBackend(HybridBackend):
             return
         if not islast:
             return
-        if req.request_id in self._dash_done:
+        if req.request_id in self._dual_req_done:
             # async scheduling~
             return
 
@@ -867,7 +867,7 @@ class PBackend(HybridBackend):
                 req.request_id, self._gamma, self._enable_prefix_caching
             )
             assert len(pblkids) > 0
-        self._dash_done[req.request_id] = DashReq(req, pblkids, finished)
+        self._dual_req_done[req.request_id] = DualReq(req, pblkids, finished)
         return
 
     def _check_kvtmeta(self, prevmeta: PReqMeta, curmeta: PReqMeta):
@@ -892,15 +892,15 @@ class PBackend(HybridBackend):
         return
 
     def _step_finished_reqs(self, sout: SchedulerOutput, ret: list[PReqMeta]):
-        if len(self._infly_kvt) <= 0 and len(self._dash_done) <= 0:
+        if len(self._infly_kvt) <= 0 and len(self._dual_req_done) <= 0:
             # fast path
             return
         for reqid in sout.finished_req_ids:
             meta = self._infly_kvt.pop(reqid, None)
             if meta is None:
-                self._dash_finish_req(reqid, ret)
+                self._dual_req_finish(reqid, ret)
                 continue
-            assert reqid not in self._dash_done
+            assert reqid not in self._dual_req_done
             # assert R.untouched == False
             assert not meta.has_last_token and meta.new_tokens > 0
             new_seen_tokens = meta.seen_tokens + meta.new_tokens
@@ -924,7 +924,7 @@ class PBackend(HybridBackend):
                 continue
             assert areq.request_id not in self._infly_kvt
 
-            self._dash_done.pop(areq.request_id, None)
+            self._dual_req_done.pop(areq.request_id, None)
             if kvstate is not None:
                 assert kvstate.untouched
                 loop = get_hybrid_sched_loop()
@@ -941,17 +941,17 @@ class PBackend(HybridBackend):
             kvtstate: Optional[KVTState] = get_param(req, P_KVT_STATE)
             assert kvtstate is None
 
-            assert req.request_id not in self._dash_done
-            self._update_dash_done(req, True, None, True)
+            assert req.request_id not in self._dual_req_done
+            self._update_dual_req_done(req, True, None, True)
         return
 
-    def _step_dash_done(self):
+    def _step_dual_req_done(self):
         now = time.time()
         timeout_s = envs.VLLM_PD_TRY_CONNECT_TIMEOUT_SECONDS
-        for reqid, dashreq in self._dash_done.items():
-            if dashreq.insert_ts + timeout_s > now:
+        for reqid, dual_req in self._dual_req_done.items():
+            if dual_req.insert_ts + timeout_s > now:
                 break
-            core_abort_req(reqid, "dashdone.timeout", True)
+            core_abort_req(reqid, "dual_req_done.timeout", True)
         return
 
     # worker thread/bypass thread
@@ -1006,7 +1006,7 @@ class PBackend(HybridBackend):
         self._step_aborting(sout)
         self._step_dinfoq(ret)
         self._step_finished_reqs(sout, ret)
-        self._step_dash_done()
+        self._step_dual_req_done()
 
         kvtstate: Optional[KVTState] = None
         for reqdata in sout.scheduled_new_reqs:
@@ -1036,7 +1036,7 @@ class PBackend(HybridBackend):
             p_block_ids = concated_blk_ids
             kvtstate = get_param(req, P_KVT_STATE)
             if kvtstate is None:
-                self._update_dash_done(req, has_last_token, p_block_ids)
+                self._update_dual_req_done(req, has_last_token, p_block_ids)
                 continue
             d_computed_tokens = kvtstate.dinfo.cached_tokens
             if new_tokens <= d_computed_tokens:
@@ -1081,7 +1081,7 @@ class PBackend(HybridBackend):
 
             kvtstate = get_param(req, P_KVT_STATE)
             if kvtstate is None:
-                self._update_dash_done(req, has_last_token, None)
+                self._update_dual_req_done(req, has_last_token, None)
                 continue
             d_computed_tokens = kvtstate.dinfo.cached_tokens
             if end_tokens <= d_computed_tokens:
@@ -1156,7 +1156,7 @@ class PBackend(HybridBackend):
             from vllm.model_executor.models.utils import extract_layer_index
 
             physical_tensors: dict[str, torch.Tensor] = {}
-            # 注册时按照每个shared_by的最后一层触发kv cache传输
+            # Register using the last layer in each shared_by group to trigger kv cache transfer
             for tensor_group in self._kv_cache_config.kv_cache_tensors:
                 layer_idxs = [
                     extract_layer_index(layer_name)
@@ -1630,7 +1630,7 @@ class DBackend(HybridBackend):
         remote_port = get_param(req, "remote_port")
         if remote_host is not None and remote_port is not None:
             # eas:  "remote_port": INT
-            # dash: "remote_port": "INT"
+            # dual-req: "remote_port": "INT"
             remote_port = int(remote_port)
             peer_hint = (remote_host, remote_port)
 
@@ -1656,7 +1656,7 @@ class DBackend(HybridBackend):
             raise RuntimeError("bad resp")
         return kvtresp.cached
 
-    async def _dash_prefill_rpc(self, req: Request, blocks: KVCacheBlocks) -> int:
+    async def _dual_req_prefill_rpc(self, req: Request, blocks: KVCacheBlocks) -> int:
         blockids = blocks.get_block_ids()
         # putting all kv cache in one group
         concated_blk_ids = merge_hybrid_blocks(blockids, gamma=self._gamma)
@@ -1691,7 +1691,7 @@ class DBackend(HybridBackend):
             end_ts = time.monotonic()
             dur_ms = (end_ts - start_ts) * 1000
             logger.info(
-                "disagg end dash prefill. reqid=%s prompt=%s computed=%s dur_ms=%s kvtresp=%s retry=%s",  # noqa: E501
+                "disagg end dual-req prefill. reqid=%s prompt=%s computed=%s dur_ms=%s kvtresp=%s retry=%s",  # noqa: E501
                 reqid,
                 promptlen,
                 req.num_computed_tokens,
@@ -1802,7 +1802,7 @@ class DBackend(HybridBackend):
         cached = 0
         try:
             if get_param(request, D_REMOTE_PREFILL):
-                cached = await self._dash_prefill_rpc(request, blocks)
+                cached = await self._dual_req_prefill_rpc(request, blocks)
             else:
                 cached = await self._prefill_rpc(request, blocks)
             ioret.n = cached - request.num_computed_tokens
@@ -1863,7 +1863,7 @@ class DBackend(HybridBackend):
             from vllm.model_executor.models.utils import extract_layer_index
 
             physical_tensors: dict[str, torch.Tensor] = {}
-            # 注册时按照每个shared_by的最后一层触发kv cache传输
+            # Register using the last layer in each shared_by group to trigger kv cache transfer
             for tensor_group in self._kv_cache_config.kv_cache_tensors:
                 layer_idxs = [
                     extract_layer_index(layer_name)

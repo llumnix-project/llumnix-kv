@@ -119,9 +119,9 @@ const std::vector<std::string> & FileSysNaming::list() {
 void FileSysNaming::write_file(const std::string &path, const std::string &content) {
   std::string full_path = instance_path_ / path;
 
-  // 先写入临时文件, 之后通过 rename 原子性机制确保其他进程不会看到 full_path 中间状态.
-  // 目前在 XPU EAS 环境中观测到, prefill 读取 D _timestamp_ 文件时, 读取到空.
-  // pre-cxx11 abi 下 std::string .data() 返回的指针有效性存疑, 这里使用 vector 更安全.
+  // Write to a temp file first, then use atomic rename to prevent other processes from seeing
+  // an intermediate state of full_path. Empty reads of the D _timestamp_ file were observed on XPU EAS.
+  // Under pre-cxx11 ABI, the pointer from std::string::data() may be unreliable; using vector is safer.
   auto temp_path = std::vector<char>(full_path.begin(), full_path.end());
   // .tmpXXXXXX
   temp_path.emplace_back('.');

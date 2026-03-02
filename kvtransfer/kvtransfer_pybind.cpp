@@ -291,7 +291,7 @@ bool check_recv_done(const std::string &req_id) {
   }
 }
 
-// empty 意味着不处于 kvt 环境下.
+// Empty means not in a kvt environment.
 std::string current_worker_info(const std::string& kind = "any") {
     Context* ctx = nullptr;
 
@@ -340,7 +340,7 @@ PYBIND11_MODULE(kvtransfer_ops, m) {
       .export_values();
 
   py::class_<blade_llm::ReqMeta>(m, "ReqMeta")
-      .def(py::init<>())  // 默认构造
+      .def(py::init<>())  // Default constructor
       .def_readwrite("dst_inst", &blade_llm::ReqMeta::dst_inst)
       .def_readwrite("dst_worker", &blade_llm::ReqMeta::dst_worker)
       .def_readwrite("reqid", &blade_llm::ReqMeta::reqid)

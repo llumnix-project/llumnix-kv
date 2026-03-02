@@ -37,18 +37,18 @@ class IChannel {
  public:
   virtual void connect(const WorkerInfo &dst_info) = 0;
 
-  // 这里定义了 KvSendStub.start_async 与 IChannel 的通信协议.
-  // start_async 首先调用 register_data 注册待发送的数据, 此时会额外传递一些与数据特征有关的信息.
-  // - kind, PEQD 表明 data 是在 P tp size eq D tp size 情形下产生.
-  // - data, register_data taker owner of data, start_async 不可再访问 data 了. 更正确的接口定义是:
-  //   register_data(std::vector<IpcBlock>&& data), std::vector<IpcBlock> flush(); 即 flush
-  //   还需要把 data 再返回出来给 start_async 下一轮迭代使用, 但太麻烦了.
-  // 之后在每个 layer 计算完毕之后调用 send_data 来发送数据. send_data 可能是异步的, 其返回并不意味数据
-  // 传输完毕. flush() 会阻塞等待所有 in-flighting send_data 结束.
+  // Here defines the communication protocol between KvSendStub.start_async and IChannel.
+  // start_async first calls register_data to register data to send, along with data characteristics:
+  // - kind: PEQD indicates data was produced when P tp size equals D tp size.
+  // - data: register_data takes ownership; start_async must not access data afterwards. A cleaner
+  //   interface would be register_data(std::vector<IpcBlock>&& data), std::vector<IpcBlock> flush();
+  //   i.e. flush would return data back for the next iteration, but that's too cumbersome.
+  // After each layer computation, send_data is called. send_data may be asynchronous -- its return
+  // does not mean the transfer is complete. flush() blocks until all in-flight send_data calls finish.
   virtual void register_data(std::vector<std::vector<IpcBlock>>& data, TPKind kind) = 0;
   virtual void send_data(size_t layer_index) = 0;
-  // out 存放着 register_data, send_data 期间产生的一些 metric 信息. 比如数据特征, 发送时间等.
-  // out 格式最好是 key=val,key2=val2 形式, 便于后期脚本化处理.
+  // out holds metrics collected during register_data and send_data, such as data characteristics
+  // and send times. Prefer key=val,key2=val2 format for easy script processing.
   virtual void flush(std::string& out) = 0;
   virtual void send_notification(const std::vector<const ReqSendTask*>& reqs) = 0;
 

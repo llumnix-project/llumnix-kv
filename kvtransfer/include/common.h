@@ -222,15 +222,15 @@ inline std::ostream& operator<<(std::ostream& os, const ReqSendTask& task) {
   return os;
 }
 
-// RequestInfo 只能在 python main thread 使用.
+// RequestInfo can only be used on the Python main thread.
 class RequestInfo {
  public:
   const InstanceId dst_inst_id;
   const WorkerId dst_worker_id;
   const std::optional<std::string> dst_worker_info;
   const RequestId req_id;
-  // 这里的src_blocks/dst_blocks是从vllm传进来的。
-  // 现在对于不同的cache tensor，block id应是一致的
+  // src_blocks/dst_blocks are passed in from vllm.
+  // Currently, block ids should be the same across different cache tensors.
   const std::vector<uint32_t> src_blocks;
   const std::vector<uint32_t> dst_blocks;
  private:
