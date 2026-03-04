@@ -36,6 +36,7 @@ from ..kvtbackend import (
     CODE_REQNOTFOUND,
     TRANSFER_KV_REQ,
     TRANSFER_KV_RESP,
+    D_LOCAL_PREFILL,
     KVTDInfo,
     KVTResp,
     RKVTDInfo,
@@ -690,7 +691,8 @@ class MigrationBackend(HybridBackend):
 
     def get_operations(self, req: Request) -> tuple[int, int]:
         # logger.info(f">>>DBG: {self._reqstate.get(req.request_id)=}")
-        assert req.request_id not in self._reqstate
+        if not get_param(req, D_LOCAL_PREFILL, False):
+            assert req.request_id not in self._reqstate
         self._reqstate[req.request_id] = req
 
         srcinfo = get_param(req, SRC_INFO)

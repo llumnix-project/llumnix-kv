@@ -104,7 +104,7 @@ class KVTMigration(HybridBackend):
     ) -> Optional[IoRet]:
         if get_param(request, D_LOCAL_PREFILL, False):
             r = IoRet(n=request.num_tokens-1)
-            self._p._dash_done.pop(request.request_id, None)
+            self._p._dual_req_done.pop(request.request_id, None)
         elif get_param(request, SRC_INFO):
             r = await self._m.async_update_state_after_alloc(
                 request, blocks, num_external_tokens
