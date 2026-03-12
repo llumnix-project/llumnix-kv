@@ -1,7 +1,7 @@
 # vllm build
 
 ```bash
-# 初始化 vllm 相关开发环境
+# Initialize vllm development environment
 python -m venv vllmenv
 source vllmenv/bin/activate
 pip install vllm
@@ -12,7 +12,7 @@ python setup.py bdist_wheel
 
 # bladellm build
 
-在 bladellm 开发镜像中
+In bladellm development image:
 
 ```bash
 python setup.py bdist_wheel
