@@ -1,9 +1,0 @@
-id: clear_running_container
-run: |
-  set -ex
-  if [[ -z "${RUNNER_ID}" ]]; then
-    echo "RUNNER_ID is not set, skip clearing running container."
-    exit 0
-  else
-    [[ -n $(docker ps -a -q -f "name=${RUNNER_ID}") ]] && docker rm -f $(docker ps -a -q -f "name=${RUNNER_ID}") || echo "No running containers to clear."
-  fi

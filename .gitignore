@@ -89,3 +89,6 @@ hip_compat.h
 tensors/
 /_version.py
 logs/
+
+# AOne CI
+.aoneci/
