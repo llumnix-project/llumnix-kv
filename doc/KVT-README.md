@@ -1,90 +1,88 @@
 # KVT (KV Transfer)
 
-## 概述
+## Overview
 
-KVT（KV Transfer）是一个高性能、零开销的 KV Cache 传输模块，专为 LLM 分布式推理场景设计。它负责在两个节点之间完成 KV Cache 的高效传输，支持多种模型架构和 Cache 布局。
+KVT (KV Transfer) is a high-performance, zero-overhead KV Cache transfer module designed for distributed LLM inference scenarios. It handles efficient KV Cache transmission between two nodes, supporting multiple model architectures and cache layouts.
 
-## 设计目标
+## Design Goals
 
-KVT 的设计源于以下核心需求：
+KVT's design originates from the following core requirements:
 
-1. **旁路设计**：不对 step 主流程做大的改动，做到旁路式集成
-2. **零额外开销（Zero Overhead）**：不会因为 KV Cache 传输在 Step 执行链路引入额外负载
-3. **Full CUDA Graph 兼容**：支持 CUDA Graph 优化，不引入 CPU 同步点
-4. **通用性**：支持多种模型架构（FlashAttention、GDN、DSA 等）和 Cache 布局
+1. **Bypass Design**: No major changes to the main step flow, enabling sidecar-style integration
+2. **Zero Overhead**: No additional load introduced to the step execution path due to KV Cache transfer
+3. **Full CUDA Graph Compatibility**: Supports CUDA Graph optimization without introducing CPU synchronization points
+4. **Generality**: Supports multiple model architectures (FlashAttention, GDN, DSA, etc.) and cache layouts
 
-## 核心架构
+## Core Architecture
 
-KVT 分为四个核心模块：
+KVT consists of four core modules:
 
-### 1. 接入层（Python Binding）
+### 1. Access Layer (Python Binding)
 
-负责与 Python 侧对接，主要功能：
+Handles Python-side integration with the following functions:
+- CUDA Event notification for layer computation completion, enabling Full CUDA Graph compatibility
+- Supports P node full-cuda-graph, D node requires no logic execution
 
-- 通过 CUDA Event 通知 layer 计算完成，实现 Full CUDA Graph 兼容
-- 支持 P 节点 full-cuda-graph，D 节点无需运行任何逻辑
+### 2. ParseBlock (Block Parser)
 
-### 2. ParseBlock（块解析）
-
-根据 layer 信息和请求信息，计算待发送的 `IpcBlock` 列表：
+Calculates the list of `IpcBlock`s to send based on layer and request information:
 
 ```rust
 struct IpcBlock {
-    src_off: usize,   // 源端偏移
-    dst_off: usize,   // 目的端偏移
-    len: usize,       // 传输长度
+    src_off: usize,   // Source offset
+    dst_off: usize,   // Destination offset
+    len: usize,       // Transfer length
 }
 ```
 
-**设计演进**：
+**Design Evolution**:
 
-早期 KVT 假设 Cache shape 为 `(num_blocks, block_size, 2, num_heads, head_dim)`，即每个 token 的 K/V 在同一个 block 内。
+Early KVT assumed Cache shape of `(num_blocks, block_size, 2, num_heads, head_dim)`, meaning K/V for each token resides in the same block.
 
-但 vLLM 使用 FlashAttention 时，Cache shape 为 `(2, num_blocks, block_size, num_kv_heads, head_size)`，即 K/V 分离在不同 block。
+However, vLLM uses FlashAttention with Cache shape of `(2, num_blocks, block_size, num_kv_heads, head_size)`, meaning K/V are separated into different blocks.
 
-**解决方案**：将 ParseBlock 抽离为可插拔策略：
-- 初始化时 `block_size_bytes`、`token_size_bytes` 仍按"token kv 在一起"的假设计算
-- ParseBlock 在解析时根据实际 layout 重新解释偏移量
+**Solution**: Extract ParseBlock as a pluggable strategy:
+- During initialization, `block_size_bytes` and `token_size_bytes` are still calculated assuming "token kv together"
+- ParseBlock reinterprets offsets based on actual layout during parsing
 
-这一设计使得后续支持新架构（如 Qwen3-Next GDN、DeepSeek DSA）时，只需新增对应的 ParseBlock 实现。
+This design enables support for new architectures (e.g., Qwen3-Next GDN, DeepSeek DSA) by simply adding new ParseBlock implementations.
 
-### 3. 控制层
+### 3. Control Layer
 
-负责：
-- 对端连接维护
-- 监听 layer 计算完成信号（CUDA Event）
-- 调度传输层完成数据传输
-- 传输出错后的容错处理
+Responsible for:
+- Remote connection maintenance
+- Listening for layer computation completion signals (CUDA Event)
+- Scheduling data transfer via the transport layer
+- Error handling and fault tolerance for transfer failures
 
-### 4. 传输层
+### 4. Transport Layer
 
-负责传输 `Vec<IpcBlock>`，支持多种传输后端：
+Handles `Vec<IpcBlock>` transmission, supporting multiple backends:
 
-- **GPU Direct RDMA（GDR）**：GPU 显存直连，最低延迟
-- **TCP**：绕开 GPU/GDR 通路，与 EP all2all 流量隔离
-- **共享内存**：单机多卡场景
+- **GPU Direct RDMA (GDR)**: Direct GPU memory access, lowest latency
+- **TCP**: Bypasses GPU/GDR path, isolated from EP all2all traffic
+- **Shared Memory**: Single-node multi-GPU scenarios
 
-## 物理布局抽象
+## Physical Layout Abstraction
 
-KVT 提供的传输抽象：
+KVT provides the following transfer abstraction:
 
 ```
-每个 layer → 一块显存
+Each layer → One GPU memory region
     ↓
-显存 → 若干 Block（相同字节大小）
+Memory → Multiple Blocks (same byte size)
     ↓
-Block → 若干 Token（相同字节大小）
+Block → Multiple Tokens (same byte size)
 ```
 
-初始化时传递的物理布局参数：
-- `block_size_bytes`: 每个 block 的字节大小
-- `token_size_bytes`: 每个 token 的字节大小
-- `num_blocks`: block 数量
+Physical layout parameters passed during initialization:
+- `block_size_bytes`: Byte size per block
+- `token_size_bytes`: Byte size per token
+- `num_blocks`: Number of blocks
 
+## Integration with HybridConnector
 
-## 与 HybridConnector 的集成
-
-KVT 与 HybridConnector 协同工作：
+KVT works in coordination with HybridConnector:
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -93,7 +91,7 @@ KVT 与 HybridConnector 协同工作：
 │  ┌─────────────┐    ┌──────────────────────────┐    │
 │  │  Scheduler  │    │   HybridConnector        │    │
 │  └─────────────┘    │  ┌────────────────────┐  │    │
-│                     │  │   KVT ( C++ )      │  │    |
+│                     │  │   KVT ( C++ )      │  │    │
 │                     │  │  ┌──────────────┐  │  │    │
 │                     │  │  │ ParseBlock   │  │  │    │
 │                     │  │  └──────────────┘  │  │    │
@@ -102,16 +100,15 @@ KVT 与 HybridConnector 协同工作：
 └─────────────────────────────────────────────────────┘
 ```
 
-**职责划分**：
-- **KVT**：负责底层 KV Cache 传输
-- **HybridConnector**：负责请求生命周期管理、容错、Backend 协调
+**Responsibility Division**:
+- **KVT**: Handles low-level KV Cache transfer
+- **HybridConnector**: Manages request lifecycle, fault tolerance, and Backend coordination
 
+## Project Status
 
-## 项目状态
-
-- ✅ FlashAttention Cache 布局支持
-- ✅ Full CUDA Graph 兼容
-- ✅ GDR 传输支持
-- ✅ TCP 传输支持
-- ✅ Qwen3-Next GDN 支持
-- ✅ DeepSeek DSA 支持
+- ✅ FlashAttention cache layout support
+- ✅ Full CUDA Graph compatibility
+- ✅ GDR transfer support
+- ✅ TCP transfer support
+- ✅ Qwen3-Next GDN support
+- ✅ DeepSeek DSA support

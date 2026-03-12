@@ -1,164 +1,164 @@
 # HybridConnector
 
-## 概述
+## Overview
 
-HybridConnector 是一个为 LLM 引擎设计的通用 KV Cache 异步传输框架，最初为 vLLM PD（Prefill-Decode）分离场景开发，现已演变为支持多种 KV Cache "搬迁" 场景的统一解决方案。
+HybridConnector is a unified KV Cache asynchronous transfer framework designed for LLM engines. Initially developed for vLLM PD (Prefill-Decode) separation scenarios, it has evolved into a unified solution supporting multiple KV Cache "relocation" scenarios.
 
-## 设计理念
+## Design Philosophy
 
-### 核心思想
+### Core Concept
 
-LLM 引擎与 KV Cache 传输的关系类似于 **Linux 内核与驱动程序**：
-- LLM 引擎提供稳定、通用的核心计算能力
-- KV Cache 传输高度依赖具体部署环境，应作为可插拔的"驱动"存在
+The relationship between LLM engines and KV Cache transfer is analogous to the **Linux kernel and drivers**:
+- The LLM engine provides stable, generic core computing capabilities
+- KV Cache transfer is highly dependent on specific deployment environments and should exist as a pluggable "driver"
 
-基于这一理念，HybridConnector 遵循以下设计原则：
+Based on this concept, HybridConnector follows these design principles:
 
-1. **零侵入**：不侵入引擎主链路，引擎无需感知 KV Cache 传输细节
-2. **零额外开销**：KV Cache 未就绪的请求对 Scheduler 完全透明，不会引入 dummy step 等轮询机制
-3. **极简接口**：仅提供必要的 `start_load_kv` 和 `save_kv_layer` 接口
-4. **全异步**：所有 KV Cache 传输逻辑在独立线程/进程中异步完成
+1. **Zero Intrusion**: Does not intrude into the engine's main path; the engine remains unaware of KV Cache transfer details
+2. **Zero Overhead**: Requests with pending KV Cache transfers are completely transparent to the Scheduler, without introducing polling mechanisms like dummy steps
+3. **Minimal Interface**: Only provides essential `start_load_kv` and `save_kv_layer` interfaces
+4. **Fully Asynchronous**: All KV Cache transfer logic runs asynchronously in independent threads/processes
 
-### 架构对比
+### Architecture Comparison
 
-| 传统方案 | HybridConnector |
+| Traditional Approach | HybridConnector |
 |---------|----------------|
-| Scheduler 主动感知 KV Cache 状态 | Scheduler 完全无感知 |
-| 通过 dummy step 轮询更新状态 | 异步回调通知 |
-| 同步接口阻塞 step | 全异步非阻塞 |
-| 引入大量 PD 分离逻辑到引擎 | 引擎代码零侵入 |
-| 容错支持不完善 | 完整的请求生命周期管理 |
+| Scheduler actively monitors KV Cache status | Scheduler completely unaware |
+| Polling for status updates via dummy steps | Asynchronous callback notifications |
+| Synchronous interfaces blocking steps | Fully asynchronous non-blocking |
+| Extensive PD separation logic in engine | Zero intrusion to engine code |
+| Incomplete fault tolerance support | Complete request lifecycle management |
 
-## 核心架构
+## Core Architecture
 
-HybridConnector 由两个核心模块组成：
+HybridConnector consists of two core modules:
 
-### 1. Connector（连接器）
+### 1. Connector
 
-Connector 负责为 Backend 提供运行环境，承担以下职责：
-- 请求生命周期管理
-- 动态扩缩容
-- 链路容错控制
-- Backend 协调调度
+The Connector provides the runtime environment for Backends and handles:
+- Request lifecycle management
+- Dynamic scaling
+- Link fault tolerance control
+- Backend coordination and scheduling
 
-**关键创新：引用计数解耦机制**
+**Key Innovation: Reference Counting Decoupling Mechanism**
 
-对于需要传输 KV Cache 的请求 R，HybridConnector 通过复用 vLLM 的 Block 引用计数（refcnt）机制，实现了传输过程与请求生命周期的解耦：
+For requests R requiring KV Cache transfer, HybridConnector achieves decoupling between transfer and request lifecycle by reusing vLLM's Block reference counting (refcnt) mechanism:
 
 ```
-传输开始前 → 增加 R 对应 KV Cache Block 的 refcnt
+Before transfer starts → Increase refcnt of R's KV Cache Blocks
     ↓
-异步传输中 → Block 不会被提前释放
+During async transfer → Blocks are not prematurely released
     ↓
-传输完成后 → 调用 free_block 递减 refcnt
+After transfer completes → Call free_block to decrement refcnt
     ↓
-refcnt = 0 → Block 自动回收到 free list
+refcnt = 0 → Block automatically recycled to free list
 ```
 
-这一机制确保了即使请求已结束但 KV Cache 仍在传输中的场景下，相关内存块也不会被提前释放。
+This mechanism ensures memory blocks are not prematurely released even when the request has ended but KV Cache is still being transferred.
 
-### 2. Backend（后端）
+### 2. Backend
 
-Backend 负责具体的 KV Cache 传输、加载、存储操作。Backend 编写者只需了解：
-- KV Cache 物理布局（shape、stride 等）
-- 对应后端存储的协议与接口
+Backend handles specific KV Cache transfer, load, and store operations. Backend authors only need to understand:
+- KV Cache physical layout (shape, stride, etc.)
+- Protocols and interfaces for the corresponding backend storage
 
-**无需感知** vLLM Scheduler 内部细节。
+No need to be aware of vLLM Scheduler internals.
 
-Backend 通过注册 RPC 方法暴露能力：
+Backend exposes capabilities via RPC method registration:
 
 ```python
-# PD 分离场景 - PBackend
+# PD Separation Scenario - PBackend
 rpcsrv.register_method(TRANSFER_KV_REQ, self._on_transfer_kv)
 rpcsrv.register_method(PREFILL_REQ, self._on_prefill)
 rpcsrv.register_method(SEND_DONE_REQ, self._on_send_done)
 rpcsrv.register_method(ABORT_REQS_REQ, self._on_abort_reqs)
 
-# 请求迁移场景 - MigrationBackend
+# Request Migration Scenario - MigrationBackend
 rpcsrv.register_method(NEW_REQ_REQ, self._on_new_req)
 rpcsrv.register_method(MIGRATE_TO_REQ, self._on_migrate_to)
 rpcsrv.register_method(SUSPEND_REQ, self._on_suspend)
 ```
 
-## 支持场景
+## Supported Scenarios
 
-HybridConnector 解决的核心问题是 **KV Cache 的"搬迁"**，支持以下场景：
+HybridConnector's core problem is **KV Cache "relocation"**, supporting the following scenarios:
 
-### 1. PD 分离（Prefill-Decode Disaggregation）
-- P 节点负责 Prefill，D 节点负责 Decode
-- 通过 KVT 模块完成 P→D 的 KV Cache 传输
-- D 节点无需运行任何逻辑，保持 full-cuda-graph 兼容
+### 1. PD Separation (Prefill-Decode Disaggregation)
+- P node handles Prefill, D node handles Decode
+- KV Cache P→D transfer via KVT module
+- D node requires no logic execution, maintaining full-cuda-graph compatibility
 
-### 2. KVStore 持久化
-- 在显存与共享存储之间搬迁 KV Cache
-- 支持异步保存/加载，不阻塞计算
+### 2. KVStore Persistence
+- Relocate KV Cache between GPU memory and shared storage
+- Supports async save/load without blocking computation
 
-### 3. 请求迁移
-- 将 KV Cache 在原节点与新节点之间搬迁
-- 支持在线迁移，最小化服务中断
+### 3. Request Migration
+- Relocate KV Cache between original and new nodes
+- Supports online migration with minimal service interruption
 
-### 4. 多 Backend 组合
-可同时运行多个 Backend 处理不同需求：
+### 4. Multi-Backend Combination
+Multiple Backends can run simultaneously for different needs:
 ```
 PBackend + DBackend + MigrationBackend + KVSBackend
 ```
 
-## 请求生命周期
+## Request Lifecycle
 
-### 单请求模式
+### Single Request Mode
 ```
-1. 请求 R 发送给 D 节点
-2. DBackend 劫持 R，选择 P 节点，发送 PREFILL_REQ
-3. P 节点开始 Prefill 并逐层传输 KV Cache
-4. PREFILL_REQ 返回后，DBackend 将 R 放入 Scheduler
-5. 调整 R.num_computed_tokens 为传输的 token 数
-```
-
-### 双请求模式（更灵活）
-```
-1. 请求 R 同时发送给 P、D 节点
-2. P 节点立即开始 Prefill
-3. DBackend 调用 TRANSFER_KV_REQ 告知 P 节点 DInfo
-4. P 节点在下一个 step 开始传输 KV Cache
+1. Request R sent to D node
+2. DBackend hijacks R, selects P node, sends PREFILL_REQ
+3. P node starts Prefill and transfers KV Cache layer by layer
+4. After PREFILL_REQ returns, DBackend places R into Scheduler
+5. Adjust R.num_computed_tokens to the number of transferred tokens
 ```
 
-### Abort 处理
+### Dual Request Mode (More Flexible)
 ```
-PBackend 收到 abort:
-  → 终止 KVT 传输
-  → 发送 SEND_DONE_REQ（带实际传输 token 数）
-  → Connector 判断传输失败，返回错误码
-
-DBackend 收到 abort:
-  → 立即结束请求
-  → 发送 ABORT_REQS_REQ 到 P 节点
-  → KV Cache Block 通过 refcnt 机制延迟释放
+1. Request R sent to both P and D nodes
+2. P node immediately starts Prefill
+3. DBackend calls TRANSFER_KV_REQ to inform P node of DInfo
+4. P node starts KV Cache transfer on next step
 ```
 
-## 与 KVT 的关系
+### Abort Handling
+```
+PBackend receives abort:
+  → Terminate KVT transfer
+  → Send SEND_DONE_REQ (with actual transferred token count)
+  → Connector determines transfer failure, returns error code
 
-KVT（KV Transfer）是贴近 HybridConnector 要求设计的 KV Cache 传输模块，负责在两个节点之间完成实际的 kvcache transfer 任务。
+DBackend receives abort:
+  → Immediately end request
+  → Send ABORT_REQS_REQ to P node
+  → KV Cache Blocks released via refcnt mechanism with delayed release
+```
 
-**关系定位**：
-- KVT 是底层传输引擎
-- HybridConnector 是 KVT 的异步运行环境
-- HybridConnector 承担请求生命周期、链路容错等控制逻辑
+## Relationship with KVT
 
-详见 [KVT 介绍文档](./kvt-README.md)
+KVT (KV Transfer) is a KV Cache transfer module designed according to HybridConnector requirements, responsible for actual KV Cache transfer between two nodes.
 
-## 技术优势
+**Relationship**:
+- KVT is the low-level transfer engine
+- HybridConnector provides KVT's async runtime environment
+- HybridConnector handles control logic like request lifecycle and link fault tolerance
 
-1. **极简接口**：仅保留必要的两个动作，移除 `wait_for_save`、`get_finished` 等冗余接口
-2. **全异步设计**：EngineCore 独立线程运行 RPC Server，完全不阻塞主链路
-3. **零 Scheduler 开销**：KV Cache 未就绪的请求对 Scheduler 不可见
-4. **完整容错**：支持请求 abort、重试、超时等异常处理
-5. **灵活扩展**：Backend 可插拔，支持多 Backend 组合运行
+See [KVT documentation](./kvt-README.md) for details.
 
-## 项目状态
+## Technical Advantages
 
-- ✅ PD 分离生产环境部署验证
-- ✅ KVStore 持久化支持
-- ✅ 请求迁移支持
-- ✅ 多 Backend 组合运行
-- ✅ 完整请求生命周期管理
-- ✅ Abort 容错处理
+1. **Minimal Interface**: Only two essential actions retained; redundant interfaces like `wait_for_save`, `get_finished` removed
+2. **Fully Asynchronous**: EngineCore runs RPC Server in independent thread, never blocking main path
+3. **Zero Scheduler Overhead**: Requests with pending KV Cache are invisible to Scheduler
+4. **Complete Fault Tolerance**: Supports request abort, retry, timeout, and other exception handling
+5. **Flexible Extension**: Pluggable Backends supporting multi-backend combined operation
+
+## Project Status
+
+- ✅ PD separation production environment deployment verified
+- ✅ KVStore persistence support
+- ✅ Request migration support
+- ✅ Multi-backend combined operation
+- ✅ Complete request lifecycle management
+- ✅ Abort fault tolerance handling
