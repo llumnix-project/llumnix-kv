@@ -42,6 +42,7 @@ from ..kvtbackend import (
     RKVTDInfo,
     get_inst_id,
     reg_naming,
+    _get_inst_id
 )
 from ..utils import (
     CodeError,
@@ -161,19 +162,27 @@ class MigrationBackend(HybridBackend):
         dprank = vllm_config.parallel_config.data_parallel_rank
         self.peer_id = _get_peer_id(self._inst_id, dprank, tpsize)
 
+        self._naming_url = vllm_config.kv_transfer_config.get_from_extra_config(
+            "naming_url", "fake://"
+        )
         self._naming_cli = ncli
         if self._naming_cli is None:
-            self._naming_url = vllm_config.kv_transfer_config.get_from_extra_config(
-                "naming_url", "badbad"
-            )
-            self._naming_cli = connect_naming(self._inst_id, self._naming_url)
-            reg_naming(self._naming_cli, vllm_config)
+            if self._naming_url == "fake://":
+                self._inst_id = _get_inst_id(vllm_config, fake_naming=True)
+                self._naming_cli = None
+            else:
+                self._inst_id = _get_inst_id(vllm_config)
+                self._naming_cli = connect_naming(self._inst_id, self._naming_url)
 
-        self._conn_mgr = ConnManager()
-        self._pmgr = PeerManager(
-            self._naming_cli, None, self._conn_mgr
-        )  # None means ALL, empty connpool
-        self._pmgr.start(self._loop)
+        if self._naming_cli is not None:
+            self._pmgr = PeerManager(
+                self._naming_cli, None, self._conn_mgr
+            )  # None means ALL, empty connpool
+            self._pmgr.start(self._loop)
+        else:
+            self._pmgr = None
+
+        self._conn_mgr = ConnManager(envs.VLLM_PD_CONNMANAGER_CAP)
 
         rpcsrv = sched_rpc_server()
         rpcsrv.register_method(ABORT_REQS_REQ, self._on_abort_reqs)
@@ -351,11 +360,12 @@ class MigrationBackend(HybridBackend):
                 with _g_migrate_in_req_info_lock:
                     _g_migrate_in_req_info[req.request_id] = len(
                         req.prompt_token_ids) + prealloc - 1
+                    
             logger.info(
                 "migrate. req=%s prealloc=%s srcinfo=%s dstinfo=%s",
                 req.request_id,
                 prealloc,
-                self._pmgr._running.get_peerid(srcinfo),
+                srcinfo,
                 self.peer_id,
             )
             await writer.drain()
