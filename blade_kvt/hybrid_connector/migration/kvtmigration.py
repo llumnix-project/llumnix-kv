@@ -47,8 +47,10 @@ class KVTMigration(HybridBackend):
             kv_cache_config:KVCacheConfig = None):
         self._p = PBackend(cfg, role, kv_cache_config)
         self._d = DBackend(cfg, role, kv_cache_config)
-        self._m = MigrationBackend(cfg, role, self._p.naming_cli())
-        
+
+        workers_info = getattr(self._d, "_workers_info", None)
+        self._m = MigrationBackend(cfg, role, workers_info, self._p.naming_cli())
+
         if role == KVConnectorRole.SCHEDULER:
             rpcsrv = sched_rpc_server()
             rpcsrv.register_method(KVT_SUSPEND_REQ, self._on_transfer_suspend_kv)

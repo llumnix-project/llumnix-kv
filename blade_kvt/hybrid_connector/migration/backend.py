@@ -149,18 +149,14 @@ SUSPEND_EVT = "__HybridConnector_Migration_Suspend_Event__"
 
 class MigrationBackend(HybridBackend):
     def __init__(
-        self, vllm_config: VllmConfig, role: KVConnectorRole, ncli: Optional[Any] = None
+        self, vllm_config: VllmConfig, role: KVConnectorRole, workers_info: list[str], ncli: Optional[Any] = None,
     ):
         super().__init__(vllm_config, role)
         if role == KVConnectorRole.WORKER:
             return
-
+        self._workers_info = workers_info
         self._cfg = vllm_config
         self._loop = get_hybrid_sched_loop()
-        self._inst_id = get_inst_id(vllm_config)
-        tpsize = vllm_config.parallel_config.tensor_parallel_size
-        dprank = vllm_config.parallel_config.data_parallel_rank
-        self.peer_id = _get_peer_id(self._inst_id, dprank, tpsize)
 
         self._naming_url = vllm_config.kv_transfer_config.get_from_extra_config(
             "naming_url", "fake://"
@@ -173,7 +169,7 @@ class MigrationBackend(HybridBackend):
             else:
                 self._inst_id = _get_inst_id(vllm_config)
                 self._naming_cli = connect_naming(self._inst_id, self._naming_url)
-
+        self._conn_mgr = ConnManager(envs.VLLM_PD_CONNMANAGER_CAP)
         if self._naming_cli is not None:
             self._pmgr = PeerManager(
                 self._naming_cli, None, self._conn_mgr
@@ -182,7 +178,7 @@ class MigrationBackend(HybridBackend):
         else:
             self._pmgr = None
 
-        self._conn_mgr = ConnManager(envs.VLLM_PD_CONNMANAGER_CAP)
+
 
         rpcsrv = sched_rpc_server()
         rpcsrv.register_method(ABORT_REQS_REQ, self._on_abort_reqs)
@@ -362,11 +358,10 @@ class MigrationBackend(HybridBackend):
                         req.prompt_token_ids) + prealloc - 1
                     
             logger.info(
-                "migrate. req=%s prealloc=%s srcinfo=%s dstinfo=%s",
+                "migrate. req=%s prealloc=%s srcinfo=%s",
                 req.request_id,
                 prealloc,
-                srcinfo,
-                self.peer_id,
+                srcinfo
             )
             await writer.drain()
         except Exception as e:
@@ -631,7 +626,7 @@ class MigrationBackend(HybridBackend):
                 blkids=blockids[0],
                 cached_tokens=req.num_computed_tokens,
                 max_tokens=alltokens,
-                d_workers_info=[],
+                d_workers_info=self._workers_info,
             )
             kvtreq = RKVTDInfo(reqid=req.request_id,
                                migration=True,
