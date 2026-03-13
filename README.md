@@ -1,6 +1,8 @@
 # Llumnix-KV
 
-Llumnix-KV is a general, flexible, and high-performance KV cache transfer and storage framework for distributed LLM inference, consisting of two core components: **Hybrid Connector** and **Blade-KVT**.
+Llumnix-KV is a general, flexible, and high-performance KV cache transfer and storage framework for distributed LLM inference consisting of two core components: **Hybrid Connector** and **Blade-KVT**.
+
+See also the [llumnix](https://github.com/llumnix-project/llumnix) repository for how to use Llumnix-KV in an end-to-end distributed serving deployment.
 
 ## Architecture
 
