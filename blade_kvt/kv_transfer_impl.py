@@ -86,6 +86,15 @@ class KVTransferClient:
         naming_url: str,
         layers: Union[List[List[torch.Tensor]], List[torch.Tensor]],
         protocols: List[KVTransferProtocolType],
+        num_kv_heads: int = -1,
+        num_gdn_layers: int = 3,
+        indexer_blk_ntpb: int = 0,
+        hybrid_indexer_token_size: int = 0,
+        gdn_conv_elem_size: int = 1,
+        gdn_ssm_elem_size: int = 1,
+        conv_state_shape: Optional[List[int]] = None,
+        ssm_state_shape: Optional[List[int]] = None,
+        gdn_conv_channel_dims: Optional[List[int]] = None,
     ):
         """
         Create and init a client used to send kv cache data to remote instances;
@@ -159,10 +168,20 @@ class KVTransferClient:
             self._event_addrs,
             layer_addrs,
             ops_protocols,
+            num_kv_heads=num_kv_heads,
+            num_gdn_layers=num_gdn_layers,
+            indexer_blk_ntpb=indexer_blk_ntpb,
+            hybrid_indexer_token_size=hybrid_indexer_token_size,
+            gdn_conv_elem_size=gdn_conv_elem_size,
+            gdn_ssm_elem_size=gdn_ssm_elem_size,
+            conv_state_shape=conv_state_shape if conv_state_shape is not None else [],
+            ssm_state_shape=ssm_state_shape if ssm_state_shape is not None else [],
+            gdn_conv_channel_dims=gdn_conv_channel_dims if gdn_conv_channel_dims is not None else [],
         )
         self._inited = True
         # None means that start_send is not invoked.
         self._cur_step_id: Optional[int] = None
+        self._worker_tp_rank = worker_tp_rank
 
     def _init_events(self):
         self._events = [torch.cuda.Event() for _ in range(self._num_layers)]
@@ -257,6 +276,11 @@ class KVTransferClient:
         """
         if not self._inited:
             raise RuntimeError("KVTransferClient not inited")
+        if isinstance(src_block_ids, list) and src_block_ids and isinstance(src_block_ids[0], int):
+            # older verson vllm
+            assert isinstance(dst_block_ids, list) and dst_block_ids and isinstance(dst_block_ids[0], int)
+            src_block_ids = [src_block_ids]
+            dst_block_ids = [dst_block_ids]
         submit_req_send2(
             dst_inst_id, dst_worker_id, req_id, seen_tokens, new_tokens, has_last_token, src_block_ids, dst_block_ids, dst_worker_info
         )
@@ -354,7 +378,15 @@ class KVTransferServer:
         naming_url: str,
         layers: Union[List[List[torch.Tensor]], List[torch.Tensor]],
         protocols: List[KVTransferProtocolType],
-
+        num_kv_heads: int = -1,
+        num_gdn_layers: int = 3,
+        indexer_blk_ntpb: int = 0,
+        hybrid_indexer_token_size: int = 0,
+        gdn_conv_elem_size: int = 1,
+        gdn_ssm_elem_size: int = 1,
+        conv_state_shape: Optional[List[int]] = None,
+        ssm_state_shape: Optional[List[int]] = None,
+        gdn_conv_channel_dims: Optional[List[int]] = None,
     ):
         # older version vllm, should only contain simple model architecture
         if isinstance(block_bytes, int) and isinstance(token_bytes, int):
@@ -411,6 +443,15 @@ class KVTransferServer:
             naming_url,
             layer_addrs,
             ops_protocols,
+            num_kv_heads=num_kv_heads,
+            num_gdn_layers=num_gdn_layers,
+            indexer_blk_ntpb=indexer_blk_ntpb,
+            hybrid_indexer_token_size=hybrid_indexer_token_size,
+            gdn_conv_elem_size=gdn_conv_elem_size,
+            gdn_ssm_elem_size=gdn_ssm_elem_size,
+            conv_state_shape=conv_state_shape if conv_state_shape is not None else [],
+            ssm_state_shape=ssm_state_shape if ssm_state_shape is not None else [],
+            gdn_conv_channel_dims=gdn_conv_channel_dims if gdn_conv_channel_dims is not None else [],
         )
         self._inited = True
         self._recv_done_reqs: Set[str] = set()

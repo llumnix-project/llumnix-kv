@@ -49,7 +49,6 @@ from .engine_proxy import (
     sched_finish_req,
     sched_free_blocks,
     sched_get_blocks,
-    sched_set_blocks,
     sched_get_req,
     sched_rpc_server,
     sched_rpc_server_port,
@@ -120,7 +119,124 @@ class HybridBackend:
         self._role = role
         self._kv_cache_config = kv_cache_config
         self.is_hybrid = vllm_config.model_config.is_hybrid
+        self._enable_prefix_caching = \
+            vllm_config.cache_config.enable_prefix_caching
+        self.has_null_blk = \
+            self._enable_prefix_caching and self.is_hybrid
         self.hybrid_model_send_layer = []
+
+        self._num_gdn_layers = 0
+        self._has_indexer_cache = False
+        self._num_kv_cache_groups = 0
+        self._group_types: list[str] = []
+        if kv_cache_config is not None and self.is_hybrid:
+            self._parse_kv_cache_config(kv_cache_config)
+
+    def _parse_kv_cache_config(self, kv_cache_config: KVCacheConfig):
+        """Parse kv_cache_config to extract layer group information.
+
+        For hybrid models, the KV cache groups typically consist of:
+        - num_gdn_layers GDN (linear attention) block groups
+        - 1 indexer cache block group (if present)
+        - 1 attention cache block group
+
+        Expected order: [GDN groups...] [indexer group (optional)] [attn group]
+        """
+        if not kv_cache_config.kv_cache_groups:
+            return
+        self._num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
+        self._group_types = []
+        for idx, group in enumerate(kv_cache_config.kv_cache_groups):
+            layer_names = group.layer_names
+            is_gdn = any("linear_attn" in n for n in layer_names)
+            is_indexer = any("indexer" in n for n in layer_names)
+
+            if is_gdn:
+                group_type = "gdn"
+            elif is_indexer:
+                group_type = "indexer"
+            else:
+                group_type = "attn"
+
+            self._group_types.append(group_type)
+
+        self._num_gdn_layers = self._group_types.count("gdn")
+        self._validate_group_ordering()
+        self._has_indexer_cache = "indexer" in self._group_types
+        logger.info(
+            "HybridBackend parsed kv_cache_config: "
+            "num_gdn_layers=%s, has_indexer_cache=%s, num_kv_cache_groups=%s, "
+            "group_types=%s",
+            self._num_gdn_layers,
+            self._has_indexer_cache,
+            self._num_kv_cache_groups,
+            self._group_types,
+        )
+
+    def _validate_group_ordering(self):
+        """Validate that KV cache groups follow the expected order.
+        Expected order: [GDN groups...] [indexer group (optional)] [attn group]
+        """
+        if not self._group_types:
+            return
+
+        gdn_indices = [i for i, t in enumerate(self._group_types) if t == "gdn"]
+        indexer_indices = [i for i, t in enumerate(self._group_types) if t == "indexer"]
+        attn_indices = [i for i, t in enumerate(self._group_types) if t == "attn"]
+
+        if gdn_indices:
+            assert gdn_indices[0] == 0, (
+                f"GDN groups should start at index 0, but first GDN is at "
+                f"index {gdn_indices[0]}. group_types={self._group_types}"
+            )
+            expected_gdn_sequence = list(range(len(gdn_indices)))
+            assert gdn_indices == expected_gdn_sequence, (
+                f"GDN groups should be consecutive at the beginning. "
+                f"Found GDN indices: {gdn_indices}, expected: {expected_gdn_sequence}. "
+                f"group_types={self._group_types}"
+            )
+
+        if indexer_indices:
+            assert len(indexer_indices) == 1, (
+                f"Expected at most one indexer group, "
+                f"but found {len(indexer_indices)}. "
+                f"group_types={self._group_types}"
+            )
+            indexer_idx = indexer_indices[0]
+            if gdn_indices:
+                assert indexer_idx == len(gdn_indices), (
+                    f"Indexer group should come after all GDN groups. "
+                    f"Found indexer at index {indexer_idx}, "
+                    f"but have {len(gdn_indices)} "
+                    f"GDN groups. group_types={self._group_types}"
+                )
+            else:
+                assert indexer_idx == 0, (
+                    f"Indexer group should be at index 0 when there are no GDN groups. "
+                    f"Found indexer at index {indexer_idx}. "
+                    f"group_types={self._group_types}"
+                )
+
+        if attn_indices:
+            expected_attn_start = len(gdn_indices) + (1 if indexer_indices else 0)
+            assert attn_indices[0] == expected_attn_start, (
+                f"Attention group should start at index {expected_attn_start} "
+                f"(after GDN and indexer groups). "
+                f"Found attn at index {attn_indices[0]}. "
+                f"group_types={self._group_types}"
+            )
+            assert len(attn_indices) == 1, (
+                f"Expected exactly one attention group, but found {len(attn_indices)}. "
+                f"group_types={self._group_types}"
+            )
+
+        expected_total = len(gdn_indices) + len(indexer_indices) + len(attn_indices)
+        assert expected_total == len(self._group_types), (
+            f"Group count mismatch. Expected {expected_total} groups "
+            f"({len(gdn_indices)} GDN + {len(indexer_indices)} indexer + "
+            f"{len(attn_indices)} attn), but found {len(self._group_types)} groups. "
+            f"group_types={self._group_types}"
+        )
 
     def get_request(self, request_id: str) -> Optional[Request]:
         return sched_get_req(request_id)
@@ -532,15 +648,14 @@ class HybridScheduler:
         return
 
     # core thread
-    def _try_teardown_save(self, reqid: str, free_blocks: bool = True):
+    def _try_teardown_save(self, reqid: str):
         state = self._saving.pop(reqid, None)
         if state is None:
             logger.info("teardown save twice: reqid=%s", reqid)
             # assert not has_setup_save(state._req)
             return
         assert has_setup_save(state._req)
-        if free_blocks:
-            sched_free_blocks(state.kvblks)
+        sched_free_blocks(state.kvblks)
         set_param(state._req, _SAVE_PREPARED, False)
         return
 
@@ -549,22 +664,11 @@ class HybridScheduler:
         while self._waiting:
             # In pd disagg, load means decode, save means prefill
             req, load_count, save_count = self._waiting[0]
-            
-            from blade_kvt.hybrid_connector.kvtbackend import D_LOCAL_PREFILL
-            if get_param(req, D_LOCAL_PREFILL, False):
-                saving_state = self._saving.get(req.request_id, None)
-                kvblks: KVCacheBlocks | None = None
-                if saving_state is not None:
-                    kvblks = saving_state.kvblks
-                assert kvblks is not None and len(kvblks.get_block_ids()) > 0 and len(kvblks.get_block_ids()[0]) > 0
-                self._try_teardown_save(req.request_id, free_blocks=False)
-                sched_set_blocks(req.request_id, kvblks)
-            else:
-                gamma = get_p_node_pop_len(self._cfg) - 1
-                prealloc = get_param(req, PREALLOC_KEY, 0)
-                # need notify prefill node to allocate slot for poped gamma+1 tokens
-                kvblks = sched_allocate_slots(
-                    req, load_count > 0, save_count > 0, prealloc, gamma)
+            gamma = get_p_node_pop_len(self._cfg) - 1
+            prealloc = get_param(req, PREALLOC_KEY, 0)
+            kvblks = sched_allocate_slots(
+                req, load_count > 0, save_count > 0, prealloc, gamma)
+
             # Only log on first attempt or successful allocation to avoid noise
             if kvblks is not None or not get_param(req, ADD_REQ_LOGGED_KEY, False):
                 logger.info(
@@ -572,7 +676,7 @@ class HybridScheduler:
                     req.request_id,
                     req.num_prompt_tokens,
                     req.num_computed_tokens,
-                    None,
+                    req.max_computed_tokens(),
                     load_count,
                     save_count,
                     bool(kvblks is None),
@@ -612,7 +716,7 @@ class HybridScheduler:
             req.num_computed_tokens += ioret.n or 0
             req.num_external_computed_tokens += ioret.n or 0
 
-            max_computed = None
+            max_computed = req.max_computed_tokens()
             if max_computed is not None:
                 assert max_computed < req.num_prompt_tokens
                 if max_computed <= req.num_computed_tokens:
@@ -633,6 +737,8 @@ class HybridScheduler:
     # core thread
     def on_add_req(self, req: "Request") -> bool:
         load_count, save_count = self._backend.get_operations(req)
+        req.trace_wrapper.on_req_kv_start("load")
+        req.trace_wrapper.on_req_kv_start("save")
         if load_count > 0 or save_count > 0:
             self._add_ts(req, "on_add_req")
             self._waiting.append((req, load_count, save_count))
@@ -717,6 +823,7 @@ class HybridScheduler:
             return
 
         logger.info("mark saved. reqid=%s", ioret.reqid)
+        state._req.trace_wrapper.on_req_kv_end("save")
         _q_append(self._saved, ioret.reqid)
         await self._cleanup(state._req)
         return
@@ -751,6 +858,7 @@ class HybridScheduler:
 
         ioret = state.merge()
         logger.info("mark loaded. reqid=%s ioret=%s", state._req.request_id, ioret)
+        state._req.trace_wrapper.on_req_kv_end("load")
         self._add_ts(state._req, "load_done")
         await self.mark_loaded(state._req, ioret)
 

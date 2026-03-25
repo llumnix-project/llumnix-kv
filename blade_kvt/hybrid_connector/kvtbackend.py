@@ -16,7 +16,8 @@ import torch
 
 import vllm.envs as envs
 from vllm.model_executor.models.registry import ModelRegistry
-from . import HybridMetadata
+from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.hybrid_connector import HybridMetadata
 from vllm.v1.request import RequestStatus
 from vllm.v1.utils import ConstantList
 
@@ -55,8 +56,8 @@ from .engine_proxy import (
     get_tensor_model_parallel_rank,
     get_tp_group,
     group_layers_by_index,
+    handle_hybrid_blocks,
     kvt_protocol,
-    merge_hybrid_blocks,
     req2corereq,
     sched_get_kvblk_ids,
     sched_rpc_server,
@@ -128,6 +129,12 @@ def _rtcheck(left, right):
 def _check_kvt_version() -> int:
     kvt_server_sig = inspect.signature(bladekv.KVTransferServer)
     kvt_client_sig = inspect.signature(bladekv.KVTransferClient)
+    if "num_kv_heads" not in kvt_server_sig.parameters or \
+            "num_kv_heads" not in kvt_client_sig.parameters:
+        logger.error(
+            "KVTransferServer/KVTransferClient missing 'num_kv_heads' "
+            "parameter. ")
+        raise RuntimeError("Need update kvt version.")
     if kvt_server_sig.parameters["block_bytes"].annotation == Union[List[int], int]:
         _rtcheck(
             kvt_client_sig.parameters["block_bytes"].annotation,
@@ -216,7 +223,7 @@ class KVTDInfo(
     gc=False,
 ):  # type: ignore[call-arg]
     instid: str
-    blkids: list[int]
+    blkids: list[list[int]]
     cached_tokens: int
     max_tokens: int
     d_workers_info: list[str]
@@ -327,36 +334,13 @@ def _get_inst_id(cfg: VllmConfig, fake_naming: bool = False) -> str:
     return r
 
 
-# for dual-request mode
-def _isfakereq(req: EngineCoreRequest) -> bool:
-    return len(req.prompt_token_ids) <= 0
-
-
-# for dual-request mode
+# for dual_req
 def _try_wakeup_core(q: deque):
     if len(q) != 1:
         return
 
     wakeup_scheduler()
     return
-
-
-# for dual-request mode
-def _fakecorereq(req: Request) -> EngineCoreRequest:
-    return EngineCoreRequest(
-        request_id=req.request_id,
-        prompt_token_ids=[],
-        mm_inputs=None,
-        mm_hashes=None,
-        mm_placeholders=None,
-        sampling_params=None,
-        pooling_params=None,
-        eos_token_id=None,
-        arrival_time=req.arrival_time,
-        lora_request=None,
-        cache_salt=None,
-        data_parallel_rank=None,
-    )
 
 
 def _reg_naming(naming_cli, cfg: VllmConfig):
@@ -379,6 +363,22 @@ def _reg_naming(naming_cli, cfg: VllmConfig):
     naming_cli.store(f"endpoint{dprank}", info.serialize())
     return
 
+
+def _set_hybrid_envs_for_scheduler(
+    kv_cache_config: KVCacheConfig, is_hybrid: bool,
+):
+    """Set hybrid-model env vars in the scheduler (EngineCore) process.
+
+    Workers set these during bind_kv_cache / register_kv_caches, but env vars
+    are per-process, so the scheduler must compute them independently.
+    """
+    if not is_hybrid:
+        return
+    assert kv_cache_config is not None
+    assert kv_cache_config.kv_cache_tensors is not None
+    tensor_group = kv_cache_config.kv_cache_tensors[0]
+    num_gdn = sum(1 for n in tensor_group.shared_by if "linear_attn" in n)
+    os.environ.setdefault("BLLM_KVTRANS_NUM_GDN_LAYERS", str(num_gdn))
 
 def _set_worker_envs(cfg: VllmConfig):
     blade_kvt.set_envs()
@@ -410,8 +410,8 @@ class PReqMeta:
     # seen_tokens > 0 means submit_delta_send, p_block_ids/d_block_ids is empty
     reqid: str
     d_inst_id: str
-    p_block_ids: list[int]
-    d_block_ids: list[int]
+    p_block_ids: list[list[int]]
+    d_block_ids: list[list[int]]
     new_tokens: int
     has_last_token: bool
     seen_tokens: int
@@ -433,8 +433,19 @@ def _flatten_cache(
     """
     return: layer_name -> [cache_tensor1, cache_tensor2, ...]
     """
+    register_layer_num = len(kv_caches)
+
     from vllm.model_executor.models.utils import extract_layer_index
     index2name = group_layers_by_index(kv_caches)
+
+    # dpsk v32 is special case
+    if not use_sparse_mla():
+        assert len(index2name) == register_layer_num, (
+            f"The number of KV cache layers to be registered:"
+            f"{register_layer_num}, does not match the actual number"
+            f" registered: {len(index2name)}. Please check if multiple"
+            f" layers have the same layer index."
+        )
 
     runner_kv_caches = []
     for layer_index in sorted(index2name.keys()):
@@ -560,6 +571,8 @@ class PBackend(HybridBackend):
             self._infly_kvt: dict[str, PReqMeta] = dict()
 
             self._dinfoq: deque[RKVTDInfo] = deque()
+
+            _set_hybrid_envs_for_scheduler(kv_cache_config, self.is_hybrid)
         return
 
     def naming_cli(self):
@@ -587,8 +600,6 @@ class PBackend(HybridBackend):
 
     def _check_kvtdinfo(self, info: KVTDInfo) -> bool:
         assert info.cached_tokens < info.max_tokens
-        blksize = self._cfg.cache_config.block_size
-        assert info.max_tokens <= len(info.blkids) * blksize
         if self.naming_cli():
             return True
         assert len(info.d_workers_info) > 0
@@ -782,12 +793,18 @@ class PBackend(HybridBackend):
         assert not kvtstate.untouched
         dinfo = kvtstate.dinfo
         new_tokens = kvtstate.maxtokens - dinfo.cached_tokens
+        
+        p_block_ids=sched_get_kvblk_ids(reqid)
+        if self.has_null_blk:
+            p_block_ids = handle_hybrid_blocks(
+                p_block_ids, self._gamma,
+                num_gdn_layers=self._num_gdn_layers,
+                num_kv_cache_groups=self._num_kv_cache_groups,
+            )
         pmeta = PReqMeta(
             reqid=reqid,
             d_inst_id=dinfo.instid,
-            p_block_ids=sched_get_kvblk_ids(
-                reqid, self._gamma, self._enable_prefix_caching
-            ),
+            p_block_ids=p_block_ids,
             d_block_ids=dinfo.blkids,
             seen_tokens=dinfo.cached_tokens,
             new_tokens=new_tokens,
@@ -815,7 +832,7 @@ class PBackend(HybridBackend):
                 continue
             assert get_param(req, P_KVT_STATE) is None
 
-            maxcomputed = None
+            maxcomputed = req.max_computed_tokens()
             maxtokens = min(req.num_tokens, dinfo.max_tokens)
             if maxcomputed is not None:
                 maxtokens = min(maxtokens, maxcomputed)
@@ -838,7 +855,7 @@ class PBackend(HybridBackend):
                     kvtstat.untouched = True
                 continue
 
-            if dinfo.max_tokens != req.num_prompt_tokens:
+            if dinfo.max_tokens > req.num_prompt_tokens:
                 reason = (
                     f"reqid={req.request_id}, dinfo.max_tokens={dinfo.max_tokens}, "
                     f"prompt_len={req.num_prompt_tokens}, gamma={self._gamma}"
@@ -850,10 +867,10 @@ class PBackend(HybridBackend):
         return
 
     def _update_dual_req_done(self,
-                          req: Request,
-                          islast: bool,
-                          pblkids: Optional[list[int]],
-                          finished=False):
+                              req: Request,
+                              islast: bool,
+                              pblkids: Optional[list[int]],
+                              finished=False):
         if not get_param(req, P_REMOTE_DECODE):
             return
         if not islast:
@@ -863,10 +880,14 @@ class PBackend(HybridBackend):
             return
 
         if pblkids is None:
-            pblkids = sched_get_kvblk_ids(
-                req.request_id, self._gamma, self._enable_prefix_caching
-            )
+            pblkids = sched_get_kvblk_ids(req.request_id)
             assert len(pblkids) > 0
+            if self.has_null_blk:
+                pblkids = handle_hybrid_blocks(
+                    pblkids, self._gamma,
+                    num_gdn_layers=self._num_gdn_layers,
+                    num_kv_cache_groups=self._num_kv_cache_groups,
+                )
         self._dual_req_done[req.request_id] = DualReq(req, pblkids, finished)
         return
 
@@ -983,13 +1004,14 @@ class PBackend(HybridBackend):
 
     def get_operations(self, req: Request) -> tuple[int, int]:
         d_inst_id = get_param(req, P_KVT_STATE)
-        # NOTE(llx): Decode will only use n-gamma-1 tokens' kv cache,
-        # add these to fit qwen3-next's gdn state
-        # NOTE(llx): re-init req, maybe has better imlementation?
-        req.prompt_token_ids = req.prompt_token_ids[:-(self._gamma + 1)]
-        req._all_token_ids = req.prompt_token_ids.copy()
-        req.num_prompt_tokens = len(req.prompt_token_ids)
-        req.all_token_ids = ConstantList(req._all_token_ids)
+        if self._cfg.model_config.is_hybrid:
+            # NOTE(llx): Decode will only use n-gamma-1 tokens' kv cache,
+            # add these to fit qwen3-next's gdn state
+            # NOTE(llx): re-init req, maybe has better imlementation?
+            req.prompt_token_ids = req.prompt_token_ids[:-(self._gamma + 1)]
+            req._all_token_ids = req.prompt_token_ids.copy()
+            req.num_prompt_tokens = len(req.prompt_token_ids)
+            req.all_token_ids = ConstantList(req._all_token_ids)
         if d_inst_id is not None:
             return 0, 1
         if get_param(req, P_REMOTE_DECODE):
@@ -1015,7 +1037,7 @@ class PBackend(HybridBackend):
 
             new_tokens = sout.num_scheduled_tokens[reqdata.req_id]
             new_tokens += reqdata.num_computed_tokens  # prompt cache
-            num_tokens = None
+            num_tokens = req.max_computed_tokens()
             if num_tokens is None:
                 num_tokens = req.num_prompt_tokens
             has_last_token = new_tokens >= num_tokens
@@ -1023,17 +1045,19 @@ class PBackend(HybridBackend):
             # but don't change the blocks layout in request
             # reqdata came from scheduler, would have null blocks
             # when enable hybrid model prefix cache
-            has_null_blk = self._enable_prefix_caching and len(reqdata.block_ids) > 1
-            concated_blk_ids = merge_hybrid_blocks(
-                reqdata.block_ids,
-                gamma=self._gamma,
-                has_null_blk=has_null_blk
-            )
+            transfer_blk_ids = reqdata.block_ids
+            if self.has_null_blk:
+                transfer_blk_ids = handle_hybrid_blocks(
+                    transfer_blk_ids,
+                    self._gamma,
+                    num_gdn_layers=self._num_gdn_layers,
+                    num_kv_cache_groups=self._num_kv_cache_groups,
+                )
             # here we won't need assert len(p_block_ids)==1,
             # blocks with different attn groups can be easily fit in kvt,
             # when layer sending, just traverse the groups
             # to get which blockid to send and use block id to get offset
-            p_block_ids = concated_blk_ids
+            p_block_ids = transfer_blk_ids
             kvtstate = get_param(req, P_KVT_STATE)
             if kvtstate is None:
                 self._update_dual_req_done(req, has_last_token, p_block_ids)
@@ -1074,7 +1098,7 @@ class PBackend(HybridBackend):
             seen_tokens = num_computed_tokens
             new_tokens = sout.num_scheduled_tokens[req_id]
             end_tokens = seen_tokens + new_tokens
-            num_tokens = None
+            num_tokens = req.max_computed_tokens()
             if num_tokens is None:
                 num_tokens = req.num_prompt_tokens
             has_last_token = end_tokens >= num_tokens
@@ -1101,11 +1125,13 @@ class PBackend(HybridBackend):
                 seen_tokens = d_computed_tokens
                 new_tokens = end_tokens - d_computed_tokens
                 d_blocks_ids = kvtstate.dinfo.blkids
-                p_block_ids = sched_get_kvblk_ids(
-                    req.request_id,
-                    gamma=self._gamma,
-                    enable_prefix_caching=self._enable_prefix_caching,
-                )
+                p_block_ids = sched_get_kvblk_ids(req.request_id)
+                if self.has_null_blk:
+                    p_block_ids = handle_hybrid_blocks(
+                        p_block_ids, self._gamma,
+                        num_gdn_layers=self._num_gdn_layers,
+                        num_kv_cache_groups=self._num_kv_cache_groups,
+                    )
                 kvtmeta = PReqMeta(
                     reqid=req_id,
                     d_inst_id=d_inst_id,
@@ -1141,13 +1167,19 @@ class PBackend(HybridBackend):
     # Worker-side methods
     # ==============================
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        for layer_name, _ in kv_caches.items():
+            logger.info("Prefill Registering KV Cache layer: %s", layer_name)
+        logger.info("Get KV Cache config: %s", self._kv_cache_config)
+
+        total_num_kv_heads = \
+            self._cfg.model_config.get_total_num_kv_heads()
+
+        _hybrid_kwargs = {}
+
         if self.is_hybrid:
-            # Pick one representative tensor cache from hybrid kv caches.
             layer_cache: torch.Tensor | None = None
-            for cache in kv_caches.values():
-                # gdn layer's kv cache is a list contains conv state and ssm state
-                # we use self.attn's kv cache to register
-                if isinstance(cache, torch.Tensor):
+            for layer_name, cache in kv_caches.items():
+                if isinstance(cache, torch.Tensor) and "indexer" not in layer_name:
                     layer_cache = cache
                     break
 
@@ -1156,48 +1188,84 @@ class PBackend(HybridBackend):
             from vllm.model_executor.models.utils import extract_layer_index
 
             physical_tensors: dict[str, torch.Tensor] = {}
-            # Register using the last layer in each shared_by group to trigger kv cache transfer
+            assert self._num_gdn_layers > 0, f"_num_gdn_layers = {self._num_gdn_layers}"
+
+            _hybrid_kwargs['num_gdn_layers'] = self._num_gdn_layers
+            hf_config = self._cfg.model_config.hf_text_config
+            tp_size = \
+                self._cfg.parallel_config.tensor_parallel_size
+            key_dim = hf_config.linear_num_key_heads \
+                * hf_config.linear_key_head_dim // tp_size
+            value_dim = hf_config.linear_num_value_heads \
+                * hf_config.linear_value_head_dim // tp_size
+            _hybrid_kwargs['gdn_conv_channel_dims'] = \
+                [key_dim, key_dim, value_dim]
+
+            indexer_spec = next(
+                (g.kv_cache_spec
+                 for g in self._kv_cache_config.kv_cache_groups
+                 if any("indexer" in n for n in g.layer_names)),
+                None,
+            )
+            if indexer_spec:
+                indexer_block_size = indexer_spec.block_size
+                indexer_token_size = (indexer_spec.num_kv_heads
+                                     * indexer_spec.head_size
+                                     * get_dtype_size(indexer_spec.dtype))
+                _hybrid_kwargs['indexer_blk_ntpb'] = indexer_block_size
+                _hybrid_kwargs['hybrid_indexer_token_size'] = indexer_token_size
             for tensor_group in self._kv_cache_config.kv_cache_tensors:
                 layer_idxs = [
                     extract_layer_index(layer_name)
                     for layer_name in tensor_group.shared_by
                 ]
+                assert sorted(layer_idxs) == layer_idxs
                 last_group_layer = max(layer_idxs)
                 self.hybrid_model_send_layer.append(last_group_layer)
+                assert last_group_layer == layer_idxs[-1]
 
-                # TODO: Remove this after reconstruct task->blocks
-                if "BLLM_KVTRANS_GDN_BLOCK_NUM" not in os.environ:
-                    os.environ["BLLM_KVTRANS_GDN_BLOCK_NUM"] = \
-                        str((len(layer_idxs)-1)*(self._gamma+1))
-
-                for layer in tensor_group.shared_by:
-                    # should only have one self.attn layer in each shared_by
+                for lidx, layer in enumerate(tensor_group.shared_by):
                     if isinstance(kv_caches[layer], torch.Tensor):
-                        physical_tensors[
-                            tensor_group.shared_by[
-                                layer_idxs.index(last_group_layer)
-                            ]
-                        ] = kv_caches[layer]
+                        if layer.endswith(".indexer.k_cache"):
+                            continue 
+                        assert lidx == len(tensor_group.shared_by) - 1
+                        assert extract_layer_index(layer) == last_group_layer
+                        physical_tensors[layer] = kv_caches[layer]
                     else:
+                        assert 0 <= lidx < len(tensor_group.shared_by) - 1
                         assert isinstance(kv_caches[layer], list) \
                             and len(kv_caches[layer]) == 2, \
                                 "Should contain conv and ssm state"
-                        if "QWEN3_NEXT_CONV_SHAPE" not in os.environ:
-                            os.environ["QWEN3_NEXT_CONV_SHAPE"] = \
-                                ','.join(map(str, kv_caches[layer][0].shape))
-                        if "QWEN3_NEXT_SSM_SHAPE" not in os.environ:
-                            os.environ["QWEN3_NEXT_SSM_SHAPE"] = \
-                                ','.join(map(str, kv_caches[layer][1].shape))
-                        if "GDN_ELEMENT_SIZE" not in os.environ:
-                            assert (kv_caches[layer][0].element_size() \
-                            == kv_caches[layer][1].element_size()), \
-                                "Conv and ssm state should have the same element size"
-                            os.environ["GDN_ELEMENT_SIZE"] = \
-                                str(kv_caches[layer][0].element_size())
-            self.hybrid_model_send_layer = sorted(self.hybrid_model_send_layer)
-            # use full attn block to calculate block_bytes
-            # mamba block will padding to full attn block size
-            # [2 (k and v), num_blocks, block_size, kv_heads, head_dim]
+                        conv_state = kv_caches[layer][0]
+                        ssm_state = kv_caches[layer][1]
+                        assert len(conv_state.shape) == 3, \
+                            f"{conv_state.shape=}"
+                        assert len(ssm_state.shape) == 4, \
+                            f"{ssm_state.shape=}"
+                        if 'conv_state_shape' not in _hybrid_kwargs:
+                            _hybrid_kwargs.update(
+                                conv_state_shape=list(conv_state.shape),
+                                ssm_state_shape=list(ssm_state.shape),
+                                gdn_conv_elem_size=conv_state.element_size(),
+                                gdn_ssm_elem_size=ssm_state.element_size(),
+                            )
+                            assert 2*key_dim + value_dim == conv_state.shape[2], \
+                                f"2*key_dim + value_dim = {2*key_dim + value_dim}, " \
+                                f"conv_state.shape[2] = {conv_state.shape[2]}"
+                            logger.info(
+                                "Prefill's GDN state: "
+                                "conv_elem_size=%s ssm_elem_size=%s",
+                                conv_state.element_size(),
+                                ssm_state.element_size(),
+                            )
+
+            assert self.hybrid_model_send_layer \
+                == sorted(self.hybrid_model_send_layer)
+            assert len(self.hybrid_model_send_layer) \
+                == len(set(self.hybrid_model_send_layer))
+            logger.info("Prefill hybrid model send layer: %s",
+            self.hybrid_model_send_layer)
+            assert len(self.hybrid_model_send_layer) == len(physical_tensors)
             kv_caches = physical_tensors
             cache_shape = layer_cache.shape
             token_bytes = [
@@ -1205,8 +1273,6 @@ class PBackend(HybridBackend):
                 * layer_cache.element_size()
             ]
         else:
-            # Since it's unclear how the model architecture will evolve in the future,
-            # we currently only handle special cases based on the Dpsk-V32 structure.
             tensor_shape_dict: dict[
                 tuple[int, ...], list[tuple[str, torch.Tensor]]
             ] = defaultdict(list)
@@ -1214,27 +1280,17 @@ class PBackend(HybridBackend):
             for layer, layer_kv in kv_caches.items():
                 tensor_shape_dict[layer_kv.shape].append((layer, layer_kv))
 
-            if len(tensor_shape_dict) == 1: # Normal case
+            if len(tensor_shape_dict) == 1:
                 cache_shape, pairs_list = next(iter(tensor_shape_dict.items()))
                 _, layer_tensor = pairs_list[0]
                 if len(cache_shape) == 5:
-                    # flash attn:
-                    # [2 (k and v), num_blocks, block_size, kv_heads, head_dim]
-                    # or flashinfer
-                    # shape:
-                    # [num_blocks, 2 (k and v), block_size, kv_heads, head_dim]
-                    # stride:
-                    # [num_blocks, 2 (k and v), kv_heads, block_size, head_dim]
                     token_bytes = [
                         2 * cache_shape[3] * cache_shape[4]
                         * layer_tensor.element_size()
                     ]
                     if use_flashinfer():
-                        # check hardware, flashinfer only support HND layout
                         from vllm.platforms import current_platform
                         capability = current_platform.get_device_capability()
-                        # parsing HND layout kv cache needs to know head num
-                        # only prefill node needs to know
                         if capability is not None and capability.major == 10:
                             os.environ.setdefault(
                                 "BLLM_KVTRANS_ATTN_HEAD_NUM", str(cache_shape[3])
@@ -1253,7 +1309,6 @@ class PBackend(HybridBackend):
                 for cache_shape, pair_list in tensor_shape_dict.items():
                     assert len(cache_shape) == 3, "Currently only support Dpsk-V32"
                     _, layer_tensor = pair_list[0]
-                    # k cache & kv cache share same num_blocks and block_size
                     token_bytes.append(cache_shape[2] * layer_tensor.element_size())
         block_size = self._cfg.cache_config.block_size
         block_bytes = [token_byte * block_size for token_byte in token_bytes]
@@ -1272,6 +1327,14 @@ class PBackend(HybridBackend):
             block_bytes = block_bytes[0]
             token_bytes = token_bytes[0]
 
+        for layer_name, layer_cache in kv_caches.items():
+            logger.info(
+                "Flatten Cache: layer_names=%s, "
+                "layer_shape=%s, layer_stride=%s, layer_dtype=%s",
+                layer_name, layer_cache.shape,
+                layer_cache.stride(), layer_cache.dtype
+            )
+
         self._bladkv_cli = bladekv.KVTransferClient(
             self._inst_id,
             self._cfg.parallel_config.tensor_parallel_size,
@@ -1282,6 +1345,8 @@ class PBackend(HybridBackend):
             naming_url=self._naming_url,
             layers=_flatten_cache(kv_caches),
             protocols=[protocol],
+            num_kv_heads=total_num_kv_heads,
+            **_hybrid_kwargs,
         )
         winfo = bladekv.current_worker_info('client')
         logger.info(
@@ -1306,7 +1371,10 @@ class PBackend(HybridBackend):
                         and reqm.d_inst_id)
                 freeze_metas.append(reqm)
                 continue
-            assert mytid == self._main_tid
+            assert mytid == self._main_tid, (
+                f"Thread ID mismatch: mytid={mytid},"
+                f" self._main_tid={self._main_tid}, meta={meta}"
+            )
             if reqm.d_block_ids:
                 dst_inst_name, dst_wid, dst_worker_info = _get_distinfo(reqm)
                 self._bladkv_cli.submit_req_send2(
@@ -1354,9 +1422,11 @@ class PBackend(HybridBackend):
         from vllm.model_executor.models.utils import extract_layer_index
         layer_idx = extract_layer_index(layer_name)
         if self.is_hybrid:
+            idx = -1
             if layer_idx in self.hybrid_model_send_layer:
                 idx = self.hybrid_model_send_layer.index(layer_idx)
                 self._bladkv_cli.record_event(idx, torch.cuda.current_stream())
+            # logger.info(f'async_save_kv_layer {layer_idx=} {layer_name=} {idx=}')
         else:
             self._bladkv_cli.record_event(layer_idx, torch.cuda.current_stream())
         return None
@@ -1389,7 +1459,6 @@ class DBackend(HybridBackend):
         self._cfg = vllm_config
         self._kv_cache_config = kv_cache_config
         self._gamma = get_p_node_pop_len(self._cfg) - 1
-        self._enable_prefix_caching = self._cfg.cache_config.enable_prefix_caching
 
         if role == KVConnectorRole.WORKER:
             generate_nic_affinity()
@@ -1398,6 +1467,7 @@ class DBackend(HybridBackend):
             os.environ.setdefault("BLLM_KVTRANS_RESERVE", "4096,128;")
             _set_worker_envs(vllm_config)
         else:
+            _set_hybrid_envs_for_scheduler(kv_cache_config, self.is_hybrid)
             # _reg_naming(self._naming_cli, cfg)
             ### R/W: disagg thread
             self.my_addr_port = (get_ip(), rpc_port(vllm_config))
@@ -1604,14 +1674,19 @@ class DBackend(HybridBackend):
         corereq = req2corereq(req)
         blockids = blocks.get_block_ids()
         # putting all kv cache in one group
-        concated_blk_ids = merge_hybrid_blocks(blockids, gamma=self._gamma)
+        if self.has_null_blk:
+            blockids = handle_hybrid_blocks(
+                blockids, self._gamma,
+                num_gdn_layers=self._num_gdn_layers,
+                num_kv_cache_groups=self._num_kv_cache_groups,
+            )
 
         dprank = self._cfg.parallel_config.data_parallel_rank
         tpsize = self._cfg.parallel_config.tensor_parallel_size
         inst_id = f"{self._inst_id}|{dprank}|{tpsize}"
         kvtdinfo = KVTDInfo(
             instid=inst_id,
-            blkids=concated_blk_ids,
+            blkids=blockids,
             cached_tokens=req.num_computed_tokens,
             max_tokens=req.num_prompt_tokens -(self._gamma + 1),
             d_workers_info=self._workers_info,
@@ -1659,14 +1734,18 @@ class DBackend(HybridBackend):
     async def _dual_req_prefill_rpc(self, req: Request, blocks: KVCacheBlocks) -> int:
         blockids = blocks.get_block_ids()
         # putting all kv cache in one group
-        concated_blk_ids = merge_hybrid_blocks(blockids, gamma=self._gamma)
-
+        if self.has_null_blk:
+            blockids = handle_hybrid_blocks(
+                blockids, self._gamma,
+                num_gdn_layers=self._num_gdn_layers,
+                num_kv_cache_groups=self._num_kv_cache_groups,
+            )
         dprank = self._cfg.parallel_config.data_parallel_rank
         tpsize = self._cfg.parallel_config.tensor_parallel_size
         inst_id = f"{self._inst_id}|{dprank}|{tpsize}"
         kvtdinfo = KVTDInfo(
             instid=inst_id,
-            blkids=concated_blk_ids,
+            blkids=blockids,
             cached_tokens=req.num_computed_tokens,
             max_tokens=req.num_prompt_tokens - (self._gamma + 1),
             d_workers_info=self._workers_info,
@@ -1815,16 +1894,8 @@ class DBackend(HybridBackend):
 
     # return: (load_count, save_count)
     def get_operations(self, req: Request) -> tuple[int, int]:
-        # Here, we first determine whether the request's Prefill
-        # should be executed locally, based on information such as
-        # the status of the P node in naming,
-        # the current status of the D node,
-        # and the characteristics of the request itself.
         if req.num_prompt_tokens <= 1:
             return 0, 0
-
-        if get_param(req, D_LOCAL_PREFILL):
-            return 1, 0
 
         if get_param(req, D_REMOTE_PREFILL):
             assert get_param(req, "remote_host") is not None
@@ -1848,13 +1919,19 @@ class DBackend(HybridBackend):
     # Worker-side methods
     # ==============================
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        for layer_name, _ in kv_caches.items():
+            logger.info("Decode Registering KV Cache layer: %s", layer_name)
+        logger.info("Get KV Cache config: %s", self._kv_cache_config)
+
+        total_num_kv_heads = \
+            self._cfg.model_config.get_total_num_kv_heads()
+
+        _hybrid_kwargs = {}
+
         if self.is_hybrid:
-            # Pick one representative tensor cache from hybrid kv caches.
             layer_cache: torch.Tensor | None = None
-            for cache in kv_caches.values():
-                # gdn layer's kv cache is a list contains conv state and ssm state
-                # we use self.attn's kv cache to register
-                if isinstance(cache, torch.Tensor):
+            for layer_name, cache in kv_caches.items():
+                if isinstance(cache, torch.Tensor) and "indexer" not in layer_name:
                     layer_cache = cache
                     break
 
@@ -1863,26 +1940,84 @@ class DBackend(HybridBackend):
             from vllm.model_executor.models.utils import extract_layer_index
 
             physical_tensors: dict[str, torch.Tensor] = {}
-            # Register using the last layer in each shared_by group to trigger kv cache transfer
+            assert self._num_gdn_layers > 0, f"_num_gdn_layers = {self._num_gdn_layers}"
+
+            _hybrid_kwargs['num_gdn_layers'] = self._num_gdn_layers
+            hf_config = self._cfg.model_config.hf_text_config
+            tp_size = \
+                self._cfg.parallel_config.tensor_parallel_size
+            key_dim = hf_config.linear_num_key_heads \
+                * hf_config.linear_key_head_dim // tp_size
+            value_dim = hf_config.linear_num_value_heads \
+                * hf_config.linear_value_head_dim // tp_size
+            _hybrid_kwargs['gdn_conv_channel_dims'] = \
+                [key_dim, key_dim, value_dim]
+
+            indexer_spec = next(
+                (g.kv_cache_spec
+                 for g in self._kv_cache_config.kv_cache_groups
+                 if any("indexer" in n for n in g.layer_names)),
+                None,
+            )
+            if indexer_spec:
+                indexer_block_size = indexer_spec.block_size
+                indexer_token_size = (indexer_spec.num_kv_heads
+                                     * indexer_spec.head_size
+                                     * get_dtype_size(indexer_spec.dtype))
+                _hybrid_kwargs['indexer_blk_ntpb'] = indexer_block_size
+                _hybrid_kwargs['hybrid_indexer_token_size'] = indexer_token_size
             for tensor_group in self._kv_cache_config.kv_cache_tensors:
                 layer_idxs = [
                     extract_layer_index(layer_name)
                     for layer_name in tensor_group.shared_by
                 ]
+                assert sorted(layer_idxs) == layer_idxs
                 last_group_layer = max(layer_idxs)
                 self.hybrid_model_send_layer.append(last_group_layer)
-                for layer in tensor_group.shared_by:
+                assert last_group_layer == layer_idxs[-1]
+
+                for lidx, layer in enumerate(tensor_group.shared_by):
                     if isinstance(kv_caches[layer], torch.Tensor):
-                        physical_tensors[
-                            tensor_group.shared_by[
-                                layer_idxs.index(last_group_layer)
-                            ]
-                        ] = kv_caches[layer]
-                        break
-            self.hybrid_model_send_layer = sorted(self.hybrid_model_send_layer)
-            # use full attn block to calculate block_bytes
-            # mamba block will padding to full attn block size
-            # [2 (k and v), num_blocks, block_size, kv_heads, head_dim]
+                        if layer.endswith(".indexer.k_cache"):
+                            continue
+                        assert lidx == len(tensor_group.shared_by) - 1
+                        assert extract_layer_index(layer) == last_group_layer
+                        physical_tensors[layer] = kv_caches[layer]
+                    else:
+                        assert 0 <= lidx < len(tensor_group.shared_by) - 1
+                        assert isinstance(kv_caches[layer], list) \
+                            and len(kv_caches[layer]) == 2, \
+                                "Should contain conv and ssm state"
+                        conv_state = kv_caches[layer][0]
+                        ssm_state = kv_caches[layer][1]
+                        assert len(conv_state.shape) == 3, \
+                            f"{conv_state.shape=}"
+                        assert len(ssm_state.shape) == 4, \
+                            f"{ssm_state.shape=}"
+                        if 'conv_state_shape' not in _hybrid_kwargs:
+                            _hybrid_kwargs.update(
+                                conv_state_shape=list(conv_state.shape),
+                                ssm_state_shape=list(ssm_state.shape),
+                                gdn_conv_elem_size=conv_state.element_size(),
+                                gdn_ssm_elem_size=ssm_state.element_size(),
+                            )
+                            assert 2*key_dim + value_dim == conv_state.shape[2], \
+                                f"2*key_dim + value_dim = {2*key_dim + value_dim}, " \
+                                f"conv_state.shape[2] = {conv_state.shape[2]}"
+                            logger.info(
+                                "Decode's GDN state: "
+                                "conv_elem_size=%s ssm_elem_size=%s",
+                                conv_state.element_size(),
+                                ssm_state.element_size(),
+                            )
+
+            assert self.hybrid_model_send_layer \
+                == sorted(self.hybrid_model_send_layer)
+            assert len(self.hybrid_model_send_layer) \
+                == len(set(self.hybrid_model_send_layer))
+            logger.info("Decode hybrid model send layer: %s",
+            self.hybrid_model_send_layer)
+            assert len(self.hybrid_model_send_layer) == len(physical_tensors)
             kv_caches = physical_tensors
             cache_shape = layer_cache.shape
             token_bytes = [
@@ -1890,8 +2025,6 @@ class DBackend(HybridBackend):
                 * layer_cache.element_size()
             ]
         else:
-            # Since it's unclear how the model architecture will evolve in the future,
-            # we currently only handle special cases based on the Dpsk-V32 structure.
             tensor_shape_dict: dict[
                 tuple[int, ...], list[tuple[str, torch.Tensor]]
             ] = defaultdict(list)
@@ -1899,18 +2032,15 @@ class DBackend(HybridBackend):
             for layer, layer_kv in kv_caches.items():
                 tensor_shape_dict[layer_kv.shape].append((layer, layer_kv))
 
-            if len(tensor_shape_dict) == 1: # Normal case
+            if len(tensor_shape_dict) == 1:
                 cache_shape, pairs_list = next(iter(tensor_shape_dict.items()))
                 _, layer_tensor = pairs_list[0]
                 if len(cache_shape) == 5:
-                    # [2 (k and v), num_blocks, block_size, kv_heads, head_dim]
                     token_bytes = [
                         2 * cache_shape[3] * cache_shape[4]
                         * layer_tensor.element_size()
                     ]
                 else:
-                    # for mla, which's kv shape like:
-                    # [num_blocks, block_size, kv_lora_rank + qk_rope_head_dim]
                     assert len(cache_shape) == 3
                     token_bytes = [cache_shape[2] * layer_tensor.element_size()]
             else:
@@ -1918,7 +2048,6 @@ class DBackend(HybridBackend):
                 for cache_shape, pair_list in tensor_shape_dict.items():
                     assert len(cache_shape) == 3, "Currently only support Dpsk-V32"
                     _, layer_tensor = pair_list[0]
-                    # k cache & kv cache share same num_blocks and block_size
                     token_bytes.append(cache_shape[2] * layer_tensor.element_size())
         block_size = self._cfg.cache_config.block_size
         block_bytes = [token_byte * block_size for token_byte in token_bytes]
@@ -1937,6 +2066,14 @@ class DBackend(HybridBackend):
             block_bytes = block_bytes[0]
             token_bytes = token_bytes[0]
 
+        for layer_name, layer_cache in kv_caches.items():
+            logger.info(
+                "Flatten Cache: layer_names=%s, "
+                "layer_shape=%s, layer_stride=%s, layer_dtype=%s",
+                layer_name, layer_cache.shape,
+                layer_cache.stride(), layer_cache.dtype
+            )
+
         self._bladkv_srv = bladekv.KVTransferServer(
             self._inst_id,
             self._cfg.parallel_config.tensor_parallel_size,
@@ -1947,6 +2084,8 @@ class DBackend(HybridBackend):
             naming_url=self._naming_url,
             layers=_flatten_cache(kv_caches),
             protocols=[protocol],
+            num_kv_heads=total_num_kv_heads,
+            **_hybrid_kwargs,
         )
 
         winfo = bladekv.current_worker_info('server')
@@ -1957,7 +2096,6 @@ class DBackend(HybridBackend):
         if self._naming_cli:
             self._naming_cli.store(f"worker_{worker_id}", winfo)
         else:
-            # When naming is not available, register worker info via RPC to scheduler
             asyncio.run_coroutine_threadsafe(
                 self._register_worker_rpc(rank, winfo), self._loop)
         return
