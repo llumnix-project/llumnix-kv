@@ -1,3 +1,6 @@
+#ifndef KVTRANSFER_TCP_CHANNEL_H
+#define KVTRANSFER_TCP_CHANNEL_H
+
 #include "common.h"
 #include "context.h"
 #include "channel.h"
@@ -16,7 +19,7 @@
 #include <mutex>
 #include <unordered_map>
 #include "thrid_party/logging.h"
-#include "protocol/rdma_protocol.h"
+#include "protocol/barex_protocol.h"
 #include "utils/thread_pool.h"
 #include <cuda_runtime.h>
 
@@ -31,6 +34,8 @@
 #include <accl/barex/xtimer.h>
 
 namespace blade_llm {
+
+std::pair<char*, char*> get_kernel_copy_buffer(int device_id);
 
 static constexpr uint32_t KERNEL_LAUNCH_ERROR = 505;
 // KERNEL_COPY_MAX_BLOCK_NUM is now obtained from environment variable via env_kernel_copy_max_block_num()
@@ -148,3 +153,5 @@ class TCPServer: public ITransferServer {
 };
 
 }
+
+#endif // KVTRANSFER_TCP_CHANNEL_H

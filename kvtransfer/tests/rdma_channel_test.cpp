@@ -2,7 +2,7 @@
 #include <gtest/gtest.h>
 #include "utils/cuda_helper.h"
 #include "utils/block_queue.h"
-#include "protocol/rdma_protocol.h"
+#include "protocol/rdma_channel.h"
 #include "naming/shm_naming.h"
 #include "thrid_party/logging.h"
 

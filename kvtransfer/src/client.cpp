@@ -3,7 +3,7 @@
 #include "naming.h"
 #include "thrid_party/logging.h"
 #include "utils/timer.h"
-#include "protocol/rdma_protocol.h"
+#include "protocol/barex_protocol.h"
 #include "envcfg.h"
 #include "fault_inject.h"
 #include <accl/barex/xthreadpool.h>

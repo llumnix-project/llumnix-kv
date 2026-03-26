@@ -8,7 +8,7 @@
 #include "naming/filesys_naming.h"
 #include "context.h"
 #include "thrid_party/logging.h"
-#include "protocol/rdma_protocol.h"
+#include "protocol/barex_protocol.h"
 
 
 using namespace blade_llm;

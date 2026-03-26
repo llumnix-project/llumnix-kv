@@ -1,7 +1,7 @@
 
 
-#ifndef KVTRANSFER_RDMA_PROTOCOL
-#define KVTRANSFER_RDMA_PROTOCOL
+#ifndef KVTRANSFER_BAREX_PROTOCOL_H
+#define KVTRANSFER_BAREX_PROTOCOL_H
 #include "common.h"
 #include "context.h"
 #include "channel.h"
@@ -36,6 +36,35 @@
 namespace blade_llm {
 
 #ifdef ENABLE_RDMA
+
+// rpc req/resp
+// +-------+-------+------------+
+// | magic | reqid |  rpc body  |
+// rpc header: magic: 4 bytes. reqid: 8 bytes.
+// rpc body: req/resp body is decoded according to magic.
+inline constexpr size_t RPC_HEADER = sizeof(uint32_t) + sizeof(uint64_t);
+
+inline std::pair<uint32_t, uint64_t> deser_rpc_header(const char* buf) noexcept {
+  uint32_t magic;
+  memcpy(&magic, buf, sizeof(magic));
+  uint64_t reqid;
+  memcpy(&reqid, buf + sizeof(magic), sizeof(reqid));
+  return std::make_pair(magic, reqid);
+}
+
+inline void ser_rpc_header(char* buf, uint32_t magic, uint64_t reqid) noexcept {
+  memcpy(buf, &magic, sizeof(magic));
+  memcpy(buf + sizeof(magic), &reqid, sizeof(reqid));
+  return;
+}
+
+template<typename T, typename E>
+std::future<T> make_exp_future(E ex) {
+  std::promise<T> pr;
+  pr.set_exception(std::make_exception_ptr(std::move(ex)));
+  return pr.get_future();
+}
+
 struct XMempoolDeleter {
   void operator()(accl::barex::XSimpleMempool *mp);
 };
@@ -240,104 +269,6 @@ struct CliBarexCtx : public BarexCtx {
 };
 
 static constexpr int LAYER_NUM_MAX = 150;
-struct RDMAInfo {
-  char ip[INET_ADDRSTRLEN]{'\0'};  // Decode listen IP, null-terminated.
-  int port = 0;  // decode listen port
-  std::vector<RDMAMemHandle> handles;
-};
-
-
-class RDMAChannel : public IChannel, public noncopyable {
- public:
-  RDMAChannel(const InstanceId &inst_id, WorkerId worker_id, CliBarexCtx *ctx) noexcept:
-      src_inst_id_(inst_id),
-      src_worker_id_(worker_id),
-      ctx_(ctx) {}
-
-  ~RDMAChannel();
-
-  // connect is called on the main thread; avoid blocking.
-  // write is called on a background thread; blocking is acceptable.
-  // The caller ensures connect happens-before write.
-  void connect(const WorkerInfo &dst_info) override;
-
-  void register_data(std::vector<std::vector<IpcBlock>>& data, TPKind kind) override;
-
-  void send_data(size_t layer_index) override;
-  void flush(std::string& out) override;
-  bool is_active() override;
-
- private:
-  // do real connect.
-  void do_init();
-  accl::barex::XChannel *ch() noexcept;
-  std::shared_ptr<accl::barex::XChannel>& sch() noexcept;
-
- private:
-  InstanceId const src_inst_id_;
-  WorkerId const src_worker_id_ = 0;
-  CliBarexCtx *const ctx_;  // owner: KvTransferClient
-
-  std::string ip_;
-  int port_{0};
-  std::vector<size_t> dst_layer_blk_sizes_;
-  uint32_t dst_layer_num_{0};
-
-  int prev_ch_idx_ = 0;
-  // outside vec represent each tensor's block list
-  // inside vec represent blocks need to send from one tensor
-  std::vector<std::vector<IpcBlock>> *data_ = nullptr;
-  size_t dataperch_ = 0;
-  TPKind kind_ = TPKind::UNKNOWN;
-  // sb is send block~
-  size_t origin_sb_num_ = 0;
-  size_t merged_sb_num_ = 0;
-  size_t sb_size_min_ = 0;
-  size_t sb_size_max_ = 0;
-  size_t sb_size_total_ = 0;
-  uint32_t crc_ = 0;
-  bool enable_crc_ = false;
-  // write_us
-  std::vector<std::future<uint64_t>> write_futs_;
-  std::vector<std::future<void>> send_futs_;
-
-  // init by do_init
-  std::vector<BarexChannel> chs_;
-  std::vector<RDMAMemHandle> dst_handles_;
-};
-
-class RDMAServer : public ITransferServer {
- public:
-  void start_server(Context *ctx) override;
-
- private:
-  class CtxCallback : public accl::barex::XChannelCallback {
-    const RDMAServer* const server_ = nullptr;   // owner: KV_SERVER
-   public:
-    explicit CtxCallback(RDMAServer* v) noexcept: server_(v) {}
-
-    void OnRecvCall(accl::barex::XChannel *channel,
-                    char *in_buf,
-                    size_t len,
-                    accl::barex::x_msg_header header) {
-      RTASSERT(false);
-    }
-
-    void OnRecvCall(std::shared_ptr<accl::barex::XChannel> channel,
-                    char *in_buf,
-                    size_t len,
-                    accl::barex::x_msg_header header) noexcept override;
-
-   private:
-    void resp_mem_handles(std::shared_ptr<accl::barex::XChannel>& channel, uint64_t reqid, char *in_buf, size_t len);
-    void resp_remote_crc(std::shared_ptr<accl::barex::XChannel>& channel, uint64_t reqid, char *in_buf, size_t len);
-  };
-
- private:
-  RDMAInfo info_;
-  BarexCtx* ctx_ = nullptr;
-  std::unique_ptr<accl::barex::XListener, XListenerDeleter> listener_;
-};
 
 class CliCtxCallback : public accl::barex::XChannelCallback {
  public:
@@ -399,6 +330,17 @@ class BarexProtoContext : public IProtocolContext {
   std::unique_ptr<accl::barex::XChannelCallback> callback_{nullptr};
   TransferProtocol protocol_;
 };
+
+// Shared helper functions used by both TCP and RDMA channel implementations
+void Send(std::shared_ptr<accl::barex::XChannel>& ch, accl::barex::memp_t sdata, accl::barex::DoneCallback cb);
+[[nodiscard]] std::future<void> Send(std::shared_ptr<accl::barex::XChannel>& ch, accl::barex::memp_t sdata);
+accl::barex::memp_t AllocCPUBuffer(std::shared_ptr<accl::barex::XChannel>& ch, uint64_t size);
+void get_ip(char *info_ip, size_t bufcap);
+[[nodiscard]] std::future<BarexChannel> Connect(accl::barex::XConnector &self, std::string server_addr, int port);
+void delete_channels(CliBarexCtx* ctx, std::vector<BarexChannel> chs);
+bool valid_channels(std::vector<BarexChannel>& chs);
+
 #endif  // ENABLE_RDMA
+
 }  // namespace blade_llm
-#endif // KVTRANSFER_RDMA_PROTOCOL
+#endif // KVTRANSFER_BAREX_PROTOCOL_H
