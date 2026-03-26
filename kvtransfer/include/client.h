@@ -25,7 +25,7 @@ class XThreadpool;
 
 namespace blade_llm {
 
-// The value length here is typically p_info->tp_size / d_info->tp_size; roughly 1/2/4.
+// The value length here is typically p_info->kvt_tp_size / d_info->kvt_tp_size; roughly 1/2/4.
 using StepTasks = std::unordered_map<InstanceId, std::vector<std::pair<WorkerId, BatchSendTask>>>;
 
 struct ReqMeta {
@@ -34,8 +34,8 @@ struct ReqMeta {
   RequestId reqid;
   uint32_t seen_tokens = 0;
   uint32_t new_tokens = 0;
-  std::vector<uint32_t> src_block_ids;
-  std::vector<uint32_t> dst_block_ids;
+  BlockIds src_block_ids;
+  BlockIds dst_block_ids;
   std::optional<std::string> dst_worker_info;
 };
 
@@ -66,8 +66,8 @@ class KvTransferClient : public noncopyable {
                        uint32_t seen_tokens,
                        uint32_t new_tokens,
                        bool has_last_token,
-                       std::vector<uint32_t> src_block_ids,
-                       std::vector<uint32_t> dst_block_ids,
+                       BlockIds src_block_ids,
+                       BlockIds dst_block_ids,
                        std::optional<std::string> dst_worker_info = std::nullopt);
 
   void submit_req_send(InstanceId dst_inst,
@@ -75,8 +75,8 @@ class KvTransferClient : public noncopyable {
                        RequestId r,
                        uint32_t new_tokens,
                        bool has_last_token,
-                       std::vector<uint32_t> src_block_ids,
-                       std::vector<uint32_t> dst_block_ids) {
+                       BlockIds src_block_ids,
+                       BlockIds dst_block_ids) {
     return submit_req_send(std::move(dst_inst), dst_worker,
                            std::move(r), 0, new_tokens, has_last_token,
                            std::move(src_block_ids),

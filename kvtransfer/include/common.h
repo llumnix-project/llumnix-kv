@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <atomic>
+#include <bitset>
 #include <string>
 #include <vector>
 #include <cassert>
@@ -12,6 +13,9 @@
 #include <unistd.h>
 #include <memory>
 #include <optional>
+
+#include "thrid_party/logging.h"
+#include "envcfg.h"
 
 #define MAX_OTHER_INFO_LEN (8192)
 #define MAX_ADDRESS_LEN (64)
@@ -94,6 +98,7 @@ class noncopyable {
 typedef std::string InstanceId;
 typedef uint32_t WorkerId;
 typedef std::string RequestId;
+using BlockIds = std::vector<std::vector<uint32_t>>;
 
 struct LayerInfo {
   size_t token_size;
@@ -112,20 +117,33 @@ struct LayerInfo {
 struct WorkerInfo {
   InstanceId inst_id;
   WorkerId worker_id;
-  uint32_t tp_size;
+  uint32_t kvt_tp_size;
   uint32_t worker_tp_rank;
   std::vector<size_t> block_sizes;
   std::vector<size_t> token_sizes;
   uint32_t layer_num_blocks{1};
   uint32_t num_layers{1};
   uint8_t transfer_protocols{0};
+  uint32_t attn_kernel_blk_ntpb{0};
+  uint32_t indexer_blk_ntpb{0};
   std::string addr; // ip
   std::vector<uint8_t> other_info;
+
+  // local-only, not serialized
+  uint32_t engine_tp_size{0};
+  int num_kv_heads{-1};
+  uint32_t num_gdn_layers{3};
+  uint32_t hybrid_indexer_token_size{0};
+  uint32_t gdn_conv_elem_size{1};
+  uint32_t gdn_ssm_elem_size{1};
+  std::vector<size_t> conv_state_shape;
+  std::vector<size_t> ssm_state_shape;
+  std::vector<size_t> gdn_conv_channel_dims;
 
   // todo
   WorkerInfo() :
       worker_id(INVALID_INST_WORKER_ID),
-      tp_size(0),
+      kvt_tp_size(0),
       worker_tp_rank(0),
       block_sizes({}),
       token_sizes({}) {};
@@ -133,7 +151,7 @@ struct WorkerInfo {
   WorkerInfo(const InstanceId& id, const WorkerId &w_id) :
       inst_id(id),
       worker_id(w_id),
-      tp_size(1),
+      kvt_tp_size(1),
       worker_tp_rank(0),
       block_sizes({16 * KB}),
       token_sizes({KB}) {};
@@ -149,7 +167,7 @@ struct WorkerInfo {
              uint32_t protocols) :
       inst_id(std::move(inst_id_)),
       worker_id(worker_id_),
-      tp_size(tp_size_),
+      kvt_tp_size(tp_size_),
       worker_tp_rank(worker_tp_rank_),
       block_sizes(block_sizes_),
       token_sizes(token_sizes_),
@@ -213,15 +231,6 @@ public:
   friend inline std::ostream& operator<<(std::ostream& os, const ReqSendTask& task);
 };
 
-// FOR GTEST
-inline std::ostream& operator<<(std::ostream& os, const ReqSendTask& task) {
-  os << "ReqSendTask(seen_tokens: " << task.seen_tokens
-      << ", new_tokens: " << task.new_tokens
-      << ", reach_last_token: " << std::boolalpha << task.reach_last_token
-      << ", req_: " << task.req_.get() << ")";
-  return os;
-}
-
 // RequestInfo can only be used on the Python main thread.
 class RequestInfo {
  public:
@@ -229,10 +238,8 @@ class RequestInfo {
   const WorkerId dst_worker_id;
   const std::optional<std::string> dst_worker_info;
   const RequestId req_id;
-  // src_blocks/dst_blocks are passed in from vllm.
-  // Currently, block ids should be the same across different cache tensors.
-  const std::vector<uint32_t> src_blocks;
-  const std::vector<uint32_t> dst_blocks;
+  const BlockIds src_blocks;
+  const BlockIds dst_blocks;
  private:
   static_assert(std::atomic<ReqState>::is_always_lock_free);
   mutable std::atomic<ReqState> state_{ReqState::INPROCESS};
@@ -246,8 +253,8 @@ class RequestInfo {
   RequestInfo(InstanceId dst_inst_id_,
               WorkerId dst_worker_id_,
               RequestId req_id_,
-              std::vector<uint32_t> src_blocks_,
-              std::vector<uint32_t> dst_blocks_):
+              BlockIds src_blocks_,
+              BlockIds dst_blocks_):
       RequestInfo(std::move(dst_inst_id_), dst_worker_id_,
                   std::nullopt,
                   std::move(req_id_),
@@ -258,8 +265,8 @@ class RequestInfo {
               WorkerId dst_worker_id_,
               std::optional<std::string> dst_worker_info_,
               RequestId req_id_,
-              std::vector<uint32_t> src_blocks_,
-              std::vector<uint32_t> dst_blocks_):
+              BlockIds src_blocks_,
+              BlockIds dst_blocks_):
       dst_inst_id(std::move(dst_inst_id_)),
       dst_worker_id(dst_worker_id_),
       dst_worker_info(std::move(dst_worker_info_)),
@@ -325,6 +332,34 @@ inline void ReqSendTask::set_state(ReqState s) const noexcept {
 inline ReqState ReqSendTask::state() const noexcept {
   return this->req_->state();
 }
+
+inline static void print_block_ids(std::ostream& os, const BlockIds& bids) {
+  os << "[";
+  for (size_t i = 0; i < bids.size(); ++i) {
+    os << "[";
+    for (size_t j = 0; j < bids[i].size(); ++j) {
+      os << bids[i][j];
+      if (j + 1 < bids[i].size()) os << ',';
+    }
+    os << "]";
+    if (i + 1 < bids.size()) os << ',';
+  }
+  os << "]";
+}
+
+inline std::ostream& operator<<(std::ostream& os, const ReqSendTask& task) {
+  os << "ReqSendTask(seen_tokens: " << task.seen_tokens
+      << ", new_tokens: " << task.new_tokens
+      << ", reach_last_token: " << std::boolalpha << task.reach_last_token
+      << ", reqid: " << task.req_id()
+      << ", srcblks: ";
+  print_block_ids(os, task.src_blocks());
+  os << ", dstblks: ";
+  print_block_ids(os, task.dst_blocks());
+  os << ", req_: " << task.req_.get() << ")";
+  return os;
+}
+
 
 } // namespace blade_llm
 

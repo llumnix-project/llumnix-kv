@@ -77,7 +77,7 @@ public:
   std::optional<WorkerInfo> get_worker_info(const InstanceId &id, WorkerId wid) override {
     LOG(INFO) << "fake get_worker_info: id=" << id << " wid=" << wid;
     WorkerInfo dst_info(id, wid);
-    dst_info.tp_size = 1;
+    dst_info.kvt_tp_size = 1;
     dst_info.worker_tp_rank = 0;
     dst_info.block_sizes = {16 * KB};
     dst_info.token_sizes = {KB};

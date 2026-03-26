@@ -1,6 +1,7 @@
 #include <cassert>
 #include <stdexcept>
 #include "context.h"
+#include "envcfg.h"
 #include "utils/cuda_helper.h"
 #include "thrid_party/logging.h"
 
@@ -26,11 +27,11 @@ Context::Context(const InstanceId &inst, const WorkerId &worker) :
 };
 
 void Context::set_tp(uint32_t tp_size, uint32_t worker_tp_rank) {
-  worker_info_.tp_size = tp_size;
+  worker_info_.kvt_tp_size = tp_size;
   worker_info_.worker_tp_rank = worker_tp_rank;
 }
 
-void Context::set_block_params(std::vector<size_t> block_sizes, std::vector<size_t> token_sizes, uint32_t layer_num_blocks) {
+void Context::set_block_params(std::vector<size_t> block_sizes, std::vector<size_t> token_sizes, uint32_t layer_num_blocks, uint32_t indexer_blk_ntpb) {
   RTASSERT(block_sizes.size() == token_sizes.size());
   for (size_t i = 0; i < block_sizes.size(); i++) {
     auto block_size = block_sizes[i];
@@ -40,6 +41,13 @@ void Context::set_block_params(std::vector<size_t> block_sizes, std::vector<size
   worker_info_.block_sizes = block_sizes;
   worker_info_.token_sizes = token_sizes;
   worker_info_.layer_num_blocks = layer_num_blocks;
+  auto attn_kernel_blk_ntpb = env_attn_kernel_blk_size();
+  if (attn_kernel_blk_ntpb == -1) {
+    worker_info_.attn_kernel_blk_ntpb = block_sizes[0] / token_sizes[0];
+  } else {
+    worker_info_.attn_kernel_blk_ntpb = attn_kernel_blk_ntpb;
+  }
+  worker_info_.indexer_blk_ntpb = indexer_blk_ntpb;
 }
 
 

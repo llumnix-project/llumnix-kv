@@ -279,7 +279,7 @@ static void parse_block_send_p_eq_d(
   const ReqSendTask *task,
   std::vector<std::vector<IpcBlock>> &send_blocks) {
   // as tp size is same, token size should be same;
-  assert(src_worker_info->tp_size == dst_worker_info->tp_size);
+  assert(src_worker_info->kvt_tp_size == dst_worker_info->kvt_tp_size);
   assert(src_worker_info->worker_tp_rank == dst_worker_info->worker_tp_rank);
 
   const auto &token_sizes = src_worker_info->token_sizes;
@@ -307,7 +307,7 @@ static void vllm_parse_block_send_multi_tensor_p_eq_d(
   const ReqSendTask *task,
   std::vector<std::vector<IpcBlock>> &send_blocks) {
   // as tp size is same, token size should be same;
-  assert(src_worker_info->tp_size == dst_worker_info->tp_size);
+  assert(src_worker_info->kvt_tp_size == dst_worker_info->kvt_tp_size);
   assert(src_worker_info->worker_tp_rank == dst_worker_info->worker_tp_rank);
 
   const auto &token_sizes = src_worker_info->token_sizes;
@@ -336,7 +336,7 @@ static void vllm_parse_block_send_p_eq_d(
   const WorkerInfo *dst_worker_info,
   const ReqSendTask *task,
   std::vector<std::vector<IpcBlock>> &send_blocks) {
-  assert(src_worker_info->tp_size == dst_worker_info->tp_size);
+  assert(src_worker_info->kvt_tp_size == dst_worker_info->kvt_tp_size);
 
   auto const& kv_token_sizes = src_worker_info->token_sizes;
   auto const& kv_block_sizes = src_worker_info->block_sizes;
@@ -387,7 +387,7 @@ static void vllm_parse_hybrid_block_send_p_eq_d(
   const ReqSendTask *task,
   std::vector<std::vector<IpcBlock>> &send_blocks) {
     // as tp size is same, token size/block size should be same;
-    assert(src_worker_info->tp_size == dst_worker_info->tp_size);
+    assert(src_worker_info->kvt_tp_size == dst_worker_info->kvt_tp_size);
     assert(src_worker_info->worker_tp_rank == dst_worker_info->worker_tp_rank);
 
     auto const& kv_token_sizes = src_worker_info->token_sizes;
@@ -419,17 +419,17 @@ static void vllm_parse_hybrid_block_send_p_gt_d(
     const auto & p_token_sizes = src_worker_info->token_sizes;
     const auto & d_token_sizes = dst_worker_info->token_sizes;
 
-    assert(src_worker_info->tp_size > dst_worker_info->tp_size);
-    assert(src_worker_info->tp_size % dst_worker_info->tp_size == 0);
+    assert(src_worker_info->kvt_tp_size > dst_worker_info->kvt_tp_size);
+    assert(src_worker_info->kvt_tp_size % dst_worker_info->kvt_tp_size == 0);
 
     // GDN will not be affected by head < tp size
     const uint32_t p_origin_tp_size = env_origin_p_tp_size();
-    const uint32_t gdn_group_n = p_origin_tp_size / dst_worker_info->tp_size;
+    const uint32_t gdn_group_n = p_origin_tp_size / dst_worker_info->kvt_tp_size;
     assert(src_worker_info->worker_tp_rank / gdn_group_n == dst_worker_info->worker_tp_rank);
     const uint32_t gdn_group_off = src_worker_info->worker_tp_rank % gdn_group_n;
     auto const validranks = env_p_valid_ranks();
     uint32_t const worker_tp_rank = (validranks << (validranks.size() - src_worker_info->worker_tp_rank)).count();
-    const uint32_t attn_group_n = validranks.count() / dst_worker_info->tp_size;
+    const uint32_t attn_group_n = validranks.count() / dst_worker_info->kvt_tp_size;
     const uint32_t attn_group_off = worker_tp_rank % attn_group_n;
 
     // Should only have one cache in one layer.
@@ -539,9 +539,9 @@ static void do_parse_block_send(
   send_blocks.resize(p_token_sizes.size());
   std::vector<IpcBlock> &per_cache_send_blocks = send_blocks[0];
 
-  assert(p_info->tp_size > d_info->tp_size);
-  assert((p_info->tp_size % d_info->tp_size) == 0);
-  const uint32_t group_n = p_info->tp_size / d_info->tp_size;
+  assert(p_info->kvt_tp_size > d_info->kvt_tp_size);
+  assert((p_info->kvt_tp_size % d_info->kvt_tp_size) == 0);
+  const uint32_t group_n = p_info->kvt_tp_size / d_info->kvt_tp_size;
   assert(p_info->worker_tp_rank / group_n == d_info->worker_tp_rank);
   const uint32_t group_off = p_info->worker_tp_rank % group_n;
   assert(d_token_size == p_token_size * group_n);
@@ -603,9 +603,9 @@ static void do_multi_tensor_parse_block_send(
 
     std::vector<IpcBlock> &per_cache_send_blocks = send_blocks[cache_idx];
 
-    assert(p_info->tp_size > d_info->tp_size);
-    assert((p_info->tp_size % d_info->tp_size) == 0);
-    const uint32_t group_n = p_info->tp_size / d_info->tp_size;
+    assert(p_info->kvt_tp_size > d_info->kvt_tp_size);
+    assert((p_info->kvt_tp_size % d_info->kvt_tp_size) == 0);
+    const uint32_t group_n = p_info->kvt_tp_size / d_info->kvt_tp_size;
     assert(p_info->worker_tp_rank / group_n == d_info->worker_tp_rank);
     const uint32_t group_off = p_info->worker_tp_rank % group_n;
     assert(d_token_size == p_token_size * group_n);
@@ -657,9 +657,9 @@ static void vllm_parse_block_send_p_gt_d(
   const auto & d_block_sizes = d_info->block_sizes;
   const auto & p_token_sizes = p_info->token_sizes;
   const auto & d_token_sizes = d_info->token_sizes;
-  assert(p_info->tp_size > d_info->tp_size);
-  assert((p_info->tp_size % d_info->tp_size) == 0);
-  const uint32_t group_n = p_info->tp_size / d_info->tp_size;
+  assert(p_info->kvt_tp_size > d_info->kvt_tp_size);
+  assert((p_info->kvt_tp_size % d_info->kvt_tp_size) == 0);
+  const uint32_t group_n = p_info->kvt_tp_size / d_info->kvt_tp_size;
   assert(worker_tp_rank / group_n == d_info->worker_tp_rank);
   const uint32_t group_off = worker_tp_rank % group_n;
 
@@ -812,7 +812,7 @@ static void vllm_parse_flashinfer_block_send_p_eq_d(
   const WorkerInfo *d_info,
   const ReqSendTask *task,
   std::vector<std::vector<IpcBlock>> &send_blocks) {
-    assert(p_info->tp_size == d_info->tp_size);
+    assert(p_info->kvt_tp_size == d_info->kvt_tp_size);
 
     const auto & p_block_sizes = p_info->block_sizes;
     const auto & d_block_sizes = d_info->block_sizes;
@@ -862,14 +862,14 @@ static void vllm_parse_flashinfer_block_send_p_gt_d(
       return ;
     }
     uint32_t const worker_tp_rank = (validranks << (validranks.size() - p_info->worker_tp_rank)).count();
-    const uint32_t attn_group_n = validranks.count() / d_info->tp_size;
+    const uint32_t attn_group_n = validranks.count() / d_info->kvt_tp_size;
     const uint32_t attn_group_off = worker_tp_rank % attn_group_n;
     const auto & p_block_sizes = p_info->block_sizes;
     const auto & d_block_sizes = d_info->block_sizes;
     const auto & p_token_sizes = p_info->token_sizes;
     const auto & d_token_sizes = d_info->token_sizes;
-    assert(p_info->tp_size > d_info->tp_size);
-    assert((p_info->tp_size % d_info->tp_size) == 0);
+    assert(p_info->kvt_tp_size > d_info->kvt_tp_size);
+    assert((p_info->kvt_tp_size % d_info->kvt_tp_size) == 0);
     assert(worker_tp_rank / attn_group_n == d_info->worker_tp_rank);
 
     // Should only have one cache in one layer.
@@ -933,7 +933,7 @@ using ParseBlockFunc = decltype(parse_block_send_p_lt_d);
 static bool same_dst(const WorkerInfo& l, const WorkerInfo& r) noexcept {
   return l.inst_id == r.inst_id &&
          l.worker_id == r.worker_id &&
-         l.tp_size == r.tp_size &&
+         l.kvt_tp_size == r.kvt_tp_size &&
          l.worker_tp_rank == r.worker_tp_rank &&
          l.block_sizes == r.block_sizes &&
          l.token_sizes == r.token_sizes &&
@@ -1272,12 +1272,12 @@ private:
     const int cache_shape = env_cache_shape();
 
     if (cache_shape == RAGGED_FLASH_CACHE_SHAPE) {
-      if (srcinfo.tp_size == self.dstinfo->tp_size) {
+      if (srcinfo.kvt_tp_size == self.dstinfo->kvt_tp_size) {
         self.parse_block = parse_block_send_p_eq_d;
         self.tpkind = TPKind::PEQD;
         return;
       }
-      if (srcinfo.tp_size > self.dstinfo->tp_size) {
+      if (srcinfo.kvt_tp_size > self.dstinfo->kvt_tp_size) {
         if (srcinfo.token_sizes == self.dstinfo->token_sizes) {
           self.parse_block = parse_block_send_p_gt_d_dpsk;
           self.tpkind = TPKind::PEQD;
@@ -1292,36 +1292,36 @@ private:
       return;
     }
     if (cache_shape == FLASH_CACHE_SHAPE) {
-      if (srcinfo.tp_size == self.dstinfo->tp_size) {
+      if (srcinfo.kvt_tp_size == self.dstinfo->kvt_tp_size) {
         self.parse_block = vllm_parse_block_send_p_eq_d;
         self.tpkind = TPKind::PEQD;
         return;
       }
-      if (srcinfo.tp_size > self.dstinfo->tp_size) {
+      if (srcinfo.kvt_tp_size > self.dstinfo->kvt_tp_size) {
         self.parse_block = vllm_parse_block_send_p_gt_d;
         self.tpkind = TPKind::PGTD;
         return;
       }
     }
     if (cache_shape == QWEN3_NEXT_FLASH_CACHE_SHAPE) {
-      if (srcinfo.tp_size == self.dstinfo->tp_size) {
+      if (srcinfo.kvt_tp_size == self.dstinfo->kvt_tp_size) {
         self.parse_block = vllm_parse_hybrid_block_send_p_eq_d;
         self.tpkind = TPKind::PEQD;
         return;
       }
-      if (srcinfo.tp_size > self.dstinfo->tp_size) {
+      if (srcinfo.kvt_tp_size > self.dstinfo->kvt_tp_size) {
         self.parse_block = vllm_parse_hybrid_block_send_p_gt_d;
         self.tpkind = TPKind::PGTD;
         return;
       }
     }
     if (cache_shape == DPSK_V32_SPARSE_MLA_SHAPE) {
-      if (srcinfo.tp_size == self.dstinfo->tp_size) {
+      if (srcinfo.kvt_tp_size == self.dstinfo->kvt_tp_size) {
         self.parse_block = vllm_parse_block_send_multi_tensor_p_eq_d;
         self.tpkind = TPKind::PEQD;
         return;
       }
-      if (srcinfo.tp_size > self.dstinfo->tp_size) {
+      if (srcinfo.kvt_tp_size > self.dstinfo->kvt_tp_size) {
         self.parse_block = vllm_parse_block_send_multi_tensor_p_gt_d;
         self.tpkind = TPKind::PEQD;
         return;
@@ -1331,12 +1331,12 @@ private:
       return;
     }
     if (cache_shape == FLASHINFER_CACHE_SHAPE) {
-      if (srcinfo.tp_size == self.dstinfo->tp_size) {
+      if (srcinfo.kvt_tp_size == self.dstinfo->kvt_tp_size) {
         self.parse_block = vllm_parse_flashinfer_block_send_p_eq_d;
         self.tpkind = TPKind::PEQD;
         return;
       }
-      if (srcinfo.tp_size > self.dstinfo->tp_size) {
+      if (srcinfo.kvt_tp_size > self.dstinfo->kvt_tp_size) {
         self.parse_block = vllm_parse_flashinfer_block_send_p_gt_d;
         self.tpkind = TPKind::PGTD;
         return;

@@ -213,16 +213,16 @@ static void test_parse_block_generate(int p_rank, int d_rank) {
   int ntpb = 64;
 
   auto p_info = WorkerInfo("0", 0);
-  p_info.tp_size = 16;
+  p_info.kvt_tp_size = 16;
   p_info.worker_tp_rank = p_rank;
-  p_info.token_sizes = {2 * (kv_heads / p_info.tp_size) * head_dim * sizeof(uint16_t)};
+  p_info.token_sizes = {2 * (kv_heads / p_info.kvt_tp_size) * head_dim * sizeof(uint16_t)};
   p_info.block_sizes = {p_info.token_sizes[0] * ntpb};
   std::cout << "p_info.token_size=" << p_info.token_sizes[0] << " p_info.block_size=" << p_info.block_sizes[0] << std::endl;
 
   auto d_info = WorkerInfo("1", 0);
-  d_info.tp_size = 4;
+  d_info.kvt_tp_size = 4;
   d_info.worker_tp_rank = d_rank;
-  d_info.token_sizes = {2 * (kv_heads / d_info.tp_size) * head_dim * sizeof(uint16_t)};
+  d_info.token_sizes = {2 * (kv_heads / d_info.kvt_tp_size) * head_dim * sizeof(uint16_t)};
   d_info.block_sizes = {d_info.token_sizes[0] * ntpb};
   std::cout << "d_info.token_size=" << d_info.token_sizes[0] << " d_info.block_size=" << d_info.block_sizes[0] << std::endl;
 
@@ -421,16 +421,16 @@ static void dgtp_test_parse_block_generate(int p_rank, int d_rank) {
   int ntpb = 64;
 
   auto p_info = WorkerInfo("0", 0);
-  p_info.tp_size = 4;
+  p_info.kvt_tp_size = 4;
   p_info.worker_tp_rank = p_rank;
-  p_info.token_sizes = {2 * (kv_heads / p_info.tp_size) * head_dim * sizeof(uint16_t)};
+  p_info.token_sizes = {2 * (kv_heads / p_info.kvt_tp_size) * head_dim * sizeof(uint16_t)};
   p_info.block_sizes = {p_info.token_sizes[0] * ntpb};
   std::cout << "p_info.token_size=" << p_info.token_sizes[0] << " p_info.block_size=" << p_info.block_sizes[0] << std::endl;
 
   auto d_info = WorkerInfo("1", 0);
-  d_info.tp_size = 16;
+  d_info.kvt_tp_size = 16;
   d_info.worker_tp_rank = d_rank;
-  d_info.token_sizes = {2 * (kv_heads / d_info.tp_size) * head_dim * sizeof(uint16_t)};
+  d_info.token_sizes = {2 * (kv_heads / d_info.kvt_tp_size) * head_dim * sizeof(uint16_t)};
   d_info.block_sizes = {d_info.token_sizes[0] * ntpb};
   std::cout << "d_info.token_size=" << d_info.token_sizes[0] << " d_info.block_size=" << d_info.block_sizes[0] << std::endl;
 

@@ -45,7 +45,7 @@ std::vector<uint8_t> WorkerInfo::to_bytes() const {
   RTASSERT_EQ(token_size, uint32_t(token_size));
   uint32_t tmp[11];
   tmp[0] = htobe32(worker_id);
-  tmp[1] = htobe32(tp_size);
+  tmp[1] = htobe32(kvt_tp_size);
   tmp[2] = htobe32(worker_tp_rank);
   // use uint32_t to change to bytes
   tmp[3] = htobe32(static_cast<uint32_t>(block_size));
@@ -93,7 +93,7 @@ WorkerInfo WorkerInfo::from_bytes(const unsigned char *src, size_t length) {
   src += sizeof(uint32_t) * 11;
 
   wi.worker_id = be32toh(tmp[0]);
-  wi.tp_size = be32toh(tmp[1]);
+  wi.kvt_tp_size = be32toh(tmp[1]);
   wi.worker_tp_rank = be32toh(tmp[2]);
 
   wi.block_sizes.clear();
@@ -150,7 +150,7 @@ std::string WorkerInfo::to_string() const {
   std::stringstream ss;
   ss << inst_id << ","
      << worker_id << ","
-     << tp_size << ","
+     << kvt_tp_size << ","
      << worker_tp_rank << ","
      << join_sizes(block_sizes) << ","
      << join_sizes(token_sizes) << ","
@@ -192,7 +192,7 @@ WorkerInfo WorkerInfo::from_string(const std::string &src) {
 
   w.inst_id = tmp[0];
   w.worker_id = stoul(tmp[1]);
-  w.tp_size = stoul(tmp[2]);
+  w.kvt_tp_size = stoul(tmp[2]);
   w.worker_tp_rank = stoul(tmp[3]);
   w.block_sizes = parse_sizes(tmp[4]);
   w.token_sizes = parse_sizes(tmp[5]);

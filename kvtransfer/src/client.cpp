@@ -305,8 +305,8 @@ void KvTransferClient::submit_req_send(InstanceId dst_inst_name,
                                        uint32_t seen_tokens,
                                        uint32_t new_tokens,
                                        bool has_last_token,
-                                       std::vector<uint32_t> src_block_ids,
-                                       std::vector<uint32_t> dst_block_ids,
+                                       BlockIds src_block_ids,
+                                       BlockIds dst_block_ids,
                                        std::optional<std::string> dst_worker_info) {
 
   if (new_tokens <= 0) {

@@ -37,7 +37,7 @@ TEST(NamingTest, TestShmNaming) {
   EXPECT_TRUE(info_opt.has_value());
   EXPECT_EQ(worker_info.inst_id, info_opt->inst_id);
   EXPECT_EQ(worker_info.worker_id, info_opt->worker_id);
-  EXPECT_EQ(worker_info.tp_size, info_opt->tp_size);
+  EXPECT_EQ(worker_info.kvt_tp_size, info_opt->kvt_tp_size);
   EXPECT_EQ(worker_info.worker_tp_rank, info_opt->worker_tp_rank);
   EXPECT_EQ(worker_info.block_sizes, info_opt->block_sizes);
   EXPECT_EQ(worker_info.token_sizes, info_opt->token_sizes);
@@ -206,7 +206,7 @@ const std::string FakeHttpClient::FAKE_URL = "http://fake";
 void worker_naming_test(INamingClient* client) {
   WorkerNamingClient worker_client(client);
   WorkerInfo wi(client->inst_id, 1);
-  wi.tp_size = 4;
+  wi.kvt_tp_size = 4;
   wi.worker_tp_rank = 1;
   wi.block_sizes = {1024 * 64};
   wi.token_sizes = {512};
@@ -238,7 +238,7 @@ void worker_naming_test(INamingClient* client) {
   auto wii = worker_opt.value();
   EXPECT_EQ(wi.inst_id, wii.inst_id);
   EXPECT_EQ(wi.worker_id, wii.worker_id);
-  EXPECT_EQ(wi.tp_size, wii.tp_size);
+  EXPECT_EQ(wi.kvt_tp_size, wii.kvt_tp_size);
   EXPECT_EQ(wi.worker_tp_rank, wii.worker_tp_rank);
   EXPECT_EQ(wi.block_sizes, wii.block_sizes);
   EXPECT_EQ(wi.token_sizes, wii.token_sizes);

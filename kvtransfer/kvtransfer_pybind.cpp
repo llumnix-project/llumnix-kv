@@ -35,6 +35,60 @@ GeneralNamingClient connect_naming(const InstanceId &name, const std::string &ur
   return NAMING_MANAGER->connect_naming(name, url);
 }
 
+static std::unique_ptr<Context> create_context(
+    const std::string &inst_name,
+    uint32_t tp_size,
+    uint32_t worker_id,
+    uint32_t worker_tp_rank,
+    uint32_t device_id,
+    const std::vector<size_t> &block_sizes,
+    const std::vector<size_t> &token_sizes,
+    uint32_t layer_num_blocks,
+    uint32_t indexer_blk_ntpb,
+    const std::vector<std::vector<uint64_t>> &layers,
+    int num_kv_heads,
+    uint32_t num_gdn_layers,
+    uint32_t hybrid_indexer_token_size,
+    uint32_t gdn_conv_elem_size,
+    uint32_t gdn_ssm_elem_size,
+    std::vector<size_t> conv_state_shape,
+    std::vector<size_t> ssm_state_shape,
+    std::vector<size_t> gdn_conv_channel_dims) {
+
+  assert(block_sizes.size() == token_sizes.size());
+  for (size_t i = 0; i < block_sizes.size(); i++) {
+    assert(block_sizes[i] % token_sizes[i] == 0);
+  }
+
+  auto context = std::make_unique<Context>(inst_name, worker_id);
+  context->set_tp(tp_size, worker_tp_rank);
+
+  std::vector<std::vector<LayerInfo>> all_layer_infos;
+  for (auto layer: layers) {
+    std::vector<LayerInfo> layer_infos;
+    for (auto tensor_addr: layer) {
+      auto layer_info = LayerInfo(token_sizes[layer_infos.size()], block_sizes[layer_infos.size()], tensor_addr);
+      layer_infos.emplace_back(std::move(layer_info));
+    }
+    all_layer_infos.emplace_back(std::move(layer_infos));
+  }
+
+  context->set_block_params(block_sizes, token_sizes, layer_num_blocks, indexer_blk_ntpb);
+  context->set_layer_info(device_id, all_layer_infos);
+
+  auto* wi = context->worker_info_mutable();
+  wi->num_kv_heads = num_kv_heads;
+  wi->num_gdn_layers = num_gdn_layers;
+  wi->hybrid_indexer_token_size = hybrid_indexer_token_size;
+  wi->gdn_conv_elem_size = gdn_conv_elem_size;
+  wi->gdn_ssm_elem_size = gdn_ssm_elem_size;
+  wi->conv_state_shape = std::move(conv_state_shape);
+  wi->ssm_state_shape = std::move(ssm_state_shape);
+  wi->gdn_conv_channel_dims = std::move(gdn_conv_channel_dims);
+
+  return context;
+}
+
 void init_kv_transfer_client(const std::string &inst_name,
                              uint32_t tp_size,
                              uint32_t worker_id,
@@ -46,47 +100,38 @@ void init_kv_transfer_client(const std::string &inst_name,
                              const std::string &naming_url,
                              const std::vector<uint64_t> &events,
                              const std::vector<std::vector<uint64_t>> &layers,
-                             const std::vector<TransferProtocol> &protocols) {
+                             const std::vector<TransferProtocol> &protocols,
+                             int num_kv_heads,
+                             uint32_t num_gdn_layers,
+                             uint32_t indexer_blk_ntpb,
+                             uint32_t hybrid_indexer_token_size,
+                             uint32_t gdn_conv_elem_size,
+                             uint32_t gdn_ssm_elem_size,
+                             std::vector<size_t> conv_state_shape,
+                             std::vector<size_t> ssm_state_shape,
+                             std::vector<size_t> gdn_conv_channel_dims) {
 
   if (KV_CLIENT == nullptr) {
-    auto validranks = env_p_valid_ranks();
-    RTASSERT(tp_size <= validranks.size());
-    validranks <<= (validranks.size() - tp_size);
-    validranks >>= (validranks.size() - tp_size);
-    RTASSERT(validranks.count() <= tp_size);
+    const uint32_t engine_tp_size = tp_size;
 
-    std::string original_tp_size_str = std::to_string(tp_size);
-    setenv("BLLM_KVTRANS_ORIGIN_P_TP_SIZE", original_tp_size_str.c_str(), 1);
-
-    if (validranks.count() < tp_size) {
-      LOG(INFO) << "InitKvtClient: tp_size changes: old=" << tp_size << ";new=" << validranks.count();
-      tp_size = validranks.count();
-    }
-    assert(block_sizes.size() == token_sizes.size());
-    for (size_t i = 0; i < block_sizes.size(); i++) {
-      assert(block_sizes[i] % token_sizes[i] == 0);
-    }
     LOG(INFO) << "KVT: init kv client for worker(" << inst_name << ":" << worker_id << ") at " << inst_name;
-    auto context = std::make_unique<Context>(inst_name, worker_id);
-    context->set_tp(tp_size, worker_tp_rank);
+    auto context = create_context(inst_name, tp_size, worker_id, worker_tp_rank,
+                                  device_id, block_sizes, token_sizes,
+                                  layer_num_blocks, indexer_blk_ntpb, layers,
+                                  num_kv_heads, num_gdn_layers,
+                                  hybrid_indexer_token_size,
+                                  gdn_conv_elem_size, gdn_ssm_elem_size,
+                                  std::move(conv_state_shape),
+                                  std::move(ssm_state_shape),
+                                  std::move(gdn_conv_channel_dims));
 
-    std::vector<std::vector<LayerInfo>> all_layer_infos;
-    for (auto layer: layers){ // each layer
-      std::vector<LayerInfo> layer_infos;
-      for(auto tensor_addr: layer){ // each cache tensor of each layer
-        auto layer_info = LayerInfo(token_sizes[layer_infos.size()], block_sizes[layer_infos.size()], tensor_addr);
-        layer_infos.emplace_back(std::move(layer_info));
-      }
-      all_layer_infos.emplace_back(std::move(layer_infos));
-    }
-
-    context->set_block_params(block_sizes, token_sizes, layer_num_blocks);
-    context->set_layer_info(device_id, all_layer_infos);
     context->set_cuda_barrier(std::make_unique<CudaEventBarrier>(events));
+    auto* wi = context->worker_info_mutable();
+    wi->engine_tp_size = engine_tp_size;
+
     auto naming_client = NAMING_MANAGER->connect_naming(inst_name, naming_url);
     auto stub_factory = std::make_unique<KvSendStubFactory>(context.get(), std::move(naming_client));
     KV_CLIENT = KvTransferClient::create(std::move(context), protocols, std::move(stub_factory));
-    // disable auto connect after python runtime ready;
     KV_CLIENT->enable_auto_connect();
     auto* ctx = KV_CLIENT->context();
     auto* worker_info = ctx->worker_info_mutable();
@@ -119,8 +164,8 @@ void submit_req_send2(std::string dst_inst_name,
                       uint32_t seen_tokens,
                       uint32_t new_tokens,
                       bool has_last_token,
-                      std::vector<uint32_t> src_block_ids,
-                      std::vector<uint32_t> dst_block_ids,
+                      BlockIds src_block_ids,
+                      BlockIds dst_block_ids,
                       std::optional<std::string> dst_worker_info = std::nullopt) {
   if (KV_CLIENT != nullptr) {
     KV_CLIENT->submit_req_send(std::move(dst_inst_name),
@@ -142,8 +187,8 @@ void submit_req_send(std::string dst_inst_name,
                      std::string req_id,
                      uint32_t new_tokens,
                      bool has_last_token,
-                     std::vector<uint32_t> src_block_ids,
-                     std::vector<uint32_t> dst_block_ids) {
+                     BlockIds src_block_ids,
+                     BlockIds dst_block_ids) {
   return submit_req_send2(std::move(dst_inst_name), dst_worker_id,
                           std::move(req_id), 0, new_tokens, has_last_token,
                           std::move(src_block_ids),
@@ -205,28 +250,26 @@ void init_kv_transfer_server(const std::string &inst_name,
                              uint32_t layer_num_blocks,
                              const std::string &naming_url,
                              const std::vector<std::vector<uint64_t>> &layers,
-                             const std::vector<TransferProtocol> &protocols) {
+                             const std::vector<TransferProtocol> &protocols,
+                             int num_kv_heads,
+                             uint32_t num_gdn_layers,
+                             uint32_t indexer_blk_ntpb,
+                             uint32_t hybrid_indexer_token_size,
+                             uint32_t gdn_conv_elem_size,
+                             uint32_t gdn_ssm_elem_size,
+                             std::vector<size_t> conv_state_shape,
+                             std::vector<size_t> ssm_state_shape,
+                             std::vector<size_t> gdn_conv_channel_dims) {
   if (KV_SERVER == nullptr) {
-    auto context = std::make_unique<Context>(inst_name, worker_id);
-    context->set_tp(tp_size, worker_tp_rank);
-
-    assert(block_sizes.size() == token_sizes.size());
-    for (size_t i = 0; i < block_sizes.size(); i++) {
-      assert(block_sizes[i] % token_sizes[i] == 0);
-    }
-
-    std::vector<std::vector<LayerInfo>> all_layer_infos;
-    for (auto layer: layers){ // each layer
-      std::vector<LayerInfo> layer_infos;
-      for(auto tensor_addr: layer){ // each cache tensor of each layer
-        auto layer_info = LayerInfo(token_sizes[layer_infos.size()], block_sizes[layer_infos.size()], tensor_addr);
-        layer_infos.emplace_back(std::move(layer_info));
-      }
-      all_layer_infos.emplace_back(std::move(layer_infos));
-    }
-
-    context->set_block_params(block_sizes, token_sizes, layer_num_blocks);
-    context->set_layer_info(device_id, all_layer_infos);
+    auto context = create_context(inst_name, tp_size, worker_id, worker_tp_rank,
+                                  device_id, block_sizes, token_sizes,
+                                  layer_num_blocks, indexer_blk_ntpb, layers,
+                                  num_kv_heads, num_gdn_layers,
+                                  hybrid_indexer_token_size,
+                                  gdn_conv_elem_size, gdn_ssm_elem_size,
+                                  std::move(conv_state_shape),
+                                  std::move(ssm_state_shape),
+                                  std::move(gdn_conv_channel_dims));
 
     if (protocols.size() > 1) {
       throw std::runtime_error("multi-protocols server not support temporarily");
@@ -365,7 +408,21 @@ PYBIND11_MODULE(kvtransfer_ops, m) {
 
   m.def("connect_naming", &blade_llm::connect_naming, "connect to naming service;");
   // client
-  m.def("init_kv_transfer_client", &blade_llm::init_kv_transfer_client, "init kv transfer client;");
+  m.def("init_kv_transfer_client", &blade_llm::init_kv_transfer_client, "init kv transfer client;",
+      py::arg("inst_name"), py::arg("tp_size"), py::arg("worker_id"),
+      py::arg("worker_tp_rank"), py::arg("device_id"),
+      py::arg("block_sizes"), py::arg("token_sizes"),
+      py::arg("layer_num_blocks"), py::arg("naming_url"),
+      py::arg("events"), py::arg("layers"), py::arg("protocols"),
+      py::arg("num_kv_heads") = -1,
+      py::arg("num_gdn_layers") = 3,
+      py::arg("indexer_blk_ntpb") = 0,
+      py::arg("hybrid_indexer_token_size") = 0,
+      py::arg("gdn_conv_elem_size") = 1,
+      py::arg("gdn_ssm_elem_size") = 1,
+      py::arg("conv_state_shape") = std::vector<size_t>{},
+      py::arg("ssm_state_shape") = std::vector<size_t>{},
+      py::arg("gdn_conv_channel_dims") = std::vector<size_t>{});
   m.def("add_target", &blade_llm::add_target, "add target to kv client;");
   m.def("submit_req_send", &blade_llm::submit_req_send, "submit kv send to kv client;");
   m.def("submit_req_send2", &blade_llm::submit_req_send2, "submit kv send to kv client;");
@@ -376,7 +433,21 @@ PYBIND11_MODULE(kvtransfer_ops, m) {
   m.def("flush_send", &blade_llm::flush_send, "check if all kv send tasks are done;");
   m.def("check_transfer_done", &blade_llm::check_transfer_done, "check if all kv data of a request are sent;");
   // server
-  m.def("init_kv_transfer_server", &blade_llm::init_kv_transfer_server, "init kv transfer server;");
+  m.def("init_kv_transfer_server", &blade_llm::init_kv_transfer_server, "init kv transfer server;",
+      py::arg("inst_name"), py::arg("tp_size"), py::arg("worker_id"),
+      py::arg("worker_tp_rank"), py::arg("device_id"),
+      py::arg("block_sizes"), py::arg("token_sizes"),
+      py::arg("layer_num_blocks"), py::arg("naming_url"),
+      py::arg("layers"), py::arg("protocols"),
+      py::arg("num_kv_heads") = -1,
+      py::arg("num_gdn_layers") = 3,
+      py::arg("indexer_blk_ntpb") = 0,
+      py::arg("hybrid_indexer_token_size") = 0,
+      py::arg("gdn_conv_elem_size") = 1,
+      py::arg("gdn_ssm_elem_size") = 1,
+      py::arg("conv_state_shape") = std::vector<size_t>{},
+      py::arg("ssm_state_shape") = std::vector<size_t>{},
+      py::arg("gdn_conv_channel_dims") = std::vector<size_t>{});
   m.def("submit_req_recv", &blade_llm::submit_req_recv, "submit kv recv task to kv server;");
   m.def("check_recv_done", &blade_llm::check_recv_done, "check if all kv data of a request are received;");
   // common
