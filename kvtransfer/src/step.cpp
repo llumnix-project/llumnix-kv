@@ -5,38 +5,6 @@
 
 namespace blade_llm {
 
-
-static std::ostream& operator<<(std::ostream& os, const StepMetrics& self) {
-  auto US = [] (uint64_t ns) {
-    return ns / 1000.0;
-  };
-
-  const auto send_stub_cnt = self.send_stub_cnt_.load(std::memory_order_relaxed);
-  os << std::fixed << std::setprecision(3) << "PythonExecTimeUs=" << US(self.python_exec_ns)
-     << ",WaitLayersQueueUs=" << US(self.wait_layers_queue_ns)
-     << ",WaitLayersExecUs=" << US(self.wait_layers_exec_ns)
-     << ",SendStubCnt=" << send_stub_cnt
-     << ",SendQueueUs(min|max|avg)" << US(self.send_queue_ns.min()) << '|'
-     << US(self.send_queue_ns.max()) << '|'
-     << US(self.send_queue_ns.avg(send_stub_cnt))
-     << ",SendWaitDataUs(min|max|avg)" << US(self.send_wait_data_ns.min()) << '|'
-     << US(self.send_wait_data_ns.max()) << '|'
-     << US(self.send_wait_data_ns.avg(send_stub_cnt))
-     << ",SendNonOverlapUs(min|max|avg)" << US(self.send_non_overlay_ns.min()) << '|'
-     << US(self.send_non_overlay_ns.max()) << '|'
-     << US(self.send_non_overlay_ns.avg(send_stub_cnt))
-     << ",SendNotifyUs(min|max|avg)" << US(self.send_notification_ns.min()) << '|'
-     << US(self.send_notification_ns.max()) << '|'
-     << US(self.send_notification_ns.avg(send_stub_cnt))
-     << ",SendFinishedReq(min|max|total)" << self.send_finished_req_n.min() << '|'
-     << self.send_finished_req_n.max() << '|'
-     << self.send_finished_req_n.total()
-     << ",SendDataSize(min|max|total)" << self.send_data_size.min() << '|'
-     << self.send_data_size.max() << '|'
-     << self.send_data_size.total();
-  return os;
-}
-
 Step::~Step() noexcept {
   // When step is destructed, all related activities are finished; emit metrics here.
   auto& self = *this;

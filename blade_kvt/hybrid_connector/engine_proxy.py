@@ -246,7 +246,7 @@ def handle_hybrid_blocks(
 def get_p_node_pop_len(vllm_config: VllmConfig) -> int:
     pop_len = 1
     # We enable the logic only for hybrid models at current time, as it breaks
-    # normal P/D for other models, both offline and on dash.
+    # normal P/D for other models, both offline and in dual-request mode.
     if (vllm_config.model_config.is_hybrid
         and vllm_config.speculative_config
         and vllm_config.speculative_config.num_speculative_tokens

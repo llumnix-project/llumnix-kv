@@ -35,24 +35,6 @@
 
 namespace blade_llm {
 
-size_t get_encode_size(const InstanceId &inst_id,
-                       uint32_t worker_id,
-                       const std::string &reqid,
-                       const std::vector<uint32_t> &block_id);
-
-void encode_notification(char *ptr,
-                         const InstanceId &inst_id,
-                         uint32_t worker_id,
-                         const std::string &reqid,
-                         const std::vector<uint32_t> &block_ids);
-
-bool decode_notification(const char *ptr,
-                         size_t len,
-                         InstanceId &inst_id,
-                         uint32_t &worker_id,
-                         std::string &req_id,
-                         std::vector<uint32_t> &block_ids);
-
 #ifdef ENABLE_RDMA
 struct XMempoolDeleter {
   void operator()(accl::barex::XSimpleMempool *mp);
@@ -283,9 +265,7 @@ class RDMAChannel : public IChannel, public noncopyable {
 
   void send_data(size_t layer_index) override;
   void flush(std::string& out) override;
-  void send_notification(const std::vector<const ReqSendTask*>& reqs) override;
   bool is_active() override;
-  using IChannel::send_notification;
 
  private:
   // do real connect.
@@ -328,15 +308,13 @@ class RDMAChannel : public IChannel, public noncopyable {
 
 class RDMAServer : public ITransferServer {
  public:
-  void start_server(ITransferService *service, Context *ctx) override;
+  void start_server(Context *ctx) override;
 
  private:
   class CtxCallback : public accl::barex::XChannelCallback {
-    ITransferService* const ser_ = nullptr;   // owner: KV_SERVICE
     const RDMAServer* const server_ = nullptr;   // owner: KV_SERVER
    public:
-    CtxCallback(ITransferService *s, RDMAServer* v) noexcept:
-      ser_(s), server_(v) {}
+    explicit CtxCallback(RDMAServer* v) noexcept: server_(v) {}
 
     void OnRecvCall(accl::barex::XChannel *channel,
                     char *in_buf,
@@ -357,7 +335,7 @@ class RDMAServer : public ITransferServer {
 
  private:
   RDMAInfo info_;
-  BarexCtx* ctx_ = nullptr;  // OWNER: KvTransferService.ctx_
+  BarexCtx* ctx_ = nullptr;
   std::unique_ptr<accl::barex::XListener, XListenerDeleter> listener_;
 };
 

@@ -92,7 +92,6 @@ class KvTransferClient : public noncopyable {
   void notify_event_record(size_t step_id);
   void flush_send(size_t step_id);
 
-  ReqState check_transfer_done(const RequestId &);
   Context *context() { return ctx_.get(); };
   void enable_auto_connect() { auto_connect_ = true; }
 
@@ -173,7 +172,6 @@ class KvTransferClient : public noncopyable {
     TargetMgr(const TargetMgr&) = delete;
   };
  private:
-  const bool auto_remove_req_;
   bool auto_connect_{false};
   size_t step_id_{0};
   std::atomic<size_t> fast_step_id_{UINT64_MAX};

@@ -4,7 +4,6 @@
 #include <cstdlib>
 
 #include "client.h"
-#include "service.h"
 #include "server.h"
 #include "naming.h"
 #include "protocol.h"
@@ -19,7 +18,7 @@ void monitor_init();
 
 static std::unique_ptr<KvTransferClient> KV_CLIENT = nullptr;
 static ITransferServer *KV_SERVER = nullptr;
-static KvTransferService *KV_SERVICE = nullptr;
+static std::unique_ptr<Context> KV_SERVER_CTX = nullptr;
 static std::vector<TransferProtocol> LIBRARY_SUPPORT_TRANSFER_PROTOCOLS;
 static NamingManager *NAMING_MANAGER = new NamingManager();
 
@@ -229,17 +228,6 @@ void flush_send(size_t step_id) {
   }
 }
 
-bool check_transfer_done(const std::string &req_id) {
-  if (KV_CLIENT == nullptr) {
-    throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv client is not initialized");
-  }
-  auto rs = KV_CLIENT->check_transfer_done(req_id);
-  if (rs == ReqState::FAILED) {
-    throw KVTransferException(ErrorKind::INVALID_OPERATION, "send failed");
-  }
-  return rs == ReqState::OK;
-}
-
 void init_kv_transfer_server(const std::string &inst_name,
                              uint32_t tp_size,
                              uint32_t worker_id,
@@ -275,15 +263,15 @@ void init_kv_transfer_server(const std::string &inst_name,
       throw std::runtime_error("multi-protocols server not support temporarily");
     }
 
-    KV_SERVICE = new KvTransferService(std::move(context));
-    auto ctx = KV_SERVICE->get_context();
+    KV_SERVER_CTX = std::move(context);
+    auto ctx = KV_SERVER_CTX.get();
     if (protocols.empty()) {
       auto supported = get_library_support_protocols();
       if (supported.is_support(TransferProtocol::Kind::RDMA_DIRECT)) {
         auto p = TransferProtocol::rdma_direct();
         try {
           KV_SERVER = create_transfer_server(p);
-          KV_SERVER->start_server(KV_SERVICE, ctx);
+          KV_SERVER->start_server(ctx);
           LOG(INFO) << "KVT: start kvtransfer server with protocol: " + p.to_string();
         } catch (const std::exception &e) {
           KV_SERVER = nullptr;
@@ -293,7 +281,7 @@ void init_kv_transfer_server(const std::string &inst_name,
         auto p = TransferProtocol::tcp();
         try {
           KV_SERVER = create_transfer_server(p);
-          KV_SERVER->start_server(KV_SERVICE, ctx);
+          KV_SERVER->start_server(ctx);
           LOG(INFO) << "KVT: start kvtransfer server with protocol: " + p.to_string();
         } catch (const std::exception &e) {
           KV_SERVER = nullptr;
@@ -305,7 +293,7 @@ void init_kv_transfer_server(const std::string &inst_name,
       }
     } else {
       KV_SERVER = create_transfer_server(protocols[0]);
-      KV_SERVER->start_server(KV_SERVICE, ctx);
+      KV_SERVER->start_server(ctx);
     }
     auto* worker_info = ctx->worker_info_mutable();
     worker_info->transfer_protocols = ctx->support_protocols().value();
@@ -314,39 +302,19 @@ void init_kv_transfer_server(const std::string &inst_name,
   monitor_init();
 }
 
-void submit_req_recv(const std::string &src_inst_name,
-                     uint32_t src_worker_id,
-                     const std::string &req_id,
-                     const std::vector<uint32_t> &dst_block_ids) {
-
-  if (KV_SERVICE != nullptr) {
-    KV_SERVICE->submit_recv(src_inst_name, src_worker_id, req_id, dst_block_ids);
-  } else {
-    throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv service is not start");
-  }
-}
-
-bool check_recv_done(const std::string &req_id) {
-  if (KV_SERVICE != nullptr) {
-    return KV_SERVICE->check_recv_done(req_id);
-  } else {
-    throw KVTransferException(ErrorKind::INVALID_OPERATION, "kv service is not start");
-  }
-}
-
 // Empty means not in a kvt environment.
 std::string current_worker_info(const std::string& kind = "any") {
     Context* ctx = nullptr;
 
     if (kind == "client" && KV_CLIENT) {
         ctx = KV_CLIENT->context();
-    } else if (kind == "server" && KV_SERVICE) {
-        ctx = KV_SERVICE->get_context();
+    } else if (kind == "server" && KV_SERVER_CTX) {
+        ctx = KV_SERVER_CTX.get();
     } else if (kind == "any") {
         if (KV_CLIENT) {
             ctx = KV_CLIENT->context();
-        } else if (KV_SERVICE) {
-            ctx = KV_SERVICE->get_context();
+        } else if (KV_SERVER_CTX) {
+            ctx = KV_SERVER_CTX.get();
         }
     }
     if (ctx) {
@@ -431,7 +399,6 @@ PYBIND11_MODULE(kvtransfer_ops, m) {
   m.def("start_send", &blade_llm::start_send, "start to send submitted kv data;");
   m.def("notify_event_record", &blade_llm::notify_event_record, "record kv send events;");
   m.def("flush_send", &blade_llm::flush_send, "check if all kv send tasks are done;");
-  m.def("check_transfer_done", &blade_llm::check_transfer_done, "check if all kv data of a request are sent;");
   // server
   m.def("init_kv_transfer_server", &blade_llm::init_kv_transfer_server, "init kv transfer server;",
       py::arg("inst_name"), py::arg("tp_size"), py::arg("worker_id"),
@@ -448,8 +415,6 @@ PYBIND11_MODULE(kvtransfer_ops, m) {
       py::arg("conv_state_shape") = std::vector<size_t>{},
       py::arg("ssm_state_shape") = std::vector<size_t>{},
       py::arg("gdn_conv_channel_dims") = std::vector<size_t>{});
-  m.def("submit_req_recv", &blade_llm::submit_req_recv, "submit kv recv task to kv server;");
-  m.def("check_recv_done", &blade_llm::check_recv_done, "check if all kv data of a request are received;");
   // common
   m.def("current_worker_info", &blade_llm::current_worker_info, "get current worker info;", py::arg("kind") = "any");
   m.def("lib_support_transfer_protocols", &blade_llm::support_transfer_protocols, "get supported transfer types");

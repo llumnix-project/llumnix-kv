@@ -197,106 +197,7 @@ static void ser_rpc_header(char* buf, uint32_t magic, uint64_t reqid) noexcept {
 // crc: uint32_t
 static constexpr uint32_t REMOTE_CRC_REQ_MAGIC = 0x20250924;
 
-static constexpr uint32_t SEND_MAGIC = 0x53456e64; /* SEnd */
-
 static constexpr uint32_t KV_CACHE_DATA_MAGIC = 0x4B564361;  /* KVCa (KV Cache data) */
-
-// magic, inst_id_len, worker_id, num_block are all 4 bytes.
-// num_block specifies the number of blocks in block_ids, each block is 4 bytes.
-// reqid is a null-terminated C string.
-// +-------+-------------+-----------+-----------+---------+-----------+-------+
-// | magic | inst_id_len | worker_id | num_block | inst_id | block_ids | reqid |
-//
-size_t get_encode_size(const InstanceId &inst_id,
-                       uint32_t worker_id,
-                       const std::string &reqid,
-                       const std::vector<uint32_t> &block_ids) {
-  return inst_id.size() + 4 * sizeof(uint32_t) + block_ids.size() * sizeof(uint32_t) + reqid.size() + 1;
-}
-
-void encode_notification(char *ptr,
-                         const InstanceId &inst_id,
-                         uint32_t worker_id,
-                         const std::string &reqid,
-                         const std::vector<uint32_t> &block_ids) {
-  const uint32_t num_block = block_ids.size();
-  const uint32_t magic = SEND_MAGIC;
-
-  memcpy(ptr, &magic, sizeof(magic));
-  ptr += sizeof(magic);
-  uint32_t inst_id_len = inst_id.size();
-  memcpy(ptr, &inst_id_len, sizeof(inst_id_len));
-  ptr += sizeof(inst_id_len);
-  memcpy(ptr, &worker_id, sizeof(worker_id));
-  ptr += sizeof(worker_id);
-  memcpy(ptr, &num_block, sizeof(num_block));
-  ptr += sizeof(num_block);
-  memcpy(ptr, inst_id.data(), inst_id_len);
-  ptr += inst_id_len;
-
-  memcpy(ptr, block_ids.data(), num_block * sizeof(uint32_t));
-  ptr += num_block * sizeof(uint32_t);
-
-  // *(s.begin() + s.size()) has value CharT() (a null terminator)
-  memcpy(ptr, reqid.data(), reqid.size() + 1);
-  return;
-}
-
-bool decode_notification(const char *in_buf,
-                         size_t len,
-                         InstanceId &inst_id,
-                         uint32_t &worker_id,
-                         std::string &req_id,
-                         std::vector<uint32_t> &block_ids) {
-  if (len < sizeof(uint32_t) * 4) {
-    // bad data, ignore.
-    return false;
-  }
-  const char *const end_buf = in_buf + len;
-  uint32_t inst_id_len;
-  uint32_t magic, num_block;
-  memcpy(&magic, in_buf, sizeof(uint32_t));
-  in_buf += sizeof(uint32_t);
-  memcpy(&inst_id_len, in_buf, sizeof(uint32_t));
-  in_buf += sizeof(uint32_t);
-  memcpy(&worker_id, in_buf, sizeof(uint32_t));
-  in_buf += sizeof(uint32_t);
-  memcpy(&num_block, in_buf, sizeof(uint32_t));
-  in_buf += sizeof(uint32_t);
-  if (magic != SEND_MAGIC) {
-    // bad data, ignore
-    LOG(ERROR) << "KVT RDMA: unrecognized messages;";
-    return false;
-  }
-
-  inst_id.resize(inst_id_len);
-  memcpy(inst_id.data(), in_buf, inst_id_len);
-  in_buf += inst_id_len;
-
-  size_t expected_len = sizeof(uint32_t) * (4 + num_block) + 1 + inst_id_len;
-  if (len < expected_len) {
-    // +1 for reqid null terminator
-    // bad data, ignore.
-    LOG(ERROR) << "KVT RDMA: unexpected message, expect size: " << expected_len << " actual: " << len;
-    return false;
-  }
-
-  block_ids.resize(num_block);
-  memcpy(block_ids.data(), in_buf, num_block * sizeof(uint32_t));
-  in_buf += num_block * sizeof(uint32_t);
-
-  const char *reqid = in_buf;
-  size_t reqid_len = end_buf - in_buf;
-  assert(reqid_len >= 1);
-  reqid_len -= 1;
-  if (reqid[reqid_len] != '\0') {
-    // bad data, ignore
-    LOG(ERROR) << "KVT RDMA: unexpected eof of request id;";
-    return false;
-  }
-  req_id = std::string(reqid, reqid_len);
-  return true;
-}
 
 #ifdef ENABLE_RDMA
 
@@ -1235,15 +1136,7 @@ void RDMAServer::CtxCallback::OnRecvCall(std::shared_ptr<XChannel> ch, char *in_
     }
   }
 
-  InstanceId inst_id;
-  uint32_t worker_id;
-  std::string req_id;
-  std::vector<uint32_t> block_ids;
-
-  if (decode_notification(in_buf, len, inst_id, worker_id, req_id, block_ids)) {
-    // OnRecvCall is invoked in the barex thread pool. Beware of data races.
-    this->ser_->on_recv(inst_id, worker_id, req_id, std::move(block_ids));
-  }
+  // No longer need to handle notification callbacks - using event-based mechanism now
   return;
 }
 
@@ -1306,15 +1199,12 @@ static void get_ip(char *info_ip, size_t bufcap) {
   return;
 }
 
-void RDMAServer::start_server(ITransferService *service, Context *ctx) {
+void RDMAServer::start_server(Context *ctx) {
   auto &self = *this;
   RDMAInfo& info = self.info_;
-  if (service == nullptr) {
-    throw std::runtime_error("KvTransferService should not be null;");
-  }
   auto rdma_ctx = BarexProtoContext::server_context(
-    "KVTServer", 
-    std::make_unique<CtxCallback>(service, this),
+    "KVTServer",
+    std::make_unique<CtxCallback>(this),
     TransferProtocol::Kind::RDMA_DIRECT
   );
   if (!rdma_ctx->check_support()) {
@@ -1883,38 +1773,6 @@ void RDMAChannel::flush(std::string &outstr) {
   return;
 }
 
-void RDMAChannel::send_notification(
-    const std::vector<const ReqSendTask *> &reqs) {
-  auto &self = *this;
-
-  assert(self.send_futs_.empty());
-  self.send_futs_.reserve(reqs.size());
-
-  for (const auto *r : reqs) {
-    assert(r->state() != ReqState::INPROCESS);
-    if (r->state() != ReqState::OK) {
-      continue;
-    }
-
-    const auto &reqid = r->req_id();
-    const auto &block_ids = r->dst_blocks();
-    // See RDMAServer::CtxCallback::OnRecvCall for encoding rules
-    auto const msglen = get_encode_size(src_inst_id_, src_worker_id_, reqid, block_ids);
-    auto& use_ch = self.sch();
-    assert(use_ch->GetMempool() == self.ctx_->mp());
-    auto bufmr = AllocCPUBuffer(use_ch, msglen);
-    encode_notification(bufmr.buf, self.src_inst_id_, self.src_worker_id_,
-                        reqid, block_ids);
-
-    auto fut = Send(use_ch, std::move(bufmr));
-    self.send_futs_.emplace_back(std::move(fut));
-  }
-
-  when_all_succeed(self.send_futs_);
-  self.send_futs_.clear();
-  return;
-}
-
 bool BarexProtoContext::check_support() {
   try {
     XDeviceManager *manager = nullptr;
@@ -2049,15 +1907,12 @@ cudaStream_t TCPChannel::get_d2h_stream() {
   return g_copy_kernel_ctx.get_d2h_stream();
 }
 
-void TCPServer::start_server(ITransferService *service, Context *ctx) {
+void TCPServer::start_server(Context *ctx) {
   auto &self = *this;
   TCPInfo& info = self.info_;
-  if (service == nullptr) {
-    throw std::runtime_error("KvTransferService should not be null;");
-  }
   auto tcp_ctx = BarexProtoContext::server_context(
-    "KVTServer", 
-    std::make_unique<CtxCallback>(service, this),
+    "KVTServer",
+    std::make_unique<CtxCallback>(this),
     TransferProtocol::Kind::TCP
   );
   if (!tcp_ctx->check_support()) {
@@ -2683,10 +2538,6 @@ void TCPChannel::flush(std::string& outstr) {
       << ",OnRecvQueueUsMax=" << onrecv_queue_us_max
       << ",OnRecvQueueUsAvg=" << onrecv_queue_us_total / float(inflyn);
   outstr = std::move(out).str();
-  return;
-}
-
-void TCPChannel::send_notification(const std::vector<const ReqSendTask*>& reqs) {
   return;
 }
 

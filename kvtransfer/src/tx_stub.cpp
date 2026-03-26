@@ -1206,15 +1206,8 @@ private:
 
   void send_done(const std::vector<const ReqSendTask*>& reqs) {
     auto& self = *this;
-    if (self.send_done_addr == nullptr) {
-      // channel send done, used in bladellm
-      if (self.ch) {
-        self.ch->send_notification(self.finished_req);
-      }
-    } else {
-      // rpc send done, used in vllm
-      self.rpc_send_done(self.finished_req);
-    }
+    // env_send_done_addr() is always non-null, use rpc send done
+    self.rpc_send_done(self.finished_req);
     return;
   }
 

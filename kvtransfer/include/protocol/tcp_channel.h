@@ -60,9 +60,7 @@ class TCPChannel : public IChannel, public noncopyable {
   void register_data(std::vector<std::vector<IpcBlock>>& data, TPKind kind) override;
   void send_data(size_t layer_index) override;
   void flush(std::string& out) override;
-  void send_notification(const std::vector<const ReqSendTask*>& reqs) override;
   bool is_active() override;
-  using IChannel::send_notification;
 
  private:
   // Get thread-local CUDA stream for D2H copy, lazily created on first use
@@ -112,16 +110,14 @@ struct TCPInfo {
 
 class TCPServer: public ITransferServer {
  public:
-  void start_server(ITransferService *service, Context *ctx) override;
+  void start_server(Context *ctx) override;
 
  private:
   class CtxCallback : public accl::barex::XChannelCallback {
-    ITransferService* const ser_ = nullptr;   // owner: KV_SERVICE
     TCPServer* const server_ = nullptr;   // owner: KV_SERVER
 
    public:
-    CtxCallback(ITransferService *s, TCPServer* v) noexcept:
-        ser_(s), server_(v) {}
+    explicit CtxCallback(TCPServer* v) noexcept: server_(v) {}
 
     void OnRecvCall(accl::barex::XChannel *channel,
                     char *in_buf,
@@ -146,10 +142,9 @@ class TCPServer: public ITransferServer {
 
  private:
   TCPInfo info_;
-  BarexCtx* ctx_ = nullptr;  // OWNER: KvTransferService.ctx_
-  uint32_t num_layers_ = 0;  // OWNER: KvTransferService.ctx (for num_layers access)
+  BarexCtx* ctx_ = nullptr;
+  uint32_t num_layers_ = 0;
   std::unique_ptr<accl::barex::XListener, XListenerDeleter> listener_;
-  // accl::barex::XThreadpool* sync_thread_pool_ = nullptr; // Thread pool for async CUDA stream synchronization
 };
 
 }
