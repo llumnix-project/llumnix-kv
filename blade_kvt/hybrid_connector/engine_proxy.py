@@ -172,13 +172,12 @@ def req2corereq(req: Request) -> EngineCoreRequest:
     # just make mypy happy~
     if req.sampling_params and req.sampling_params.extra_args is not None:
         req.sampling_params.extra_args["kv_transfer_params"] = None
-    return EngineCoreRequest(
+    ret = EngineCoreRequest(
         request_id=req.request_id,
         prompt_token_ids=req.prompt_token_ids,
         mm_features=req.mm_features,
         sampling_params=req.sampling_params,
         pooling_params=req.pooling_params,
-        eos_token_id=req.eos_token_id,
         arrival_time=req.arrival_time,
         lora_request=req.lora_request,
         cache_salt=req.cache_salt,
@@ -188,6 +187,12 @@ def req2corereq(req: Request) -> EngineCoreRequest:
         trace_headers=req.trace_headers,
         queue_server_address=req.queue_server_address,
     )
+
+    if hasattr(ret, "eos_token_id"):
+        from .hybrid_modules import _get_eos_token_id
+        ret.eos_token_id = _get_eos_token_id(req)
+    
+    return ret
 
 
 def core_abort_req(reqid: str, reason: str, output: bool):

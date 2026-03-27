@@ -351,12 +351,22 @@ class AbortReq:
     reason: str
 
 
+def _get_eos_token_id(req: Request) -> int:
+    if hasattr(req, "eos_token_id"):
+        return req.eos_token_id
+
+    if req.sampling_params is not None and hasattr(req.sampling_params, "eos_token_id"):
+        return req.sampling_params.eos_token_id or 0
+
+    return 0
+
+
 def _put_abort_resp(
     load_output: defaultdict[int, list[EngineCoreOutput]], req: Request
 ):
     load_output[req.client_index].append(
         EngineCoreOutput(request_id=req.request_id,
-                         new_token_ids=[req.eos_token_id or 0],
+                         new_token_ids=[_get_eos_token_id(req)],
                          finish_reason=FinishReason.ABORT,
                          queue_server_address=req.queue_server_address))
     return
@@ -658,7 +668,7 @@ class HybridScheduler:
                 logger.info(
                     "abort req. areq=%s eos=%s status=%s totaltokens=%s",
                     areq,
-                    req.eos_token_id,
+                    _get_eos_token_id(req),
                     req.status,
                     len(req.all_token_ids),
                 )
