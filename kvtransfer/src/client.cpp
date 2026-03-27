@@ -3,7 +3,7 @@
 #include "naming.h"
 #include "thrid_party/logging.h"
 #include "utils/timer.h"
-#include "protocol/rdma_protocol.h"
+#include "protocol/barex_protocol.h"
 #include "envcfg.h"
 #include "fault_inject.h"
 #include <accl/barex/xthreadpool.h>
@@ -171,7 +171,6 @@ auto KvTransferClient::TargetMgr::create(
 
 KvTransferClient::KvTransferClient(std::unique_ptr<Context> &&ctx,
                                    std::unique_ptr<ISendStubFactory> &&factory) :
-    auto_remove_req_(env_send_done_addr() != nullptr),
     ctx_(std::move(ctx)),
     single_thd_(env_waitlayer_tpsize()),
     mgr_(ctx_.get(), std::move(factory)) {
@@ -263,7 +262,6 @@ static void add_send_task(StepTasks& steptasks, std::shared_ptr<RequestInfo> req
 // thread safe
 void KvTransferClient::start_req_send(std::vector<ReqMeta>& metas) {
   auto& self = *this;
-  assert(self.auto_remove_req_);
   const auto step_id = self.fast_step_id_.fetch_sub(1, std::memory_order_relaxed);
 
   StepTasks steptasks;
@@ -305,8 +303,8 @@ void KvTransferClient::submit_req_send(InstanceId dst_inst_name,
                                        uint32_t seen_tokens,
                                        uint32_t new_tokens,
                                        bool has_last_token,
-                                       std::vector<uint32_t> src_block_ids,
-                                       std::vector<uint32_t> dst_block_ids,
+                                       BlockIds src_block_ids,
+                                       BlockIds dst_block_ids,
                                        std::optional<std::string> dst_worker_info) {
 
   if (new_tokens <= 0) {
@@ -322,7 +320,7 @@ void KvTransferClient::submit_req_send(InstanceId dst_inst_name,
                                                 std::move(dst_block_ids));
   add_send_task(targets_tasks_buf_, req_info, seen_tokens, new_tokens, has_last_token);
   const auto* reqp = req_info.get();
-  if (!auto_remove_req_ || !has_last_token) {
+  if (!has_last_token) {
     reqs_[req_info->req_id].emplace_back(std::move(req_info));
   }
   LOG(INFO) << "submit_req_send:step=" << step_id_ << ";req_id=" << reqp->req_id
@@ -351,7 +349,7 @@ void KvTransferClient::submit_delta_send(const RequestId &req_id,
               << ";has_last_token=" << has_last_token;
   }
 
-  if (has_last_token && auto_remove_req_) {
+  if (has_last_token) {
     reqs_.erase(r);
   }
 }
@@ -402,26 +400,5 @@ void KvTransferClient::flush_send(size_t step_id) {
   last_step_guard_->step()->flush_send_ts = SteadyClock::now();
 
   last_step_guard_.reset();
-}
-
-ReqState KvTransferClient::check_transfer_done(const RequestId &req_id) {
-  assert(!auto_remove_req_);
-  auto r = reqs_.find(req_id);
-  if (r == reqs_.end()) {
-    return ReqState::OK;
-  }
-
-  ReqState ret = ReqState::OK;
-  for (const auto &req : r->second) {
-    auto rs = req->state();
-    if (rs == ReqState::INPROCESS) {
-      return ReqState::INPROCESS;
-    }
-    if (rs == ReqState::FAILED) {
-      ret = ReqState::FAILED;
-    }
-  }
-  reqs_.erase(r);
-  return ret;
 }
 }

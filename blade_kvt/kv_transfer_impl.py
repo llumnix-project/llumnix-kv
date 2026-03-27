@@ -1,6 +1,6 @@
 import enum
 import os
-from typing import List, Optional, Set, Union
+from typing import List, Optional, Union
 
 import torch
 import logging
@@ -9,8 +9,6 @@ import logging
 from blade_kvt.kvtransfer_ops import (
     TransferProtocol,
     add_target,
-    check_recv_done,
-    check_transfer_done,
     flush_send,
     init_kv_transfer_client,
     init_kv_transfer_server,
@@ -18,7 +16,6 @@ from blade_kvt.kvtransfer_ops import (
     notify_event_record,
     start_send,
     submit_delta_send,
-    submit_req_recv,
     submit_req_send2,
     start_req_send,
     ReqMeta,
@@ -86,6 +83,15 @@ class KVTransferClient:
         naming_url: str,
         layers: Union[List[List[torch.Tensor]], List[torch.Tensor]],
         protocols: List[KVTransferProtocolType],
+        num_kv_heads: int = -1,
+        num_gdn_layers: int = 3,
+        indexer_blk_ntpb: int = 0,
+        hybrid_indexer_token_size: int = 0,
+        gdn_conv_elem_size: int = 1,
+        gdn_ssm_elem_size: int = 1,
+        conv_state_shape: Optional[List[int]] = None,
+        ssm_state_shape: Optional[List[int]] = None,
+        gdn_conv_channel_dims: Optional[List[int]] = None,
     ):
         """
         Create and init a client used to send kv cache data to remote instances;
@@ -159,10 +165,20 @@ class KVTransferClient:
             self._event_addrs,
             layer_addrs,
             ops_protocols,
+            num_kv_heads=num_kv_heads,
+            num_gdn_layers=num_gdn_layers,
+            indexer_blk_ntpb=indexer_blk_ntpb,
+            hybrid_indexer_token_size=hybrid_indexer_token_size,
+            gdn_conv_elem_size=gdn_conv_elem_size,
+            gdn_ssm_elem_size=gdn_ssm_elem_size,
+            conv_state_shape=conv_state_shape if conv_state_shape is not None else [],
+            ssm_state_shape=ssm_state_shape if ssm_state_shape is not None else [],
+            gdn_conv_channel_dims=gdn_conv_channel_dims if gdn_conv_channel_dims is not None else [],
         )
         self._inited = True
         # None means that start_send is not invoked.
         self._cur_step_id: Optional[int] = None
+        self._worker_tp_rank = worker_tp_rank
 
     def _init_events(self):
         self._events = [torch.cuda.Event() for _ in range(self._num_layers)]
@@ -257,6 +273,11 @@ class KVTransferClient:
         """
         if not self._inited:
             raise RuntimeError("KVTransferClient not inited")
+        if isinstance(src_block_ids, list) and src_block_ids and isinstance(src_block_ids[0], int):
+            # older verson vllm
+            assert isinstance(dst_block_ids, list) and dst_block_ids and isinstance(dst_block_ids[0], int)
+            src_block_ids = [src_block_ids]
+            dst_block_ids = [dst_block_ids]
         submit_req_send2(
             dst_inst_id, dst_worker_id, req_id, seen_tokens, new_tokens, has_last_token, src_block_ids, dst_block_ids, dst_worker_info
         )
@@ -319,28 +340,6 @@ class KVTransferClient:
         flush_send(self._cur_step_id)
         self._cur_step_id = None
 
-    def check_req_transfer_done(self, req_id: str) -> bool:
-        """
-        Check if the request with the specify id has transferred all its kv data to the remote worker;
-        A request may want to transfer its kv data to multiple workers, this function only check the
-        transfer progress to one worker specified by the params.
-
-        Args:
-            req_id(str): id of request;
-
-        Note:
-            Different with the 'check_send_step_done' above, this function check transfer progress for
-            specific request.
-            Returns true if and only if the last token of the request had been submitted to send, and the
-            underlying transfer module make sure all data had been written to remote worker's memory(e.g.
-            received an acknowledgment from remote);
-        """
-
-        if not self._inited:
-            raise RuntimeError("KVTransferClient not inited")
-        is_done = check_transfer_done(req_id)
-        return is_done
-
 
 class KVTransferServer:
     def __init__(
@@ -354,7 +353,15 @@ class KVTransferServer:
         naming_url: str,
         layers: Union[List[List[torch.Tensor]], List[torch.Tensor]],
         protocols: List[KVTransferProtocolType],
-
+        num_kv_heads: int = -1,
+        num_gdn_layers: int = 3,
+        indexer_blk_ntpb: int = 0,
+        hybrid_indexer_token_size: int = 0,
+        gdn_conv_elem_size: int = 1,
+        gdn_ssm_elem_size: int = 1,
+        conv_state_shape: Optional[List[int]] = None,
+        ssm_state_shape: Optional[List[int]] = None,
+        gdn_conv_channel_dims: Optional[List[int]] = None,
     ):
         # older version vllm, should only contain simple model architecture
         if isinstance(block_bytes, int) and isinstance(token_bytes, int):
@@ -411,28 +418,14 @@ class KVTransferServer:
             naming_url,
             layer_addrs,
             ops_protocols,
+            num_kv_heads=num_kv_heads,
+            num_gdn_layers=num_gdn_layers,
+            indexer_blk_ntpb=indexer_blk_ntpb,
+            hybrid_indexer_token_size=hybrid_indexer_token_size,
+            gdn_conv_elem_size=gdn_conv_elem_size,
+            gdn_ssm_elem_size=gdn_ssm_elem_size,
+            conv_state_shape=conv_state_shape if conv_state_shape is not None else [],
+            ssm_state_shape=ssm_state_shape if ssm_state_shape is not None else [],
+            gdn_conv_channel_dims=gdn_conv_channel_dims if gdn_conv_channel_dims is not None else [],
         )
         self._inited = True
-        self._recv_done_reqs: Set[str] = set()
-
-    def submit_req_recv(self, src_inst_id: str, src_worker_id: int, req_id: str, dst_block_ids: List[int]):
-        if not self._inited:
-            raise RuntimeError("KVTransferServer not inited")
-
-        submit_req_recv(src_inst_id, src_worker_id, req_id, dst_block_ids)
-
-    def check_req_transfer_done(self, req_id: str) -> bool:
-        if not self._inited:
-            raise RuntimeError("KVTransferServer not inited")
-
-        if req_id not in self._recv_done_reqs:
-            is_done = check_recv_done(req_id)
-            if is_done:
-                self._recv_done_reqs.add(req_id)
-            return is_done
-        else:
-            return True
-
-    def clear_done_reqs(self, req_external_ids: List[str]):
-        for _req_external_id in req_external_ids:
-            self._recv_done_reqs.remove(_req_external_id)

@@ -6,7 +6,7 @@ using namespace blade_llm;
 
 TEST(CommonTest, TestWorkerInfo) {
   WorkerInfo wi("1234", 4);
-  wi.tp_size = 8;
+  wi.kvt_tp_size = 8;
   wi.worker_tp_rank = 2;
   wi.block_sizes = {1024};
   wi.token_sizes = {128};
@@ -20,7 +20,7 @@ TEST(CommonTest, TestWorkerInfo) {
   auto wii = WorkerInfo::from_bytes(binary.data(), binary.size());
   EXPECT_EQ(wi.inst_id, wii.inst_id);
   EXPECT_EQ(wi.worker_id, wii.worker_id);
-  EXPECT_EQ(wi.tp_size, wii.tp_size);
+  EXPECT_EQ(wi.kvt_tp_size, wii.kvt_tp_size);
   EXPECT_EQ(wi.worker_tp_rank, wii.worker_tp_rank);
   EXPECT_EQ(wi.block_sizes, wii.block_sizes);
   EXPECT_EQ(wi.token_sizes, wii.token_sizes);
@@ -35,7 +35,7 @@ TEST(CommonTest, TestWorkerInfo) {
   auto wiii = WorkerInfo::from_string(str);
   EXPECT_EQ(wi.inst_id, wiii.inst_id);
   EXPECT_EQ(wi.worker_id, wiii.worker_id);
-  EXPECT_EQ(wi.tp_size, wiii.tp_size);
+  EXPECT_EQ(wi.kvt_tp_size, wiii.kvt_tp_size);
   EXPECT_EQ(wi.worker_tp_rank, wiii.worker_tp_rank);
   EXPECT_EQ(wi.block_sizes, wiii.block_sizes);
   EXPECT_EQ(wi.token_sizes, wiii.token_sizes);

@@ -63,6 +63,8 @@ int env_shrink_tpsize();
 static constexpr size_t MAX_TP_SIZE = 64;
 std::bitset<MAX_TP_SIZE> env_p_valid_ranks() noexcept;
 
+int env_attn_kernel_blk_size();
+
 int env_attn_head_num();
 
 int env_gdn_element_size();

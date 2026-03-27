@@ -153,13 +153,28 @@ def sched_get_req(reqid: str) -> Optional[Request]:
     return _sched().requests.get(reqid, None)
 
 
-def sched_get_kvblk_ids(reqid: str, gamma, enable_prefix_caching) -> list[int]:
+def sched_get_kvblk_ids(
+    reqid: str,
+) -> list[list[int]]:
+    """Get KV block IDs for a request.
+    Args:
+        reqid: Request ID
+    Returns:
+        List of block ID lists for each layer group
+    """
     sched = _sched()
-    r = sched.kv_cache_manager.get_block_ids(reqid)
-    # assert (len(r) == 1)
-    has_null_blk = enable_prefix_caching and len(r) > 1
-    concat_ids = merge_hybrid_blocks(r, gamma, has_null_blk)
-    return concat_ids
+    blk_ids = sched.kv_cache_manager.get_block_ids(reqid)
+    return blk_ids
+
+
+def sched_get_finished_req_ids() -> set[str]:
+    """Get finished request ids from scheduler.
+    
+    This is needed in bypass loops where SchedulerOutput.finished_req_ids
+    may be empty but scheduler.finished_req_ids contains requests that
+    need to be processed.
+    """
+    return _sched().finished_req_ids
 
 
 def sched_add_req(req: Request):
@@ -203,20 +218,34 @@ def core_abort_req(reqid: str, reason: str, output: bool):
     return
 
 
-def merge_hybrid_blocks(grouped_blks, gamma=0, has_null_blk=False) -> list[int]:
-    concated_blk_ids = []
-    # Align with AttnSpec order in vllm
-    if has_null_blk:
-        for i in range(len(grouped_blks)-1):
-            blocks = grouped_blks[i]
-            concated_blk_ids.extend(blocks[1:gamma+2])
-    else:
-        for i in range(len(grouped_blks)-1):
-            blocks = grouped_blks[i]
-            assert len(blocks) >= gamma + 1 # may have extra blks for caching
-            concated_blk_ids.extend(blocks[:gamma+1])
-    concated_blk_ids.extend(grouped_blks[-1])
-    return concated_blk_ids
+def handle_hybrid_blocks(
+    grouped_blks,
+    gamma=0,
+    num_gdn_layers: int = None,
+    num_kv_cache_groups: int = None,
+) -> list[list[int]]:
+    if num_gdn_layers is None:
+        num_gdn_layers = int(os.environ.get("BLLM_KVTRANS_NUM_GDN_LAYERS", 0))
+    assert num_gdn_layers > 0, (
+        f"num_gdn_layers must be positive, got {num_gdn_layers}"
+    )
+    if num_kv_cache_groups is not None:
+        assert len(grouped_blks) == num_kv_cache_groups, (
+            f"Block group count mismatch: expected {num_kv_cache_groups}, "
+            f"got {len(grouped_blks)}"
+        )
+
+    handled_blks = []
+    for group_idx in range(len(grouped_blks)):
+        if group_idx < num_gdn_layers:
+            blocks = grouped_blks[group_idx]
+            assert len(blocks) >= 2 + gamma, (
+                f"len(blocks) = {len(blocks)}, gamma = {gamma}"
+            )
+            handled_blks.append(blocks[1:gamma+2])
+        else:
+            handled_blks.append(grouped_blks[group_idx])
+    return handled_blks
 
 
 def get_p_node_pop_len(vllm_config: VllmConfig) -> int:
@@ -343,14 +372,22 @@ def use_flashinfer() -> bool:
     import vllm.envs as envs
 
     attn_backend = envs.VLLM_ATTENTION_BACKEND
-    return attn_backend and "flashinfer" in attn_backend.lower()
+    use_flashinfer = attn_backend and "flashinfer" in attn_backend.lower()
+    if use_flashinfer:
+        from vllm.platforms import current_platform
+        capability = current_platform.get_device_capability()
+        if capability is None or capability.major != 10:
+            raise ValueError(
+                "Currently KVT only support HND layout of flashinfer"
+            )
+    return use_flashinfer
 
 def kvt_protocol() -> str:
     import vllm.envs as envs
 
     return envs.VLLM_KV_TRANS_PROTOCOL
 
-def group_layers_by_index(kv_caches: dict[str, Any]) -> dict[str, list[int]]:
+def group_layers_by_index(kv_caches: dict[str, Any]) -> dict[int, list[str]]:
     from vllm.model_executor.models.utils import extract_layer_index
 
     index2name = defaultdict[Any, list](list)

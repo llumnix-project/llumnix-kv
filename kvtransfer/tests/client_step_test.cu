@@ -46,11 +46,6 @@ class FakeChannel: public IChannel {
       }
     }
   };
-  void send_notification(const std::vector<const ReqSendTask*>& reqs) override {
-    for (const auto* req : reqs) {
-      notifies->push(req->req_id());
-    }
-  };
   void flush(std::string&) override {};
   void close() override {};
 };
@@ -77,7 +72,7 @@ public:
   std::optional<WorkerInfo> get_worker_info(const InstanceId &id, WorkerId wid) override {
     LOG(INFO) << "fake get_worker_info: id=" << id << " wid=" << wid;
     WorkerInfo dst_info(id, wid);
-    dst_info.tp_size = 1;
+    dst_info.kvt_tp_size = 1;
     dst_info.worker_tp_rank = 0;
     dst_info.block_sizes = {16 * KB};
     dst_info.token_sizes = {KB};
@@ -180,14 +175,9 @@ TEST(KVTransferClientTest, TestKernelSyncAndDataTransfer) {
   LOG(INFO) << "cuda stream synced;";
   client.flush_send(zyidx33);
 
-  int cnt = 0;
-  while(cnt < 20 && notifies.empty()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    cnt ++;
-  }
-  EXPECT_FALSE(notifies.empty());
-  auto req_id = notifies.front();
-  EXPECT_TRUE(req_id == TEST_REQ_ID);
+  // Wait for send to complete
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
   {
     char *ptr = (char *) host_layer_0;
     for (auto bid : dst_blocks) {
@@ -212,9 +202,6 @@ TEST(KVTransferClientTest, TestKernelSyncAndDataTransfer) {
       EXPECT_EQ(sum, 20 * block_size);
     }
   }
-  auto done_ret = client.check_transfer_done(TEST_REQ_ID);
-  EXPECT_TRUE(done_ret == ReqState::OK);
-
   // client.remove_target("0", 0);
   LOG(INFO) << "finish";
   cuda_free(layer_0);

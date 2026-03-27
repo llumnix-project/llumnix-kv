@@ -7,6 +7,7 @@
 #include <limits>
 #include <memory>
 #include <sstream>
+#include <vector>
 
 namespace blade_llm {
 namespace ral {
@@ -110,5 +111,16 @@ class LogMessageNull : public std::basic_ostringstream<char> {
 
 }  // namespace ral
 }  // namespace blade_llm
+
+
+template <typename S, typename T>
+static inline S& operator<<(S&& os, const std::vector<T>& vec) {
+  os << "[";
+  for (std::size_t i = 0; i < vec.size(); ++i) {
+    os << vec[i] << ',';
+  }
+  os << "]";
+  return os;
+}
 
 #endif //KVTRANSFER_INCLUDE_LOGGING_H_

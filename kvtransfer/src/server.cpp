@@ -1,5 +1,5 @@
 #include "server.h"
-#include "protocol/rdma_protocol.h"
+#include "protocol/rdma_channel.h"
 #include "protocol/tcp_channel.h"
 
 namespace blade_llm {

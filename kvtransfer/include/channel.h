@@ -50,7 +50,6 @@ class IChannel {
   // out holds metrics collected during register_data and send_data, such as data characteristics
   // and send times. Prefer key=val,key2=val2 format for easy script processing.
   virtual void flush(std::string& out) = 0;
-  virtual void send_notification(const std::vector<const ReqSendTask*>& reqs) = 0;
 
   virtual bool is_active() {
     return true;
@@ -58,21 +57,6 @@ class IChannel {
 
   virtual void close() {};
   virtual ~IChannel() = default;
-
-  // ONLY FOR TEST
-  void send_notification(IIterator<const ReqSendTask *> *reqs) {
-    std::vector<const ReqSendTask*> vreqs;
-    auto opt = reqs->next();
-    while (opt.has_value()) {
-      vreqs.emplace_back(opt.value());
-      opt = reqs->next();
-    }
-    if (vreqs.empty()) {
-      return ;
-    }
-    return this->send_notification(vreqs);
-  }
-
 };
 
 using Channel = std::unique_ptr<IChannel>;

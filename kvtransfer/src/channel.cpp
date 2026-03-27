@@ -1,6 +1,6 @@
 #include <stdexcept>
 #include "channel.h"
-#include "protocol/rdma_protocol.h"
+#include "protocol/rdma_channel.h"
 #include "protocol/tcp_channel.h"
 
 namespace blade_llm {

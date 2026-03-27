@@ -119,13 +119,6 @@ class FakeChannel : public IChannel {
     q.emplace(dst_inst_id, dst_worker_id);
     flush_cnt->fetch_add(1);
   }
-
-  void send_notification(const std::vector<const ReqSendTask*>& reqs) override {
-    for (const auto* r : reqs) {
-      auto req_id = r->req_id();
-      q.emplace(dst_inst_id, dst_worker_id, req_id);
-    }
-  }
 };
 
 class ProxyChannel : public IChannel {
@@ -142,9 +135,6 @@ class ProxyChannel : public IChannel {
   }
   void flush(std::string& o) override {
     ch_->flush(o);
-  }
-  void send_notification(const std::vector<const ReqSendTask*>& reqs) override {
-    ch_->send_notification(reqs);
   }
  private:
   IChannel *ch_;
@@ -213,16 +203,16 @@ static void test_parse_block_generate(int p_rank, int d_rank) {
   int ntpb = 64;
 
   auto p_info = WorkerInfo("0", 0);
-  p_info.tp_size = 16;
+  p_info.kvt_tp_size = 16;
   p_info.worker_tp_rank = p_rank;
-  p_info.token_sizes = {2 * (kv_heads / p_info.tp_size) * head_dim * sizeof(uint16_t)};
+  p_info.token_sizes = {2 * (kv_heads / p_info.kvt_tp_size) * head_dim * sizeof(uint16_t)};
   p_info.block_sizes = {p_info.token_sizes[0] * ntpb};
   std::cout << "p_info.token_size=" << p_info.token_sizes[0] << " p_info.block_size=" << p_info.block_sizes[0] << std::endl;
 
   auto d_info = WorkerInfo("1", 0);
-  d_info.tp_size = 4;
+  d_info.kvt_tp_size = 4;
   d_info.worker_tp_rank = d_rank;
-  d_info.token_sizes = {2 * (kv_heads / d_info.tp_size) * head_dim * sizeof(uint16_t)};
+  d_info.token_sizes = {2 * (kv_heads / d_info.kvt_tp_size) * head_dim * sizeof(uint16_t)};
   d_info.block_sizes = {d_info.token_sizes[0] * ntpb};
   std::cout << "d_info.token_size=" << d_info.token_sizes[0] << " d_info.block_size=" << d_info.block_sizes[0] << std::endl;
 
@@ -421,16 +411,16 @@ static void dgtp_test_parse_block_generate(int p_rank, int d_rank) {
   int ntpb = 64;
 
   auto p_info = WorkerInfo("0", 0);
-  p_info.tp_size = 4;
+  p_info.kvt_tp_size = 4;
   p_info.worker_tp_rank = p_rank;
-  p_info.token_sizes = {2 * (kv_heads / p_info.tp_size) * head_dim * sizeof(uint16_t)};
+  p_info.token_sizes = {2 * (kv_heads / p_info.kvt_tp_size) * head_dim * sizeof(uint16_t)};
   p_info.block_sizes = {p_info.token_sizes[0] * ntpb};
   std::cout << "p_info.token_size=" << p_info.token_sizes[0] << " p_info.block_size=" << p_info.block_sizes[0] << std::endl;
 
   auto d_info = WorkerInfo("1", 0);
-  d_info.tp_size = 16;
+  d_info.kvt_tp_size = 16;
   d_info.worker_tp_rank = d_rank;
-  d_info.token_sizes = {2 * (kv_heads / d_info.tp_size) * head_dim * sizeof(uint16_t)};
+  d_info.token_sizes = {2 * (kv_heads / d_info.kvt_tp_size) * head_dim * sizeof(uint16_t)};
   d_info.block_sizes = {d_info.token_sizes[0] * ntpb};
   std::cout << "d_info.token_size=" << d_info.token_sizes[0] << " d_info.block_size=" << d_info.block_sizes[0] << std::endl;
 
@@ -889,7 +879,7 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
 
     EXPECT_TRUE(req3.state() == ReqState::OK);
     if (env_cache_shape() == RAGGED_FLASH_CACHE_SHAPE) {
-      EXPECT_EQ(q->size(), 4);
+      EXPECT_EQ(q->size(), 3);
       {
         auto b1 = q->front();
         q->pop();
@@ -924,7 +914,7 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
       EXPECT_EQ(b1.data.value().dst_offset, (8 * bs + ts));
       EXPECT_EQ(b1.data.value().length, (3 * bs - 17 * ts));
     } else { // FLASH_CACHE_SHAPE
-      EXPECT_EQ(q->size(), 4 + 2);
+      EXPECT_EQ(q->size(), 4 + 1);
       {
         auto b1 = q->front();
         q->pop();
@@ -961,10 +951,6 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
     q->pop();
     EXPECT_EQ(flush.dst_inst_id, "1");
     EXPECT_EQ(flush.dst_worker_id, 0);
-    auto b3 = q->front();
-    q->pop();
-    EXPECT_TRUE(b3.req_id.has_value());
-    EXPECT_EQ(b3.req_id.value(), "req_id00000000000000000000000002");
   }
   {
     // the fourth send, only test hybrid block parsing method 
@@ -1018,7 +1004,6 @@ class MockChannel : public IChannel {
   MOCK_METHOD(void, register_data, ((std::vector<std::vector<IpcBlock>>& data), TPKind kind), (override));
   MOCK_METHOD(void, flush, (std::string& out), (override));
   MOCK_METHOD(void, send_data, (size_t layer_idx), (override));
-  MOCK_METHOD(void, send_notification, (const std::vector<const ReqSendTask*>& reqs), (override));
 };
 
 TEST(SendStubTest, UseMockChannel) {
@@ -1059,8 +1044,6 @@ TEST(SendStubTest, UseMockChannel) {
   EXPECT_CALL(channel, send_data(Eq(0))).Times(1);
   EXPECT_CALL(channel, send_data(Eq(1))).Times(1);
   EXPECT_CALL(channel, flush(_)).Times(1);
-  EXPECT_CALL(channel, send_notification(_)).Times(0);
-
   {
     auto naming = std::make_shared<FakeNamingWorkerClient>(2, dst_info);
     auto tx = KvSendStub("1", 0, src_info, 0, num_layers, std::make_unique<FakeChannelFactory>(&channel), naming);
@@ -1161,15 +1144,13 @@ class FTTC : public IChannel {
   bool* register_data_called_ = nullptr;
   bool* send_data_called_ = nullptr;
   bool* flush_called_ = nullptr;
-  bool* send_notification_called_ = nullptr;
 public:
-  FTTC(int ch_id, bool* dead, bool* register_data_called, bool* send_data_called, bool* flush_called, bool* send_notification_called):
+  FTTC(int ch_id, bool* dead, bool* register_data_called, bool* send_data_called, bool* flush_called):
     ch_id_(ch_id),
     dead_(dead),
     register_data_called_(register_data_called),
     send_data_called_(send_data_called),
-    flush_called_(flush_called),
-    send_notification_called_(send_notification_called) {}
+    flush_called_(flush_called) {}
 
   ~FTTC() {
     *dead_ = true;
@@ -1204,16 +1185,6 @@ public:
   void flush(std::string& out) override {
     *flush_called_ = true;
   }
-
-  void send_notification(const std::vector<const ReqSendTask*>& reqs) override {
-    *send_notification_called_ = true;
-    EXPECT_EQ(ch_id_, 1);
-    EXPECT_EQ(reqs.size(), 2);
-    EXPECT_EQ(reqs[0]->req_id(), "2");
-    EXPECT_EQ(reqs[0]->state(), ReqState::FAILED);
-    EXPECT_EQ(reqs[1]->req_id(), "3");
-    EXPECT_EQ(reqs[1]->state(), ReqState::OK);
-  }
 };
 
 // FaultTolerantTestChannelFactory
@@ -1223,7 +1194,6 @@ struct FTTCF: public IChannelFactory {
   bool register_data_called_[2] = {false, false};
   bool send_data_called_[2] = {false, false};
   bool flush_called_[2] = {false, false};
-  bool send_notification_called_[2] = {false, false};
 public:
   FTTCF() {}
 
@@ -1234,8 +1204,7 @@ public:
       &dead_ch_[ch_id],
       &register_data_called_[ch_id],
       &send_data_called_[ch_id],
-      &flush_called_[ch_id],
-      &send_notification_called_[ch_id]);
+      &flush_called_[ch_id]);
   }
 };
 
@@ -1295,7 +1264,6 @@ TEST(SendStubTest, FaultTolerantTest) {
     EXPECT_TRUE(fttcf.register_data_called_[0]);
     EXPECT_TRUE(fttcf.send_data_called_[0]);
     EXPECT_FALSE(fttcf.flush_called_[0]);
-    EXPECT_FALSE(fttcf.send_notification_called_[0]);
 
     auto step_1 = std::make_shared<Step>(1);
     BatchSendTask task1(step_1);
@@ -1321,7 +1289,6 @@ TEST(SendStubTest, FaultTolerantTest) {
     EXPECT_TRUE(fttcf.register_data_called_[1]);
     EXPECT_TRUE(fttcf.send_data_called_[1]);
     EXPECT_TRUE(fttcf.flush_called_[1]);
-    EXPECT_TRUE(fttcf.send_notification_called_[1]);
     EXPECT_FALSE(fttcf.dead_ch_[1]);
   }
   tx.reset();
@@ -1380,7 +1347,6 @@ TEST(SendStubTest, CreateChannelFaultTolerantTest) {
     EXPECT_FALSE(fttcf.register_data_called_[0]);
     EXPECT_FALSE(fttcf.send_data_called_[0]);
     EXPECT_FALSE(fttcf.flush_called_[0]);
-    EXPECT_FALSE(fttcf.send_notification_called_[0]);
 
     auto step_1 = std::make_shared<Step>(1);
     BatchSendTask task1(step_1);
@@ -1406,7 +1372,6 @@ TEST(SendStubTest, CreateChannelFaultTolerantTest) {
     EXPECT_TRUE(fttcf.register_data_called_[0]);
     EXPECT_TRUE(fttcf.send_data_called_[0]);
     EXPECT_FALSE(fttcf.flush_called_[0]);
-    EXPECT_FALSE(fttcf.send_notification_called_[0]);
   }
   tx.reset();
   while (!fttcf.dead_ch_[0]) {

@@ -286,6 +286,16 @@ int env_shrink_tpsize() {
   return val;
 }
 
+int env_attn_kernel_blk_size() {
+  static constexpr int DEFVAL = -1;
+  static int val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_ATTN_KERNEL_BLK_SIZE", DEFVAL);
+  });
+  return val;
+}
+
 std::bitset<MAX_TP_SIZE> env_p_valid_ranks() noexcept {
   static std::bitset<MAX_TP_SIZE> val("1111111111111111111111111111111111111111111111111111111111111111");
   static std::once_flag flag;
