@@ -29,8 +29,11 @@ from ..engine_proxy import (
     get_param,
     sched_rpc_server,
     set_param,
+    get_p_node_pop_len,
+    merge_hybrid_blocks,
 )
 from ..kvtbackend import (
+    CODE_INTERNALERROR,
     CODE_MIGRATE_REJECTED_BUSY,
     CODE_OK,
     CODE_REQNOTFOUND,
@@ -65,6 +68,7 @@ from . import (
     NEW_REQ_RESP,
     OUTPUT_TOKENS_N,
     SRC_INFO,
+    MIGRATION_TRIGGER_POLICY,
     MigrateResp,
     _g_migrate_in_req_ids,
     _g_migrate_in_req_info,
@@ -75,6 +79,7 @@ from . import (
     int2ipport,
     ipport2int,
     is_migration,
+    migrate_in_pd_way
 )
 
 try:
@@ -214,6 +219,10 @@ class MigrationBackend(HybridBackend):
 
         global _g_backend
         _g_backend = self
+
+        self._gamma = get_p_node_pop_len(self._cfg) - 1
+        self._enable_prefix_caching = self._cfg.cache_config.enable_prefix_caching
+
         return
 
     def get_peer(
@@ -323,6 +332,9 @@ class MigrationBackend(HybridBackend):
 
             req = self._reqdec.decode(reqbuf)
             prealloc = core_get_param(req, OUTPUT_TOKENS_N, 0)
+            if migrate_in_pd_way(req):
+                prealloc += envs.LLUMNIX_MIGRATE_IN_PD_WAY_EXTRA_TOKENS
+
             if not self._has_migrate_in_slots(req, prealloc):
                 migresp = MigrateResp(code=CODE_MIGRATE_REJECTED_BUSY)
                 msgbuf = bytearray.fromhex("00 00 00 00 00 00 00 00")
@@ -331,7 +343,7 @@ class MigrationBackend(HybridBackend):
                 struct.pack_into("=I", msgbuf, 4, len(msgbuf) - 8)
                 writer.write(msgbuf)
                 await writer.drain()
-                logger.warning("no migrate in slots available")
+                logger.warning("no migrate in slots available, reqid=%s", req.request_id)
                 return
 
             migresp = MigrateResp(code=CODE_OK)
@@ -601,11 +613,20 @@ class MigrationBackend(HybridBackend):
             self, srcinfo: tuple[str, int], req: Request,
             blocks: KVCacheBlocks) -> KVTResp:
         blockids = blocks.get_block_ids()
-        assert len(blockids) == 1
+        num_token_blocks = len(blockids[-1])
+        has_null_blk = self._enable_prefix_caching and len(blockids) > 1
+        blockids = merge_hybrid_blocks(blockids, self._gamma, has_null_blk)
+
         blksize = self._cfg.cache_config.block_size
-        numtokens = get_param(req, OUTPUT_TOKENS_N, 0)
+        if migrate_in_pd_way(req):
+            # actually, less token may be transfered, prompt tokens + output tokens 
+            # + LLUMNIX_MIGRATE_IN_PD_WAY_EXTRA_TOKENS are allocated to ensure
+            # enough space.
+            numtokens = get_param(req, PREALLOC_KEY, 0)
+        else:
+            numtokens = get_param(req, OUTPUT_TOKENS_N, 0)
         alltokens = numtokens + len(req.prompt_token_ids)
-        assert len(blockids[0]) * blksize >= alltokens
+        assert num_token_blocks * blksize >= alltokens, f"expected {num_token_blocks * blksize} >= {alltokens}"
         start_ts = time.monotonic()
 
         resp: Optional[KVTResp] = None
@@ -623,28 +644,29 @@ class MigrationBackend(HybridBackend):
             inst_id = f"{self._inst_id}|{dprank}|{tpsize}"
             kvtdinfo = KVTDInfo(
                 instid=inst_id,
-                blkids=blockids[0],
+                blkids=blockids,
                 cached_tokens=req.num_computed_tokens,
                 max_tokens=alltokens,
                 d_workers_info=self._workers_info,
             )
             kvtreq = RKVTDInfo(reqid=req.request_id,
                                migration=True,
-                               dinfo=kvtdinfo)
+                               dinfo=kvtdinfo,
+                               migration_reason=get_param(req, MIGRATION_TRIGGER_POLICY, ""))
             resp = await self._kvt_suspend_rpc(srcinfo, kvtreq)
 
         end_ts = time.monotonic()
         dur_ms = (end_ts - start_ts) * 1000
         logger.info(
-            "migrate end kvt: dur_ms=%s, reqid=%s cached=%s max=%s kvtresp=%s",
-            dur_ms, req.request_id, req.num_computed_tokens, alltokens, resp)
+            "migrate end kvt: dur_ms=%s, reqid=%s cached=%s max=%s len_prompt=%s kvtresp=%s",
+            dur_ms, req.request_id, req.num_computed_tokens, alltokens, len(req.prompt_token_ids), resp)
 
         if (
             resp is None or resp.code != CODE_OK or
             (not (req.num_computed_tokens <= resp.cached <= alltokens)) or
             resp.output_token_ids is None
         ):
-            raise RuntimeError('migration backend kvt rpc failed')
+            raise CodeError(CODE_INTERNALERROR, 'migration backend kvt rpc failed')
         return resp
 
     async def _kvt(self, srcinfo: tuple[str, int], req: Request,
@@ -725,8 +747,8 @@ class MigrationBackend(HybridBackend):
                 assert req.num_computed_tokens >= 1
                 gamma = 0
                 if (
-                        self._cfg.speculative_config
-                        and self._cfg.speculative_config.num_speculative_tokens
+                    self._cfg.speculative_config
+                    and self._cfg.speculative_config.num_speculative_tokens
                 ):
                     gamma = self._cfg.speculative_config.num_speculative_tokens
                 req.num_computed_tokens -= (1 + gamma)
@@ -740,12 +762,22 @@ class MigrationBackend(HybridBackend):
                 migration_e2e_time_ms,
             )
 
+        except CodeError as e:
+            logger.warning(
+                "migration backend async_update failed. req_id=%s, srcinfo=%s, code=%s, msg=%s",
+                req.request_id,
+                srcinfo,
+                e.code,
+                e.msg,
+            )
+            ioret.ex = e
         except Exception as e:
             logger.warning(
-                "migration backend async_update failed. req_id=%s, srcinfo=%s, e=%s",
+                "migration backend async_update failed. req_id=%s, srcinfo=%s, e=%r",
                 req.request_id,
                 srcinfo,
                 e,
+                exc_info=True
             )
             ioret.ex = e
         finally:

@@ -35,6 +35,9 @@ OUTPUT_TOKENS_N = "_hbmigrateoutputtokensn"
 # value: str, instance id
 SRC_INFO = "__HybridConnector_Migration_Src_Info__"
 
+# value: str, trigger policy
+MIGRATION_TRIGGER_POLICY = "_hbmigratetriggerpolicy"
+
 # Body:
 # +-----+-----------------+
 # | len | req             |
@@ -61,6 +64,30 @@ _g_migrate_in_req_info_lock = threading.Lock()
 _g_migrate_out_req_info_lock = threading.Lock()
 _g_migrate_in_req_info: dict[str, int] = {}
 _g_migrate_out_req_info: dict[str, int] = {}
+
+
+def migrate_in_pd_way(req=None):
+    import vllm.envs as envs
+    from ..engine_proxy import core_get_param, get_param
+    from vllm.v1.engine import EngineCoreRequest
+    from vllm.v1.request import Request
+    from ..kvtbackend import RKVTDInfo
+    
+    if req is None:
+        return envs.LLUMNIX_MIGRATE_IN_PD_WAY
+
+    req_condition = True
+    if isinstance(req, EngineCoreRequest):
+        migration_trigger_policy = core_get_param(req, MIGRATION_TRIGGER_POLICY, "")
+        req_condition = "failover" not in migration_trigger_policy
+    elif isinstance(req, Request):
+        migration_trigger_policy = get_param(req, MIGRATION_TRIGGER_POLICY, "")
+        req_condition = "failover" not in migration_trigger_policy
+    elif isinstance(req, RKVTDInfo):
+        migration_trigger_policy = req.migration_reason
+        req_condition = "failover" not in migration_trigger_policy and req.migration
+
+    return req_condition and envs.LLUMNIX_MIGRATE_IN_PD_WAY
 
 
 def is_migration(idx: int) -> bool:

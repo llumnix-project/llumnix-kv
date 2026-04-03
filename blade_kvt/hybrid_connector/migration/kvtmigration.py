@@ -16,6 +16,7 @@ from ..engine_proxy import (
     SchedulerOutput,
     VllmConfig,
     get_param,
+    get_logger,
     sched_rpc_server,
 )
 
@@ -37,14 +38,26 @@ from ..kvtbackend import (
 
 # yapf: enable
 from ..utils import IoRet
-from . import KVT_SUSPEND_REQ, SRC_INFO
+from . import KVT_SUSPEND_REQ, SRC_INFO, migrate_in_pd_way
 from .backend import MigrationBackend, SuspendReq
+
+logger = get_logger(__name__)
 
 
 class KVTMigration(HybridBackend):
     def __init__(
             self, cfg: VllmConfig, role: KVConnectorRole,
             kv_cache_config:KVCacheConfig = None):
+
+        if cfg.model_config.is_hybrid and cfg.scheduler_config.async_scheduling:
+            logger.Fatal("migration is not support for hybrid model when async scheduling")
+
+        if cfg.model_config.is_hybrid and cfg.cache_config.enable_prefix_caching:
+            logger.Fatal("migration is not support for hybrid model when prefix caching is enabled")
+        
+        if cfg.model_config.is_hybrid and not migrate_in_pd_way():
+            logger.Fatal("migration based on recompute is not support for hybrid model")
+
         self._p = PBackend(cfg, role, kv_cache_config)
         self._d = DBackend(cfg, role, kv_cache_config)
 
@@ -134,6 +147,7 @@ class KVTMigration(HybridBackend):
         kvt = self._p.build_backend_meta(sout)
         return kvt
     
+    # disagg thread
     async def _on_transfer_suspend_kv(self, reader, writer):
         bodylenbuf = await reader.readexactly(4)
         (bodylen,) = struct.unpack("=I", bodylenbuf)
@@ -142,7 +156,7 @@ class KVTMigration(HybridBackend):
         resp = await self._p.submit_transfer_kv(req)
         if resp.computed == -1:
             resp.code = CODE_REQNOTFOUND
-        if resp.code == CODE_OK:
+        if resp.code == CODE_OK and not migrate_in_pd_way(req):
             susreq = SuspendReq(reqid=req.reqid)
             susresp = await self._m.do_suspend(susreq)
             if susresp.code != CODE_OK:
@@ -154,6 +168,8 @@ class KVTMigration(HybridBackend):
                 if envs.LLUMNIX_DETAILED_MIG_STATUS:
                     with _g_migrate_out_req_info_lock:
                         _g_migrate_out_req_info.pop(req.reqid)
+
+        logger.info(f"migration transfer kv and suspend req ({req.reqid}) done, resp: {resp}")
 
         respbuf = bytearray.fromhex("00 00 00 00 00 00 00 00")
         struct.pack_into("=II", respbuf, 0, PREFILL_RESP, 0)

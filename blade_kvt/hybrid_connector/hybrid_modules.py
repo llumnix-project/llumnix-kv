@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import pickle
+import functools
 import struct
 import time
 from collections import defaultdict, deque
@@ -62,6 +63,7 @@ from .utils import (
     ConnPool,
     IoRet,
     IoState,
+    CodeError,
     handle_done_req,
     kill_me_if_exception,
     try_advance,
@@ -432,6 +434,11 @@ class HybridScheduler:
         self._abortmeta_save: list[Request] = []
         self._stop0: list[Request] = []
 
+        from .kvtbackend import KVTState
+        self._migrating_prepared: deque[tuple[str, KVTState]] = deque()
+        self._migrating_output_tokens_snapshot: dict[str, tuple[int, bool]] = dict()
+        self._migrating_fut: dict[str, asyncio.Future] = dict()
+
         ### W: core thread. R: disagg thread
         self._saving: dict[str, _SavingReq] = dict()
         self._loading: dict[str, _LoadingReq] = dict()
@@ -518,10 +525,90 @@ class HybridScheduler:
 
     # core thread
     def step(self) -> Optional[dict[int, list[EngineCoreOutput]]]:
+        self._step_migrating()
         self._step_saved()
         self._step_waiting()
         self._step_loaded()
         return self._step_aborting()
+
+    def _step_migrating(self):
+        from .migration.kvtmigration import KVTMigration
+        if not isinstance(self._backend, KVTMigration):
+            return
+
+        global WORKFLOW
+        if WORKFLOW == "BYPASS":
+            return
+
+        removed = []
+        for reqid, (previous_num_output_token, touched) in self._migrating_output_tokens_snapshot.items():
+            req = sched_get_req(reqid)
+            if req is None:
+                logger.warning("migrate in pd way reject: reqid=%s req not found", reqid)
+                loop = get_hybrid_sched_loop()
+                from .kvtbackend import CODE_REQNOTFOUND
+                ioret = IoRet(reqid=reqid, ex=CodeError(CODE_REQNOTFOUND, "req not found"))
+                loop.call_soon_threadsafe(self._backend._p._mark_send_done, ioret)
+                removed.append(reqid)
+                continue
+
+            logger.info("migrate in pd way: migrating, reqid=%s previous_num_output_tokens=%s, cur_num_output_tokens=%s",
+                        reqid, previous_num_output_token, req.num_output_tokens)
+
+            if req.num_output_tokens > previous_num_output_token:
+                if self._cfg.scheduler_config.async_scheduling and not touched:
+                    logger.info("migrate in pd way: async scheduling, reqid=%s previous_num_output_tokens=%s, reset to %s",
+                                reqid, previous_num_output_token, req.num_output_tokens)
+                    self._migrating_output_tokens_snapshot[reqid] = (req.num_output_tokens, True)
+                    from .kvtbackend import P_KVT_STATE
+                    set_param(req, P_KVT_STATE, None)
+                else:
+                    loop = get_hybrid_sched_loop()
+                    fut = self._migrating_fut[reqid]
+                    logger.info("migrate in pd way: set result reqid=%s, len_prompt=%s, len_output=%s",
+                                reqid, len(req.prompt_token_ids), len(req.output_token_ids))
+                    loop.call_soon_threadsafe(fut.set_result, (req.prompt_token_ids, req.output_token_ids[:], previous_num_output_token))
+                    sched_finish_req(reqid)
+                    removed.append(reqid)
+
+        for reqid in removed:
+            self._migrating_output_tokens_snapshot.pop(reqid, None)
+
+        while self._migrating_prepared:
+            reqid, kvt_state = self._migrating_prepared.popleft()
+
+            req = sched_get_req(reqid)
+            if req is None:
+                logger.warning("migrate in pd way: reject reqid=%s req not found", reqid)
+                loop = get_hybrid_sched_loop()
+                from .kvtbackend import CODE_REQNOTFOUND
+                ioret = IoRet(reqid=reqid, ex=CodeError(CODE_REQNOTFOUND, "req not found"))
+                loop.call_soon_threadsafe(self._backend._p._mark_send_done, ioret)
+                continue
+
+            maxtokens = req.num_tokens_with_spec + req.num_output_placeholders
+            if kvt_state.dinfo.max_tokens < maxtokens:
+                logger.warning("migrate in pd way: reject reqid=%s dinfoq_max_tokens=%s, req_max_tokens=%s [num_output_tokens=%s, num_spec_tokens=%s, num_output_placeholders=%s]", reqid, kvt_state.dinfo.max_tokens, maxtokens, req.num_output_tokens, len(req.spec_token_ids), req.num_output_placeholders)
+                loop = get_hybrid_sched_loop()
+                from .kvtbackend import CODE_MIGRATE_REJECTED_SPACE
+                ioret = IoRet(
+                    reqid=reqid, ex=CodeError(CODE_MIGRATE_REJECTED_SPACE, "not enough space")
+                )
+                loop.call_soon_threadsafe(self._backend._p._mark_send_done, ioret)
+                continue
+
+            kvblks = sched_get_blocks(req.request_id)
+            self._setup_save(req, kvblks)
+
+            from .kvtbackend import KVTState, P_KVT_STATE
+            kvtstat = KVTState(dinfo=kvt_state.dinfo, maxtokens=maxtokens)
+            set_param(req, P_KVT_STATE, kvtstat)
+
+            loop = get_hybrid_sched_loop()
+            self._migrating_output_tokens_snapshot[reqid] = (req.num_output_tokens, False)
+            self._migrating_fut[reqid] = loop.create_future()
+
+            logger.info("migrate in pd way: init, reqid=%s maxtokens=%s [num_prompt=%s, num_output_tokens=%s, num_spec_tokens=%s, num_output_placeholders=%s]", reqid, maxtokens, len(req.prompt_token_ids), req.num_output_tokens, len(req.spec_token_ids), req.num_output_placeholders)
 
     def _step_saved(self):
         while self._saved:
@@ -683,6 +770,18 @@ class HybridScheduler:
                 logger.info("abort saving. areq=%s", areq)
                 assert has_setup_save(savereq._req)
                 self._abortmeta_save.append(savereq._req)
+            
+            migratingreq = self._migrating_output_tokens_snapshot.get(areq.reqid)
+            if migratingreq is not None:
+                logger.info("abort migrating. areq=%s", areq)
+                self._migrating_output_tokens_snapshot.pop(areq.reqid, None)
+                self._migrating_fut.pop(areq.reqid, None)
+
+                loop = get_hybrid_sched_loop()
+                from .kvtbackend import CODE_REQNOTFOUND
+                ioret = IoRet(reqid=areq.reqid, ex=CodeError(CODE_REQNOTFOUND, "req not found"))
+                loop.call_soon_threadsafe(self._backend._p._mark_send_done, ioret)
+
         return load_output
 
     # thread safe
@@ -831,6 +930,10 @@ class HybridScheduler:
 
     # core thread
     def has_requests(self) -> bool:
+        if self._migrating_output_tokens_snapshot:
+            return True
+        if self._migrating_prepared:
+            return True
         if self._waiting:
             return True
         if self._loaded:
@@ -911,6 +1014,18 @@ def hybridsched() -> HybridScheduler:
     assert _g_scheduler is not None
     return _g_scheduler
 
+WORKFLOW = "MAIN"
+
+def bypass_workflow(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        global WORKFLOW
+        WORKFLOW = "BYPASS"
+        try:
+            return func(*args, **kwargs)
+        finally:
+            WORKFLOW = "MAIN"
+    return wrapper
 
 # ============================================================
 # HybridWorker
