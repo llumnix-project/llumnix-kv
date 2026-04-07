@@ -49,14 +49,11 @@ class KVTMigration(HybridBackend):
             self, cfg: VllmConfig, role: KVConnectorRole,
             kv_cache_config:KVCacheConfig = None):
 
-        if cfg.model_config.is_hybrid and cfg.scheduler_config.async_scheduling:
-            logger.Fatal("migration is not support for hybrid model when async scheduling")
-
         if cfg.model_config.is_hybrid and cfg.cache_config.enable_prefix_caching:
-            logger.Fatal("migration is not support for hybrid model when prefix caching is enabled")
+            logger.fatal("migration is not support for hybrid model when prefix caching is enabled")
         
         if cfg.model_config.is_hybrid and not migrate_in_pd_way():
-            logger.Fatal("migration based on recompute is not support for hybrid model")
+            logger.fatal("migration based on recompute is not support for hybrid model")
 
         self._p = PBackend(cfg, role, kv_cache_config)
         self._d = DBackend(cfg, role, kv_cache_config)
