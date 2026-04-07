@@ -68,6 +68,8 @@ _g_core: Optional["EngineCoreProc"] = None
 def get_logger(name: str):
     return init_logger(name)
 
+logger = get_logger(__name__)
+
 
 def _sched() -> V1Scheduler:
     assert _g_core is not None
@@ -144,6 +146,24 @@ def sched_acquire_blocks(blks: KVCacheBlocks):
 def sched_finish_req(request_ids: Union[str, Iterable[str]]):
     self = _sched()
     self.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
+
+
+def sched_skip_migrating_req(reqid: str) -> bool:
+    self = _sched()
+
+    if reqid not in self.connector._sched._migrating_output_tokens_snapshot:
+        return False
+    
+    from .migration.kvtmigration import KVTMigration
+    if not isinstance(self.connector._sched._backend, KVTMigration):
+        return
+
+    _, touched = self.connector._sched._migrating_output_tokens_snapshot[reqid]
+
+    if touched:
+        logger.info("migrate in pd way: async scheduling skip reqid: %s", reqid)
+
+    return touched
 
 
 # get_request() should receive a parameter similar to a scheduler,
