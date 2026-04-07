@@ -70,6 +70,7 @@ from .migration import (
     _g_migrate_out_req_ids,
     _g_migrate_out_req_info,
     _g_migrate_out_req_info_lock,
+    migrate_in_pd_way,
 )
 
 # yapf: enable
@@ -235,12 +236,14 @@ class RKVTDInfo(
     reqid: str
     dinfo: KVTDInfo
     migration: bool = False
+    migration_reason: str = ""
 
 
 CODE_OK = 0
 CODE_REQNOTFOUND = 404
 CODE_INTERNALERROR = 500
 CODE_MIGRATE_REJECTED_BUSY = 1001
+CODE_MIGRATE_REJECTED_SPACE = 1002
 
 
 class KVTResp(
@@ -254,6 +257,9 @@ class KVTResp(
     cached: int
     computed: int
     output_token_ids: Optional[list[int]] = None
+
+    def __str__(self):
+        return f"KVTResp(code={self.code}, cached={self.cached}, computed={self.computed}, len(output_token_ids)={len(self.output_token_ids)})"
 
 
 @dataclass
@@ -595,7 +601,7 @@ class PBackend(HybridBackend):
         assert all(len(winfo) > 0 for winfo in info.d_workers_info)
         return True
 
-    async def _wait_kvt_state(self, reqid: str, state: _SendingReq) -> KVTResp:
+    async def _wait_kvt_state(self, reqid: str, state: _SendingReq, req_kvt: RKVTDInfo) -> KVTResp:
         start_ts = time.monotonic()
         ioret: IoRet = await state._fut
         end_ts = time.monotonic()
@@ -612,19 +618,39 @@ class PBackend(HybridBackend):
         if req is not None:
             computed = req.num_computed_tokens
 
+        output_token_ids = []
+
+        if migrate_in_pd_way(req_kvt) and code == CODE_OK and ioret.ex is None:
+            from .engine_proxy import _sched
+            sched = _sched().connector._sched
+            fut = sched._migrating_fut.get(reqid, None)
+            if fut is None:
+                logger.error(f"migrate in pd way fail: reqid={reqid}")
+                code = CODE_INTERNALERROR
+            else:
+                # Though the kv transfer is done, the output token ids may not be ready
+                logger.info(f"migrate in pd way: waiting for output_token_ids, reqid={reqid}")
+                prompt_token_ids, output_token_ids, previous_num_output_token = await fut
+                if self._cfg.speculative_config and self._cfg.speculative_config.num_speculative_tokens \
+                    and self._cfg.model_config.is_hybrid:
+                    ioret.n = len(prompt_token_ids) + previous_num_output_token
+                    computed = len(output_token_ids) + len(prompt_token_ids) - 1
+                else:
+                    ioret.n = len(output_token_ids) + len(prompt_token_ids) - 1
+                    computed = ioret.n
+                assert ioret.n > 0
+                logger.info(f"migrate in pd way finish: reqid={reqid}, len(prompt_token_ids)={len(prompt_token_ids)}, len(output_token_ids)={len(output_token_ids)}")
+                sched._migrating_fut.pop(reqid)
+
         log_fn = logger.info if ioret.ex is None else logger.exception
         log_fn(
-            "disagg kvt done. kvt_dur_ms=%s, reqid=%s cached=%s computed=%s",
-            kvt_dur_ms,
-            reqid,
-            ioret.n,
-            computed,
-            exc_info=ioret.ex)
+            "disagg kvt done. kvt_dur_ms=%s, reqid=%s code=%s cached=%s computed=%s",
+            kvt_dur_ms, reqid, code, ioret.n, computed, exc_info=ioret.ex)
 
         resp = KVTResp(code=code,
                        cached=ioret.n or 0,
                        computed=computed,
-                       output_token_ids=[])
+                       output_token_ids=output_token_ids)
         self._sending.pop(reqid)
         return resp
 
@@ -645,7 +671,7 @@ class PBackend(HybridBackend):
 
         self._dinfoq.append(req)
         _try_wakeup_core(self._dinfoq)
-        resp = await self._wait_kvt_state(req.reqid, state)
+        resp = await self._wait_kvt_state(req.reqid, state, req)
         return resp
 
     async def _on_transfer_kv(self, reader, writer):
@@ -698,8 +724,9 @@ class PBackend(HybridBackend):
         core_update_params(req, {P_KVT_STATE: kvtstat})
         core_update_params(req, {P_IGNORE_OUTPUTS: True})
         core_add_req(req)
-
-        resp = await self._wait_kvt_state(req.request_id, state)
+        
+        resp = await self._wait_kvt_state(req.request_id, state,
+            RKVTDInfo(reqid=req.request_id, dinfo=dinfo, migration=False))
 
         respbuf = bytearray.fromhex("00 00 00 00 00 00 00 00")
         struct.pack_into("=II", respbuf, 0, PREFILL_RESP, 0)
@@ -778,25 +805,34 @@ class PBackend(HybridBackend):
             return req.req, False
         return req.req, True
 
-    def _migration_bypass(self, reqid: str, kvtstate: KVTState, ret: list[PReqMeta]):
+    def _migration_bypass(self, reqid: str, kvtstate: KVTState, ret: list[PReqMeta], rdinfo: RKVTDInfo):
         assert not kvtstate.untouched
         dinfo = kvtstate.dinfo
-        new_tokens = kvtstate.maxtokens - dinfo.cached_tokens
-        pmeta = PReqMeta(
-            reqid=reqid,
-            d_inst_id=dinfo.instid,
-            p_block_ids=sched_get_kvblk_ids(
-                reqid, self._gamma, self._enable_prefix_caching
-            ),
-            d_block_ids=dinfo.blkids,
-            seen_tokens=dinfo.cached_tokens,
-            new_tokens=new_tokens,
-            has_last_token=True,
-            d_workers_info=dinfo.d_workers_info,
-            has_freeze=True,
-        )
-        assert len(pmeta.p_block_ids) > 0
-        ret.append(pmeta)
+
+        if not migrate_in_pd_way(rdinfo):
+            new_tokens = kvtstate.maxtokens - dinfo.cached_tokens
+            pmeta = PReqMeta(
+                reqid=reqid,
+                d_inst_id=dinfo.instid,
+                p_block_ids=sched_get_kvblk_ids(
+                    reqid, self._gamma, self._enable_prefix_caching
+                ),
+                d_block_ids=dinfo.blkids,
+                seen_tokens=dinfo.cached_tokens,
+                new_tokens=new_tokens,
+                has_last_token=True,
+                d_workers_info=dinfo.d_workers_info,
+                has_freeze=True,
+            )
+            assert len(pmeta.p_block_ids) > 0
+            ret.append(pmeta)
+        else:
+            from .engine_proxy import _sched, sched_get_req
+            logger.info("migrate in pd way: begin reqid=%s", reqid)
+            req = sched_get_req(reqid)
+            assert req is not None
+            set_param(req, P_KVT_STATE, None)
+            _sched().connector._sched._migrating_prepared.append((reqid, kvtstate))
         return
 
     # ret: OUT
@@ -831,10 +867,12 @@ class PBackend(HybridBackend):
                 continue
 
             if not isdone:
-                try_setup_save(req)
                 if rdinfo.migration:
-                    self._migration_bypass(req.request_id, kvtstat, ret)
+                    if not migrate_in_pd_way(rdinfo):
+                        try_setup_save(req)
+                    self._migration_bypass(req.request_id, kvtstat, ret, rdinfo)
                 else:
+                    try_setup_save(req)
                     kvtstat.untouched = True
                 continue
 
