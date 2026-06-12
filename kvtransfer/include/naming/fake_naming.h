@@ -15,7 +15,7 @@ namespace blade_llm {
 class FakeNamingWorkerClient : public INamingWorkerClient {
     WorkerInfo dst_info_;
   public:
-    FakeNamingWorkerClient(const std::string& dst_info_str): dst_info_(WorkerInfo::from_string(dst_info_str)) {}
+    explicit FakeNamingWorkerClient(const WorkerInfo& dst_info): dst_info_(dst_info) {}
   
     void register_worker(const WorkerInfo &worker_info) override {
       throw std::runtime_error("fake naming does not support register worker");

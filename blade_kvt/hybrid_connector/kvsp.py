@@ -61,6 +61,14 @@ class KVSP(HybridBackend):
         self._s.clear_backend_metadata()
         self._p.clear_backend_metadata()
 
+    def bypass_bind(self, meta: BackendMeta):
+        self._s.bypass_bind(meta.s)
+        self._p.bypass_bind(meta.p)
+
+    def bypass_clear(self):
+        self._s.bypass_clear()
+        self._p.bypass_clear()
+
     async def async_load_kv(
             self, m: BackendMeta) -> AsyncGenerator[IoRet, None]:
         assert isinstance(m, KVSPMeta)

@@ -16,19 +16,19 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.tracing import TraceWrapper
+from vllm.utils import EventPool
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
-from . import BackendMeta, HybridBackend, IoRet
-from .engine_proxy import (
+from vllm.v1.hybrid_connector import BackendMeta, HybridBackend, IoRet
+from vllm.v1.hybrid_connector.engine_proxy import (
     get_p_node_pop_len,
     sched_get_kvblk_ids,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 
-from . import HCSchedOutput, hybridsched
-from .utils import EventPool
+from . import HCSchedOutput, hybridsched, mark_backend_save_done
 
 logger = init_logger(__name__)
 
@@ -160,8 +160,22 @@ class VineyardKVSBackend(HybridBackend):
 
         kv_cache_tensors = list(kv_caches.values())
         llm_kv_cache_layer_shape = list(kv_cache_tensors[0].shape)
-        kernel_block_size = llm_kv_cache_layer_shape[2]
+
+        # Detect attention type by shape dimensions
+        if len(llm_kv_cache_layer_shape) == 5:
+            # FullAttn shape: [2, num_blocks, block_size, num_kv_heads, head_dim]
+            kernel_block_size = llm_kv_cache_layer_shape[2]
+        elif len(llm_kv_cache_layer_shape) == 3:
+            # MLA shape: [num_blocks, block_size, head_dim]
+            kernel_block_size = llm_kv_cache_layer_shape[1]
+        else:
+            raise ValueError(
+                f"Unsupported KV cache shape: {llm_kv_cache_layer_shape}. "
+                f"Expected 5D (FullAttn) or 3D (MLA) tensor.")
         kv_manager_block_size = self.vllm_config.cache_config.block_size
+        logger.info("KV cache layer shape: %s, kernel_block_size: %d, " 
+                    "kv_manager_block_size: %d", 
+                    llm_kv_cache_layer_shape, kernel_block_size, kv_manager_block_size)
         self.blocks_per_kv_block = kv_manager_block_size // kernel_block_size
 
         if envs.VLLM_KVS_USE_REQUEST_HASH:
@@ -373,7 +387,7 @@ class VineyardKVSBackend(HybridBackend):
             
             block_ids = blocks.get_block_ids()[0][:block_num]
             assert len(block_ids) == block_num
-            trace_headers = request.trace_wrapper.extract_trace_headers("kv_load")
+            trace_headers = request.trace_wrapper.traceparent("kv_load")
             self.metas_to_recv.append(
                 ReqMeta(request.request_id, False, tokens,
                         block_ids, block_hashes,
@@ -388,15 +402,8 @@ class VineyardKVSBackend(HybridBackend):
         async def abort_save(reqs: list[Request]):
             await asyncio.sleep(envs.VLLM_KVS_IO_TIMEOUT_SECONDS + 1)
 
-            tasks = []
             for req in reqs:
-                for rank in range(
-                    self.vllm_config.parallel_config.tensor_parallel_size):
-                    tasks.append(
-                        hybridsched()._do_save_done(
-                            rank, ioret=IoRet(req.request_id)))
-
-            await asyncio.gather(*tasks)
+                mark_backend_save_done(req)
 
         from .engine_proxy import get_hybrid_sched_loop
         if scheduler_output.hc_aborted_save:
@@ -451,14 +458,14 @@ class VineyardKVSBackend(HybridBackend):
         else:
             token_ids_to_save = request.prompt_token_ids[:num_tokens_to_save]
             block_hashes = []
-        populated_block_ids = sched_get_kvblk_ids(
-            request_id, self._gamma, self._enable_prefix_caching,
-        )[:num_populated_blocks]
+        grouped_block_ids = sched_get_kvblk_ids(request_id)
+        assert len(grouped_block_ids) == 1, grouped_block_ids
+        populated_block_ids = grouped_block_ids[0][:num_populated_blocks]
 
         udc_ttl = 300 if (request.cache_control_params is not None and \
             "NOCPFS" not in request_id) else 0
 
-        trace_headers = request.trace_wrapper.extract_trace_headers("kv_save")
+        trace_headers = request.trace_wrapper.traceparent("kv_save")
         return ReqMeta(request_id, True, token_ids_to_save,
                     populated_block_ids, block_hashes, 0, num_computed_token_ids
                     >= request.num_prompt_tokens, udc_ttl=udc_ttl, 

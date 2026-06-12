@@ -54,11 +54,6 @@ class FilePBackend(HybridBackend):
         )
         return
 
-    async def async_cleanup(self, req: Request):
-        await self._file.async_cleanup(req)
-        await self._kvtp.async_cleanup(req)
-        return
-
     def get_operations(self, req: Request) -> tuple[int, int]:
         return 1, 1
 
@@ -82,6 +77,17 @@ class FilePBackend(HybridBackend):
     def clear_backend_metadata(self):
         self._file.clear_backend_metadata()
         self._kvtp.clear_backend_metadata()
+        return
+
+    def bypass_bind(self, meta: BackendMeta):
+        assert isinstance(meta, FilePMeta)
+        self._file.bypass_bind(meta.file)
+        self._kvtp.bypass_bind(meta.kvtp)
+        return
+
+    def bypass_clear(self):
+        self._file.bypass_clear()
+        self._kvtp.bypass_clear()
         return
 
     async def async_load_kv(self, m: BackendMeta) -> AsyncGenerator[IoRet, None]:

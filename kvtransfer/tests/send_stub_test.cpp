@@ -5,6 +5,10 @@
 #include <gmock/gmock.h>
 #include "client.h"
 #include "envcfg.h"
+#include "tx_stub.h"
+#include "cache_transfer_spec.h"
+#include "parse_block_common.h"
+#include <cstdlib>
 #include "thrid_party/logging.h"
 
 using ::testing::Return;
@@ -119,13 +123,6 @@ class FakeChannel : public IChannel {
     q.emplace(dst_inst_id, dst_worker_id);
     flush_cnt->fetch_add(1);
   }
-
-  void send_notification(const std::vector<const ReqSendTask*>& reqs) override {
-    for (const auto* r : reqs) {
-      auto req_id = r->req_id();
-      q.emplace(dst_inst_id, dst_worker_id, req_id);
-    }
-  }
 };
 
 class ProxyChannel : public IChannel {
@@ -142,9 +139,6 @@ class ProxyChannel : public IChannel {
   }
   void flush(std::string& o) override {
     ch_->flush(o);
-  }
-  void send_notification(const std::vector<const ReqSendTask*>& reqs) override {
-    ch_->send_notification(reqs);
   }
  private:
   IChannel *ch_;
@@ -213,16 +207,16 @@ static void test_parse_block_generate(int p_rank, int d_rank) {
   int ntpb = 64;
 
   auto p_info = WorkerInfo("0", 0);
-  p_info.tp_size = 16;
+  p_info.engine_tp_size = 16;
   p_info.worker_tp_rank = p_rank;
-  p_info.token_sizes = {2 * (kv_heads / p_info.tp_size) * head_dim * sizeof(uint16_t)};
+  p_info.token_sizes = {2 * (kv_heads / p_info.engine_tp_size) * head_dim * sizeof(uint16_t)};
   p_info.block_sizes = {p_info.token_sizes[0] * ntpb};
   std::cout << "p_info.token_size=" << p_info.token_sizes[0] << " p_info.block_size=" << p_info.block_sizes[0] << std::endl;
 
   auto d_info = WorkerInfo("1", 0);
-  d_info.tp_size = 4;
+  d_info.engine_tp_size = 4;
   d_info.worker_tp_rank = d_rank;
-  d_info.token_sizes = {2 * (kv_heads / d_info.tp_size) * head_dim * sizeof(uint16_t)};
+  d_info.token_sizes = {2 * (kv_heads / d_info.engine_tp_size) * head_dim * sizeof(uint16_t)};
   d_info.block_sizes = {d_info.token_sizes[0] * ntpb};
   std::cout << "d_info.token_size=" << d_info.token_sizes[0] << " d_info.block_size=" << d_info.block_sizes[0] << std::endl;
 
@@ -241,7 +235,7 @@ static void test_parse_block_generate(int p_rank, int d_rank) {
 
     std::vector<RequestInfo *> reqs;
     // the first send;
-    auto req0p = std::make_shared<RequestInfo>("1", 0, "req_id00000000000000000000000000", std::vector<uint32_t>{0, 1, 2}, std::vector<uint32_t>{4, 5, 6});
+    auto req0p = std::make_shared<RequestInfo>("1", 0, "req_id00000000000000000000000000", BlockIds{{0, 1, 2}}, BlockIds{{4, 5, 6}});
     RequestInfo& req0 = *req0p;
     task.tasks.emplace_back(req0p, 0, 8, false);
     reqs.push_back(&req0);
@@ -421,16 +415,16 @@ static void dgtp_test_parse_block_generate(int p_rank, int d_rank) {
   int ntpb = 64;
 
   auto p_info = WorkerInfo("0", 0);
-  p_info.tp_size = 4;
+  p_info.engine_tp_size = 4;
   p_info.worker_tp_rank = p_rank;
-  p_info.token_sizes = {2 * (kv_heads / p_info.tp_size) * head_dim * sizeof(uint16_t)};
+  p_info.token_sizes = {2 * (kv_heads / p_info.engine_tp_size) * head_dim * sizeof(uint16_t)};
   p_info.block_sizes = {p_info.token_sizes[0] * ntpb};
   std::cout << "p_info.token_size=" << p_info.token_sizes[0] << " p_info.block_size=" << p_info.block_sizes[0] << std::endl;
 
   auto d_info = WorkerInfo("1", 0);
-  d_info.tp_size = 16;
+  d_info.engine_tp_size = 16;
   d_info.worker_tp_rank = d_rank;
-  d_info.token_sizes = {2 * (kv_heads / d_info.tp_size) * head_dim * sizeof(uint16_t)};
+  d_info.token_sizes = {2 * (kv_heads / d_info.engine_tp_size) * head_dim * sizeof(uint16_t)};
   d_info.block_sizes = {d_info.token_sizes[0] * ntpb};
   std::cout << "d_info.token_size=" << d_info.token_sizes[0] << " d_info.block_size=" << d_info.block_sizes[0] << std::endl;
 
@@ -447,7 +441,7 @@ static void dgtp_test_parse_block_generate(int p_rank, int d_rank) {
 
     std::vector<RequestInfo *> reqs;
     // the first send;
-    auto req0p = std::make_shared<RequestInfo>("1", 0, "req_id00000000000000000000000000", std::vector<uint32_t>{0, 1, 2}, std::vector<uint32_t>{4, 5, 6});
+    auto req0p = std::make_shared<RequestInfo>("1", 0, "req_id00000000000000000000000000", BlockIds{{0, 1, 2}}, BlockIds{{4, 5, 6}});
     auto& req0 = *req0p;
     task.tasks.emplace_back(req0p, 0, 8, false);
     reqs.push_back(&req0);
@@ -620,17 +614,29 @@ TEST(SendStubTest, ParseBlockSendDGtP) {
 }
 
 TEST(SendStubTest, ParseBlockSendPEqD) {
+  // QWEN3_NEXT_FLASHINFER has stricter preconditions (attn_kernel_blk_ntpb,
+  // conv/ssm state shapes, etc.) that this generic P==D test does not set
+  // up. Coverage for that shape lives in the dedicated
+  // Qwen3NextFlashinferPEqD test below.
+  if (env_cache_shape() == QWEN3_NEXT_FLASHINFER_CACHE_SHAPE) return;
+
   uint32_t bs = 16 * KB; // block byte size
   uint32_t ts = KB;  // token byte size
   WorkerInfo src_info("0", 0);
   src_info.block_sizes = {bs};
   src_info.token_sizes = {ts};
   src_info.layer_num_blocks = 8;
+  // The generic P==D path here means engine_tp_size on both sides should
+  // be equal. We pick 1 explicitly so selection_p_tp == dst.engine_tp_size
+  // and we land on the P==D branch (matches the old default of kvt_tp_size=1
+  // that this test used to rely on implicitly).
+  src_info.engine_tp_size = 1;
   size_t src_half_layer_size = src_info.layer_num_blocks * bs / 2;
 
   WorkerInfo dst_info("1", 0);
   dst_info.block_sizes = {bs};
   dst_info.token_sizes = {ts};
+  dst_info.engine_tp_size = 1;
   dst_info.layer_num_blocks = 16;
   size_t dst_half_layer_size = dst_info.layer_num_blocks * bs / 2;
 
@@ -653,13 +659,26 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
     BatchSendTask task(step_0);
 
     std::vector<RequestInfo *> reqs;
-    // the first send;
-    auto req0p = std::make_shared<RequestInfo>(
-      /*InstanceId*/ "1", /*WorkerId*/ 0, 
-      /*RequestId*/ "req_id00000000000000000000000000", 
-      /*src_blocks*/ std::vector<uint32_t>{0, 1, 2}, 
-      /*dst_blocks*/ std::vector<uint32_t>{4, 5, 6}
-    );
+    std::shared_ptr<RequestInfo> req0p;
+    if (env_cache_shape() == QWEN3_NEXT_FLASH_CACHE_SHAPE) {
+      // BLLM_KVTRANS_NUM_GDN_LAYERS default is 3
+      // BlockIds layout: [gdn_group_0, gdn_group_1, gdn_group_2, attn_group]
+      req0p = std::make_shared<RequestInfo>(
+        /*InstanceId*/ "1", /*WorkerId*/ 0, 
+        /*RequestId*/ "req_id00000000000000000000000000", 
+        /*src_blocks*/ BlockIds{{6}, {7}, {8}, {0, 1, 2}}, 
+        /*dst_blocks*/ BlockIds{{10}, {11}, {12}, {4, 5, 6}});
+      // after parse block, ther will be no data to send
+      // we need to manually increment the flush count 
+      // in case of waiting for flush
+      flush_cnt->fetch_add(1);
+    } else {
+      req0p = std::make_shared<RequestInfo>(
+        /*InstanceId*/ "1", /*WorkerId*/ 0, 
+        /*RequestId*/ "req_id00000000000000000000000000", 
+        /*src_blocks*/ BlockIds{{0, 1, 2}}, 
+        /*dst_blocks*/ BlockIds{{4, 5, 6}});
+    }
     auto& req0 = *req0p;
     task.tasks.emplace_back(
       /*RequestInfo*/ req0p, 
@@ -691,28 +710,10 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
         layer++;
       }
     } else if (env_cache_shape() == QWEN3_NEXT_FLASH_CACHE_SHAPE){
-      // KV tensors are continous
-      EXPECT_EQ(q->size(), 3);
-      auto layer0 = q->front();
-      q->pop();
-      auto layer1 = q->front();
-      q->pop();
-      EXPECT_EQ(layer0.dst_inst_id, "1");
-      EXPECT_EQ(layer0.dst_worker_id, 0);
-      EXPECT_TRUE(layer0.data.has_value());
-      EXPECT_EQ(layer0.data.value().layer_idx, 0);
-      EXPECT_EQ(layer0.data.value().src_offset, 0);
-      EXPECT_EQ(layer0.data.value().dst_offset, 4 * bs);
-      EXPECT_EQ(layer0.data.value().length, 8 * KB);
-
-      EXPECT_EQ(layer1.dst_inst_id, "1");
-      EXPECT_EQ(layer1.dst_worker_id, 0);
-      EXPECT_TRUE(layer1.data.has_value());
-      EXPECT_EQ(layer1.data.value().layer_idx, 1);
-      EXPECT_EQ(layer1.data.value().src_offset, 0);
-      EXPECT_EQ(layer1.data.value().dst_offset, 4 * bs);
-      EXPECT_EQ(layer1.data.value().length, 8 * KB);
+      // new_tokens < block_size, no data to send
+      EXPECT_EQ(q->size(), 0);
     }else { // FLASH_CACHE_SHAPE
+      // Why 5?
       EXPECT_EQ(q->size(), 5);
       auto layer0_k = q->front();
       q->pop();
@@ -754,10 +755,12 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
       EXPECT_EQ(layer1_v.data.value().dst_offset, 4 * bs / 2 + dst_half_layer_size);
       EXPECT_EQ(layer1_v.data.value().length, 8 * KB / 2);
     }
-    auto flush = q->front();
-    q->pop();
-    EXPECT_EQ(flush.dst_inst_id, "1");
-    EXPECT_EQ(flush.dst_worker_id, 0);
+    if (env_cache_shape() != QWEN3_NEXT_FLASH_CACHE_SHAPE) {
+      auto flush = q->front();
+      q->pop();
+      EXPECT_EQ(flush.dst_inst_id, "1");
+      EXPECT_EQ(flush.dst_worker_id, 0);
+    }
   }
   {
     auto step_1 = std::make_shared<Step>(1);
@@ -765,11 +768,22 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
 
     // the second send;
     std::vector<RequestInfo *> reqs;
-    auto req1p = std::make_shared<RequestInfo>(
-      /*InstanceId*/ "1", /*WorkerId*/ 0, 
-      /*RequestId*/ "req_id00000000000000000000000001", 
-      /*src_blocks*/ std::vector<uint32_t>{0, 1, 2}, 
-      /*dst_blocks*/ std::vector<uint32_t>{4, 5, 6});
+    std::shared_ptr<RequestInfo> req1p;
+    if (env_cache_shape() == QWEN3_NEXT_FLASH_CACHE_SHAPE) {
+      // BLLM_KVTRANS_NUM_GDN_LAYERS default is 3
+      // BlockIds layout: [gdn_group_0, gdn_group_1, gdn_group_2, attn_group]
+      req1p = std::make_shared<RequestInfo>(
+        /*InstanceId*/ "1", /*WorkerId*/ 0, 
+        /*RequestId*/ "req_id00000000000000000000000001", 
+        /*src_blocks*/ BlockIds{{6}, {7}, {8}, {0, 1, 2}}, 
+        /*dst_blocks*/ BlockIds{{10}, {11}, {12}, {4, 5, 6}});
+    } else {
+      req1p = std::make_shared<RequestInfo>(
+        /*InstanceId*/ "1", /*WorkerId*/ 0, 
+        /*RequestId*/ "req_id00000000000000000000000001", 
+        /*src_blocks*/ BlockIds{{0, 1, 2}}, 
+        /*dst_blocks*/ BlockIds{{4, 5, 6}});
+    }
     auto& req1 = *req1p;
     task.tasks.emplace_back(
       /*RequestInfo*/ req1p, 
@@ -803,7 +817,9 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
         EXPECT_EQ(b2.data.value().length, 17 * KB);
       }
     } else if (env_cache_shape() == QWEN3_NEXT_FLASH_CACHE_SHAPE) {
-      EXPECT_EQ(q->size(), 3); // because req1 has 17 tokens need two continuous blocks, can be merged;
+      // req1 has 17 tokens, one total block and one partial block,
+      // only send the total block
+      EXPECT_EQ(q->size(), 3); // flush_msg/layer0/layer1
       {
         auto b1 = q->front();
         q->pop();
@@ -811,7 +827,7 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
         EXPECT_EQ(b1.data.value().layer_idx, 0);
         EXPECT_EQ(b1.data.value().src_offset, 0);
         EXPECT_EQ(b1.data.value().dst_offset, 4 * 16 * KB);
-        EXPECT_EQ(b1.data.value().length, 17 * KB);
+        EXPECT_EQ(b1.data.value().length, 16 * KB);
 
         b1 = q->front();
         q->pop();
@@ -819,7 +835,7 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
         EXPECT_EQ(b1.data.value().layer_idx, 1);
         EXPECT_EQ(b1.data.value().src_offset, 0);
         EXPECT_EQ(b1.data.value().dst_offset, 4 * 16 * KB);
-        EXPECT_EQ(b1.data.value().length, 17 * KB);
+        EXPECT_EQ(b1.data.value().length, 16 * KB);
       }
     }else {// FLASH_CACHE_SHAPE
       EXPECT_EQ(q->size(), 5); // because req1 has 17 tokens need two continuous blocks, can be merged;
@@ -868,11 +884,23 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
 
     // the third send
     std::vector<RequestInfo *> reqs;
-    auto req3p = std::make_shared<RequestInfo>(
-      /*InstanceId*/ "1", /*WorkerId*/ 0, 
-      /*RequestId*/ "req_id00000000000000000000000002", 
-      /*src_blocks*/ std::vector<uint32_t>{3, 4, 5}, 
-      /*dst_blocks*/ std::vector<uint32_t>{7, 8, 9});
+    std::shared_ptr<RequestInfo> req3p;
+    if (env_cache_shape() == QWEN3_NEXT_FLASH_CACHE_SHAPE) {
+      // BLLM_KVTRANS_NUM_GDN_LAYERS default is 3
+      // BlockIds layout: [gdn_group_0, gdn_group_1, gdn_group_2, attn_group]
+      req3p = std::make_shared<RequestInfo>(
+        /*InstanceId*/ "1", /*WorkerId*/ 0, 
+        /*RequestId*/ "req_id00000000000000000000000002", 
+        /*src_blocks*/ BlockIds{{6}, {7}, {8}, {3, 4, 5}}, 
+        /*dst_blocks*/ BlockIds{{10}, {11}, {12}, {7, 8, 9}});
+    } else {
+      req3p = std::make_shared<RequestInfo>(
+        /*InstanceId*/ "1", /*WorkerId*/ 0, 
+        /*RequestId*/ "req_id00000000000000000000000002", 
+        /*src_blocks*/ BlockIds{{3, 4, 5}}, 
+        /*dst_blocks*/ BlockIds{{7, 8, 9}});
+    }
+
     auto& req3 = *req3p;
     task.tasks.emplace_back(
       /*RequestInfo*/ req3p, 
@@ -889,7 +917,7 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
 
     EXPECT_TRUE(req3.state() == ReqState::OK);
     if (env_cache_shape() == RAGGED_FLASH_CACHE_SHAPE) {
-      EXPECT_EQ(q->size(), 4);
+      EXPECT_EQ(q->size(), 3);
       {
         auto b1 = q->front();
         q->pop();
@@ -908,23 +936,25 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
       }
     } else if (env_cache_shape() == QWEN3_NEXT_FLASH_CACHE_SHAPE)
     {
+      // req3 reached last token, send all blocks
       auto b1 = q->front();
       q->pop();
       EXPECT_TRUE(b1.data.has_value());
       EXPECT_EQ(b1.data.value().layer_idx, 0);
-      EXPECT_EQ(b1.data.value().src_offset, (4 * bs + ts));
-      EXPECT_EQ(b1.data.value().dst_offset, (8 * bs + ts));
-      EXPECT_EQ(b1.data.value().length, (3 * bs - 17 * ts));
+      // block aligned, no partial block
+      EXPECT_EQ(b1.data.value().src_offset, (4 * bs));
+      EXPECT_EQ(b1.data.value().dst_offset, (8 * bs));
+      EXPECT_EQ(b1.data.value().length, (5 * bs));
 
       b1 = q->front();
       q->pop();
       EXPECT_TRUE(b1.data.has_value());
       EXPECT_EQ(b1.data.value().layer_idx, 1);
-      EXPECT_EQ(b1.data.value().src_offset, (4 * bs + ts));
-      EXPECT_EQ(b1.data.value().dst_offset, (8 * bs + ts));
-      EXPECT_EQ(b1.data.value().length, (3 * bs - 17 * ts));
+      EXPECT_EQ(b1.data.value().src_offset, (4 * bs));
+      EXPECT_EQ(b1.data.value().dst_offset, (8 * bs));
+      EXPECT_EQ(b1.data.value().length, (5 * bs));
     } else { // FLASH_CACHE_SHAPE
-      EXPECT_EQ(q->size(), 4 + 2);
+      EXPECT_EQ(q->size(), 4 + 1);
       {
         auto b1 = q->front();
         q->pop();
@@ -961,10 +991,6 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
     q->pop();
     EXPECT_EQ(flush.dst_inst_id, "1");
     EXPECT_EQ(flush.dst_worker_id, 0);
-    auto b3 = q->front();
-    q->pop();
-    EXPECT_TRUE(b3.req_id.has_value());
-    EXPECT_EQ(b3.req_id.value(), "req_id00000000000000000000000002");
   }
   {
     // the fourth send, only test hybrid block parsing method 
@@ -977,8 +1003,8 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
       auto req4p = std::make_shared<RequestInfo>(
         /*InstanceId*/ "1", /*WorkerId*/ 0, 
         /*RequestId*/ "req_id00000000000000000000000003", 
-        /*src_blocks*/ std::vector<uint32_t>{3, 4, 5, 6}, 
-        /*dst_blocks*/ std::vector<uint32_t>{7, 8, 9, 10});
+        /*src_blocks*/ BlockIds{{3}, {4}, {5}, {6}}, 
+        /*dst_blocks*/ BlockIds{{7}, {8}, {9}, {10}});
       auto& req4 = *req4p;
       task.tasks.emplace_back(
         /*RequestInfo*/ req4p, 
@@ -996,17 +1022,17 @@ TEST(SendStubTest, ParseBlockSendPEqD) {
       q->pop();
       EXPECT_TRUE(b1.data.has_value());
       EXPECT_EQ(b1.data.value().layer_idx, 0);
-      EXPECT_EQ(b1.data.value().src_offset, (3 * bs + ts));
-      EXPECT_EQ(b1.data.value().dst_offset, (7 * bs + ts));
-      EXPECT_EQ(b1.data.value().length, (4 * bs - ts));
+      EXPECT_EQ(b1.data.value().src_offset, (3 * bs));
+      EXPECT_EQ(b1.data.value().dst_offset, (7 * bs));
+      EXPECT_EQ(b1.data.value().length, (4 * bs));
 
       b1 = q->front();
       q->pop();
       EXPECT_TRUE(b1.data.has_value());
       EXPECT_EQ(b1.data.value().layer_idx, 1);
-      EXPECT_EQ(b1.data.value().src_offset, (3 * bs + ts));
-      EXPECT_EQ(b1.data.value().dst_offset, (7 * bs + ts));
-      EXPECT_EQ(b1.data.value().length, (4 * bs - ts));
+      EXPECT_EQ(b1.data.value().src_offset, (3 * bs));
+      EXPECT_EQ(b1.data.value().dst_offset, (7 * bs));
+      EXPECT_EQ(b1.data.value().length, (4 * bs));
     }
   }
 }
@@ -1018,7 +1044,6 @@ class MockChannel : public IChannel {
   MOCK_METHOD(void, register_data, ((std::vector<std::vector<IpcBlock>>& data), TPKind kind), (override));
   MOCK_METHOD(void, flush, (std::string& out), (override));
   MOCK_METHOD(void, send_data, (size_t layer_idx), (override));
-  MOCK_METHOD(void, send_notification, (const std::vector<const ReqSendTask*>& reqs), (override));
 };
 
 TEST(SendStubTest, UseMockChannel) {
@@ -1047,7 +1072,7 @@ TEST(SendStubTest, UseMockChannel) {
   auto step_0 = std::make_shared<Step>(0);
   BatchSendTask task(step_0);
   std::vector<RequestInfo *> reqs;
-  auto req0p = std::make_shared<RequestInfo>("1", 0, "req_id00000000000000000000000000", std::vector<uint32_t>{0, 1, 2}, std::vector<uint32_t>{4, 5, 6});
+  auto req0p = std::make_shared<RequestInfo>("1", 0, "req_id00000000000000000000000000", BlockIds{{0, 1, 2}}, BlockIds{{4, 5, 6}});
   auto& req0 = *req0p;
   task.tasks.emplace_back(req0p, 0, 8, false);
   reqs.push_back(&req0);
@@ -1059,7 +1084,6 @@ TEST(SendStubTest, UseMockChannel) {
   EXPECT_CALL(channel, send_data(Eq(0))).Times(1);
   EXPECT_CALL(channel, send_data(Eq(1))).Times(1);
   EXPECT_CALL(channel, flush(_)).Times(1);
-  EXPECT_CALL(channel, send_notification(_)).Times(0);
 
   {
     auto naming = std::make_shared<FakeNamingWorkerClient>(2, dst_info);
@@ -1161,15 +1185,13 @@ class FTTC : public IChannel {
   bool* register_data_called_ = nullptr;
   bool* send_data_called_ = nullptr;
   bool* flush_called_ = nullptr;
-  bool* send_notification_called_ = nullptr;
 public:
-  FTTC(int ch_id, bool* dead, bool* register_data_called, bool* send_data_called, bool* flush_called, bool* send_notification_called):
+  FTTC(int ch_id, bool* dead, bool* register_data_called, bool* send_data_called, bool* flush_called):
     ch_id_(ch_id),
     dead_(dead),
     register_data_called_(register_data_called),
     send_data_called_(send_data_called),
-    flush_called_(flush_called),
-    send_notification_called_(send_notification_called) {}
+    flush_called_(flush_called) {}
 
   ~FTTC() {
     *dead_ = true;
@@ -1204,16 +1226,6 @@ public:
   void flush(std::string& out) override {
     *flush_called_ = true;
   }
-
-  void send_notification(const std::vector<const ReqSendTask*>& reqs) override {
-    *send_notification_called_ = true;
-    EXPECT_EQ(ch_id_, 1);
-    EXPECT_EQ(reqs.size(), 2);
-    EXPECT_EQ(reqs[0]->req_id(), "2");
-    EXPECT_EQ(reqs[0]->state(), ReqState::FAILED);
-    EXPECT_EQ(reqs[1]->req_id(), "3");
-    EXPECT_EQ(reqs[1]->state(), ReqState::OK);
-  }
 };
 
 // FaultTolerantTestChannelFactory
@@ -1223,7 +1235,6 @@ struct FTTCF: public IChannelFactory {
   bool register_data_called_[2] = {false, false};
   bool send_data_called_[2] = {false, false};
   bool flush_called_[2] = {false, false};
-  bool send_notification_called_[2] = {false, false};
 public:
   FTTCF() {}
 
@@ -1234,8 +1245,7 @@ public:
       &dead_ch_[ch_id],
       &register_data_called_[ch_id],
       &send_data_called_[ch_id],
-      &flush_called_[ch_id],
-      &send_notification_called_[ch_id]);
+      &flush_called_[ch_id]);
   }
 };
 
@@ -1265,13 +1275,13 @@ TEST(SendStubTest, FaultTolerantTest) {
   auto naming = std::make_shared<FakeNamingWorkerClient>(2, dst_info);
   auto tx = std::make_unique<KvSendStub>("1", 0, src_info, 0, num_layers, std::make_unique<ProxyChannelFactory>(&fttcf), naming);
 
-  auto req1p = std::make_shared<RequestInfo>("1", 0, "1", std::vector<uint32_t>{10, 11, 12}, std::vector<uint32_t>{14, 15, 16});
+  auto req1p = std::make_shared<RequestInfo>("1", 0, "1", BlockIds{{10, 11, 12}}, BlockIds{{14, 15, 16}});
   auto& req1 = *req1p;
 
-  auto req2p = std::make_shared<RequestInfo>("1", 0, "2", std::vector<uint32_t>{17, 18, 19}, std::vector<uint32_t>{20, 21, 22});
+  auto req2p = std::make_shared<RequestInfo>("1", 0, "2", BlockIds{{17, 18, 19}}, BlockIds{{20, 21, 22}});
   auto& req2 = *req2p;
 
-  auto req3p = std::make_shared<RequestInfo>("1", 0, "3", std::vector<uint32_t>{0, 1, 2}, std::vector<uint32_t>{4, 5, 6});
+  auto req3p = std::make_shared<RequestInfo>("1", 0, "3", BlockIds{{0, 1, 2}}, BlockIds{{4, 5, 6}});
   auto& req3 = *req3p;
   {
     auto step_0 = std::make_shared<Step>(0);
@@ -1295,7 +1305,6 @@ TEST(SendStubTest, FaultTolerantTest) {
     EXPECT_TRUE(fttcf.register_data_called_[0]);
     EXPECT_TRUE(fttcf.send_data_called_[0]);
     EXPECT_FALSE(fttcf.flush_called_[0]);
-    EXPECT_FALSE(fttcf.send_notification_called_[0]);
 
     auto step_1 = std::make_shared<Step>(1);
     BatchSendTask task1(step_1);
@@ -1321,7 +1330,6 @@ TEST(SendStubTest, FaultTolerantTest) {
     EXPECT_TRUE(fttcf.register_data_called_[1]);
     EXPECT_TRUE(fttcf.send_data_called_[1]);
     EXPECT_TRUE(fttcf.flush_called_[1]);
-    EXPECT_TRUE(fttcf.send_notification_called_[1]);
     EXPECT_FALSE(fttcf.dead_ch_[1]);
   }
   tx.reset();
@@ -1332,13 +1340,22 @@ TEST(SendStubTest, FaultTolerantTest) {
 
 
 TEST(SendStubTest, CreateChannelFaultTolerantTest) {
+  // Both QWEN3_NEXT_FLASH and QWEN3_NEXT_FLASHINFER require shape-specific
+  // WorkerInfo fields (GDN state shapes, attn_kernel_blk_ntpb, ...) that
+  // this generic fault-tolerance test does not set up.
+  if (env_cache_shape() == QWEN3_NEXT_FLASH_CACHE_SHAPE ||
+      env_cache_shape() == QWEN3_NEXT_FLASHINFER_CACHE_SHAPE) {
+    return ;
+  }
   WorkerInfo src_info("0", 0);
   src_info.block_sizes = {bs};
   src_info.token_sizes = {ts};
+  src_info.engine_tp_size = 1;
 
   WorkerInfo dst_info("1", 0);
   dst_info.block_sizes = {bs};
   dst_info.token_sizes = {ts};
+  dst_info.engine_tp_size = 1;
 
   Context ctx("0", 1);
   ctx.set_block_params({bs}, {ts}, 8);
@@ -1353,13 +1370,13 @@ TEST(SendStubTest, CreateChannelFaultTolerantTest) {
   auto naming = std::make_shared<FakeNamingWorkerClient>(3, dst_info);
   auto tx = std::make_unique<KvSendStub>("1", 0, src_info, 0, num_layers, std::make_unique<ProxyChannelFactory>(&fttcf), naming);
 
-  auto req1p = std::make_shared<RequestInfo>("1", 0, "1", std::vector<uint32_t>{10, 11, 12}, std::vector<uint32_t>{14, 15, 16});
+  auto req1p = std::make_shared<RequestInfo>("1", 0, "1", BlockIds{{10, 11, 12}}, BlockIds{{14, 15, 16}});
   auto& req1 = *req1p;
 
-  auto req2p = std::make_shared<RequestInfo>("1", 0, "2", std::vector<uint32_t>{17, 18, 19}, std::vector<uint32_t>{20, 21, 22});
+  auto req2p = std::make_shared<RequestInfo>("1", 0, "2", BlockIds{{17, 18, 19}}, BlockIds{{20, 21, 22}});
   auto& req2 = *req2p;
 
-  auto req3p = std::make_shared<RequestInfo>("1", 0, "3", std::vector<uint32_t>{0, 1, 2}, std::vector<uint32_t>{4, 5, 6});
+  auto req3p = std::make_shared<RequestInfo>("1", 0, "3", BlockIds{{0, 1, 2}}, BlockIds{{4, 5, 6}});
   auto& req3 = *req3p;
   {
     auto step_0 = std::make_shared<Step>(0);
@@ -1380,7 +1397,6 @@ TEST(SendStubTest, CreateChannelFaultTolerantTest) {
     EXPECT_FALSE(fttcf.register_data_called_[0]);
     EXPECT_FALSE(fttcf.send_data_called_[0]);
     EXPECT_FALSE(fttcf.flush_called_[0]);
-    EXPECT_FALSE(fttcf.send_notification_called_[0]);
 
     auto step_1 = std::make_shared<Step>(1);
     BatchSendTask task1(step_1);
@@ -1406,7 +1422,6 @@ TEST(SendStubTest, CreateChannelFaultTolerantTest) {
     EXPECT_TRUE(fttcf.register_data_called_[0]);
     EXPECT_TRUE(fttcf.send_data_called_[0]);
     EXPECT_FALSE(fttcf.flush_called_[0]);
-    EXPECT_FALSE(fttcf.send_notification_called_[0]);
   }
   tx.reset();
   while (!fttcf.dead_ch_[0]) {
@@ -1415,4 +1430,1087 @@ TEST(SendStubTest, CreateChannelFaultTolerantTest) {
 }
 
 
+TEST(ComputeValidRanksTest, AllRanksValidWhenKvHeadsGeqPtp) {
+  // When d_tp <= num_kv_heads, use original logic
+  auto vr = compute_valid_ranks_pd(4, 2, 8);  // p_tp=4, d_tp=2, num_kv_heads=8
+  EXPECT_EQ(vr.count(), 4u);
+  for (uint32_t i = 0; i < 4; ++i) {
+    EXPECT_TRUE(vr[i]);
+  }
 }
+
+TEST(CacheTransferSpecTest, RaggedFlashPEqD) {
+  if (env_cache_shape() != RAGGED_FLASH_CACHE_SHAPE) return;
+
+  const size_t block_size = 16 * KB;
+  const size_t token_size = KB;
+
+  WorkerInfo src("0", 0);
+  src.engine_tp_size = 4;
+  src.worker_tp_rank = 0;
+  src.num_gdn_layers = 0;
+  src.block_sizes = {block_size};
+  src.token_sizes = {token_size};
+
+  WorkerInfo dst("1", 0);
+  dst.engine_tp_size = 4;
+  dst.worker_tp_rank = 0;
+  dst.num_gdn_layers = 0;
+  dst.block_sizes = {block_size};
+  dst.token_sizes = {token_size};
+
+  auto valid_ranks = compute_valid_ranks_pd(src.engine_tp_size, dst.engine_tp_size, -1);
+  uint32_t eff_tp_size = static_cast<uint32_t>(valid_ranks.count());
+  uint32_t eff_tp_rank = static_cast<uint32_t>(
+      (valid_ranks << (valid_ranks.size() - src.worker_tp_rank)).count());
+
+  auto plan = build_transfer_plan(RAGGED_FLASH_CACHE_SHAPE, src, dst, valid_ranks, eff_tp_size, eff_tp_rank);
+  EXPECT_EQ(plan.tpkind, TPKind::PEQD);
+  ASSERT_EQ(plan.specs.size(), 1);
+  EXPECT_TRUE(plan.specs[0].valid);
+  ASSERT_EQ(plan.specs[0].components.size(), 1);
+  auto& ragged_peqd = std::get<AttnComponent>(plan.specs[0].components[0]);
+  EXPECT_FALSE(ragged_peqd.spec.v.has_value());
+
+  // 8 tokens spanning 1 block (block 0 -> block 4)
+  BlockIds src_blocks = {{0, 1, 2}};
+  BlockIds dst_blocks = {{4, 5, 6}};
+  std::vector<IpcBlock> out;
+  generate_ipc_blocks(plan.specs[0], src_blocks, dst_blocks,
+                      0, 8, false, out);
+
+  // One IpcBlock per token (same block_idx) in the generic generator.
+  ASSERT_EQ(out.size(), 8u);
+  for (size_t i = 0; i < 8; ++i) {
+    EXPECT_EQ(out[i].src_offset, 0 * block_size + i * token_size);
+    EXPECT_EQ(out[i].dst_offset, 4 * block_size + i * token_size);
+    EXPECT_EQ(out[i].length, token_size);
+  }
+}
+
+TEST(CacheTransferSpecTest, RaggedFlashPEqDCrossingBlocks) {
+  if (env_cache_shape() != RAGGED_FLASH_CACHE_SHAPE) return;
+
+  const size_t block_size = 16 * KB;
+  const size_t token_size = KB;
+
+  WorkerInfo src("0", 0);
+  src.engine_tp_size = 1; src.worker_tp_rank = 0;
+  src.num_gdn_layers = 0;
+  src.block_sizes = {block_size}; src.token_sizes = {token_size};
+
+  WorkerInfo dst("1", 0);
+  dst.engine_tp_size = 1; dst.worker_tp_rank = 0;
+  dst.num_gdn_layers = 0;
+  dst.block_sizes = {block_size}; dst.token_sizes = {token_size};
+
+  auto valid_ranks = compute_valid_ranks_pd(src.engine_tp_size, dst.engine_tp_size, -1);
+  uint32_t eff_tp_size = static_cast<uint32_t>(valid_ranks.count());
+  uint32_t eff_tp_rank = static_cast<uint32_t>(
+      (valid_ranks << (valid_ranks.size() - src.worker_tp_rank)).count());
+
+  auto plan = build_transfer_plan(RAGGED_FLASH_CACHE_SHAPE, src, dst, valid_ranks, eff_tp_size, eff_tp_rank);
+  BlockIds src_blocks = {{0, 1, 2}};
+  BlockIds dst_blocks = {{4, 5, 6}};
+  std::vector<IpcBlock> out;
+
+  // seen_tokens=12 (token 12 in block 0), new_tokens=10 (crosses to block 1)
+  generate_ipc_blocks(plan.specs[0], src_blocks, dst_blocks,
+                      12, 10, false, out);
+
+  // Per-token IpcBlocks: 4 in block 0 then 6 in block 1
+  ASSERT_EQ(out.size(), 10u);
+  for (uint32_t i = 0; i < 4; ++i) {
+    EXPECT_EQ(out[i].src_offset, 0 * block_size + (12 + i) * token_size);
+    EXPECT_EQ(out[i].dst_offset, 4 * block_size + (12 + i) * token_size);
+    EXPECT_EQ(out[i].length, token_size);
+  }
+  for (uint32_t i = 0; i < 6; ++i) {
+    EXPECT_EQ(out[4 + i].src_offset, 1 * block_size + i * token_size);
+    EXPECT_EQ(out[4 + i].dst_offset, 5 * block_size + i * token_size);
+    EXPECT_EQ(out[4 + i].length, token_size);
+  }
+}
+
+TEST(CacheTransferSpecTest, RaggedFlashPGtD) {
+  if (env_cache_shape() != RAGGED_FLASH_CACHE_SHAPE) return;
+
+  int kv_heads = 16;
+  int head_dim = 256;
+  int ntpb = 64;
+
+  WorkerInfo src("0", 0);
+  src.engine_tp_size = 16;
+  src.worker_tp_rank = 0;
+  src.num_gdn_layers = 0;
+  src.token_sizes = {2 * (kv_heads / src.engine_tp_size) * head_dim * sizeof(uint16_t)};
+  src.block_sizes = {src.token_sizes[0] * ntpb};
+
+  WorkerInfo dst("1", 0);
+  dst.engine_tp_size = 4;
+  dst.worker_tp_rank = 0;
+  dst.num_gdn_layers = 0;
+  dst.token_sizes = {2 * (kv_heads / dst.engine_tp_size) * head_dim * sizeof(uint16_t)};
+  dst.block_sizes = {dst.token_sizes[0] * ntpb};
+
+  auto valid_ranks = compute_valid_ranks_pd(src.engine_tp_size, dst.engine_tp_size, kv_heads);
+  uint32_t eff_tp_size = static_cast<uint32_t>(valid_ranks.count());
+  uint32_t eff_tp_rank = static_cast<uint32_t>(
+      (valid_ranks << (valid_ranks.size() - src.worker_tp_rank)).count());
+
+  auto plan = build_transfer_plan(RAGGED_FLASH_CACHE_SHAPE, src, dst, valid_ranks, eff_tp_size, eff_tp_rank);
+  EXPECT_EQ(plan.tpkind, TPKind::PGTD);
+  ASSERT_EQ(plan.specs.size(), 1);
+  EXPECT_TRUE(plan.specs[0].valid);
+  // Single AttnComponent with VSpec (K + V)
+  ASSERT_EQ(plan.specs[0].components.size(), 1);
+  auto& ragged_pgtd = std::get<AttnComponent>(plan.specs[0].components[0]);
+  EXPECT_TRUE(ragged_pgtd.spec.v.has_value());
+
+  BlockIds src_blocks = {{0, 1}};
+  BlockIds dst_blocks = {{4, 5}};
+  std::vector<IpcBlock> out;
+  generate_ipc_blocks(plan.specs[0], src_blocks, dst_blocks,
+                      0, 2, false, out);
+
+  // 2 tokens, K + V streams = 4 IpcBlocks
+  EXPECT_EQ(out.size(), 4);
+  // K blocks should have p_k_size length
+  size_t p_k_size = src.token_sizes[0] / 2;
+  EXPECT_EQ(out[0].length, p_k_size);
+  EXPECT_EQ(out[1].length, p_k_size);
+  // V blocks
+  EXPECT_EQ(out[2].length, p_k_size);
+  EXPECT_EQ(out[3].length, p_k_size);
+}
+
+TEST(CacheTransferSpecTest, FlashCachePEqD) {
+  if (env_cache_shape() != FLASH_CACHE_SHAPE) return;
+
+  const size_t kv_block_size = 32 * KB;
+  const size_t kv_token_size = 2 * KB;
+  const size_t k_block_size = kv_block_size / 2;
+  const size_t k_token_size = kv_token_size / 2;
+
+  WorkerInfo src("0", 0);
+  src.engine_tp_size = 4; src.worker_tp_rank = 0;
+  src.num_gdn_layers = 0;
+  src.block_sizes = {kv_block_size}; src.token_sizes = {kv_token_size};
+  src.layer_num_blocks = 8;
+
+  WorkerInfo dst("1", 0);
+  dst.engine_tp_size = 4; dst.worker_tp_rank = 0;
+  dst.num_gdn_layers = 0;
+  dst.block_sizes = {kv_block_size}; dst.token_sizes = {kv_token_size};
+  dst.layer_num_blocks = 16;
+
+  constexpr int kFlashKvHeads = 8;
+  src.num_kv_heads = kFlashKvHeads;
+  dst.num_kv_heads = kFlashKvHeads;
+
+  auto valid_ranks = compute_valid_ranks_pd(src.engine_tp_size, dst.engine_tp_size, kFlashKvHeads);
+  uint32_t eff_tp_size = static_cast<uint32_t>(valid_ranks.count());
+  uint32_t eff_tp_rank = static_cast<uint32_t>(
+      (valid_ranks << (valid_ranks.size() - src.worker_tp_rank)).count());
+
+  auto plan = build_transfer_plan(FLASH_CACHE_SHAPE, src, dst, valid_ranks, eff_tp_size, eff_tp_rank);
+  EXPECT_EQ(plan.tpkind, TPKind::PEQD);
+  ASSERT_EQ(plan.specs.size(), 1);
+  // Single AttnComponent with VSpec (K + V)
+  ASSERT_EQ(plan.specs[0].components.size(), 1);
+  auto& flash_peqd = std::get<AttnComponent>(plan.specs[0].components[0]);
+  ASSERT_TRUE(flash_peqd.spec.v.has_value());
+
+  // K component: no global offset
+  EXPECT_EQ(flash_peqd.spec.src_global_offset, 0);
+  EXPECT_EQ(flash_peqd.spec.dst_global_offset, 0);
+  // V component: layer offset
+  size_t src_layer_size = k_block_size * src.layer_num_blocks;
+  size_t dst_layer_size = k_block_size * dst.layer_num_blocks;
+  EXPECT_EQ(flash_peqd.spec.v->src_global_offset, src_layer_size);
+  EXPECT_EQ(flash_peqd.spec.v->dst_global_offset, dst_layer_size);
+
+  BlockIds src_blocks = {{0, 1}};
+  BlockIds dst_blocks = {{4, 5}};
+  std::vector<IpcBlock> out;
+  generate_ipc_blocks(plan.specs[0], src_blocks, dst_blocks,
+                      0, 4, false, out);
+
+  // 4 tokens in 1 block, 2 components (K + V) = 2 IpcBlocks
+  ASSERT_EQ(out.size(), 2);
+  // K
+  EXPECT_EQ(out[0].src_offset, 0 * k_block_size);
+  EXPECT_EQ(out[0].dst_offset, 4 * k_block_size);
+  EXPECT_EQ(out[0].length, 4 * k_token_size);
+  // V
+  EXPECT_EQ(out[1].src_offset, 0 * k_block_size + src_layer_size);
+  EXPECT_EQ(out[1].dst_offset, 4 * k_block_size + dst_layer_size);
+  EXPECT_EQ(out[1].length, 4 * k_token_size);
+}
+
+TEST(CacheTransferSpecTest, GenerateAllIpcBlocks) {
+  if (env_cache_shape() != RAGGED_FLASH_CACHE_SHAPE) return;
+
+  const size_t block_size = 16 * KB;
+  const size_t token_size = KB;
+
+  WorkerInfo src("0", 0);
+  src.engine_tp_size = 1; src.worker_tp_rank = 0;
+  src.num_gdn_layers = 0;
+  src.block_sizes = {block_size}; src.token_sizes = {token_size};
+
+  WorkerInfo dst("1", 0);
+  dst.engine_tp_size = 1; dst.worker_tp_rank = 0;
+  dst.num_gdn_layers = 0;
+  dst.block_sizes = {block_size}; dst.token_sizes = {token_size};
+
+  auto valid_ranks = compute_valid_ranks_pd(src.engine_tp_size, dst.engine_tp_size, -1);
+  uint32_t eff_tp_size = static_cast<uint32_t>(valid_ranks.count());
+  uint32_t eff_tp_rank = static_cast<uint32_t>(
+      (valid_ranks << (valid_ranks.size() - src.worker_tp_rank)).count());
+
+  auto plan = build_transfer_plan(RAGGED_FLASH_CACHE_SHAPE, src, dst, valid_ranks, eff_tp_size, eff_tp_rank);
+
+  auto req = std::make_shared<RequestInfo>(
+    "1", 0, "req0",
+    BlockIds{{0, 1}},
+    BlockIds{{4, 5}}
+  );
+  ReqSendTask task(req, 0, 20, true);
+
+  std::vector<std::vector<IpcBlock>> send_blocks;
+  generate_all_ipc_blocks(plan, &task, send_blocks);
+
+  ASSERT_EQ(send_blocks.size(), 1);
+  ASSERT_EQ(send_blocks[0].size(), 20u);
+  for (uint32_t i = 0; i < 16; ++i) {
+    EXPECT_EQ(send_blocks[0][i].length, token_size);
+  }
+  for (uint32_t i = 0; i < 4; ++i) {
+    EXPECT_EQ(send_blocks[0][16 + i].length, token_size);
+  }
+}
+
+TEST(CacheTransferSpecTest, InactiveSpec) {
+  // Test that inactive spec produces no IpcBlocks
+  CacheTransferSpec spec;
+  spec.valid = false;
+
+  BlockIds src_blocks = {{0}};
+  BlockIds dst_blocks = {{1}};
+  std::vector<IpcBlock> out;
+  generate_ipc_blocks(spec, src_blocks, dst_blocks, 0, 10, false, out);
+  EXPECT_TRUE(out.empty());
+}
+
+static void expect_send_blocks_equivalent(
+    const std::vector<std::vector<IpcBlock>>& lhs,
+    const std::vector<std::vector<IpcBlock>>& rhs) {
+  ASSERT_EQ(lhs.size(), rhs.size());
+  for (size_t t = 0; t < lhs.size(); ++t) {
+    size_t lhs_total = 0;
+    for (const auto& b : lhs[t]) lhs_total += b.length;
+    size_t rhs_total = 0;
+    for (const auto& b : rhs[t]) rhs_total += b.length;
+    EXPECT_EQ(lhs_total, rhs_total) << "tensor idx=" << t;
+    EXPECT_EQ(lhs[t].empty(), rhs[t].empty()) << "tensor idx=" << t;
+  }
+}
+
+TEST(CacheTransferSpecTest, Qwen3NextPEqD_CompareWithMainParse) {
+  if (env_cache_shape() != QWEN3_NEXT_FLASH_CACHE_SHAPE) return;
+
+  WorkerInfo src("0", 0);
+  src.engine_tp_size = 2;
+  src.worker_tp_rank = 0;
+  src.num_gdn_layers = 0;
+  src.indexer_blk_ntpb = 0;
+  src.block_sizes = {16 * KB};
+  src.token_sizes = {KB};
+
+  WorkerInfo dst("1", 0);
+  dst.engine_tp_size = 2;
+  dst.worker_tp_rank = 0;
+  dst.num_gdn_layers = 0;
+  dst.indexer_blk_ntpb = 0;
+  dst.block_sizes = {16 * KB};
+  dst.token_sizes = {KB};
+
+  auto req = std::make_shared<RequestInfo>(
+      "1", 0, "req0",
+      BlockIds{{0, 1, 2}},
+      BlockIds{{10, 11, 12}});
+  ReqSendTask task(req, 0, 16, false);
+
+  auto valid_ranks = compute_valid_ranks_pd(src.engine_tp_size, dst.engine_tp_size, -1);
+  uint32_t eff_tp_size = static_cast<uint32_t>(valid_ranks.count());
+  uint32_t eff_tp_rank = static_cast<uint32_t>(
+      (valid_ranks << (valid_ranks.size() - src.worker_tp_rank)).count());
+
+  std::vector<std::vector<IpcBlock>> main_blocks;
+  vllm_parse_hybrid_block_send_p_eq_d_block_aligned(&src, &dst, valid_ranks, eff_tp_size, eff_tp_rank, &task, main_blocks);
+
+  auto plan = build_transfer_plan(QWEN3_NEXT_FLASH_CACHE_SHAPE, src, dst, valid_ranks, eff_tp_size, eff_tp_rank);
+  std::vector<std::vector<IpcBlock>> spec_blocks;
+  generate_all_ipc_blocks(plan, &task, spec_blocks);
+  expect_send_blocks_equivalent(main_blocks, spec_blocks);
+}
+
+TEST(CacheTransferSpecTest, Qwen3NextPGtD_CompareWithMainParse) {
+  if (env_cache_shape() != QWEN3_NEXT_FLASH_CACHE_SHAPE) return;
+
+  const int kv_heads = 8;
+  const int head_dim = 128;
+  const int ntpb = 16;
+
+  WorkerInfo src("0", 0);
+  src.engine_tp_size = 4;
+  src.worker_tp_rank = 0;
+  src.num_gdn_layers = 1;
+  src.indexer_blk_ntpb = 0;
+  src.attn_kernel_blk_ntpb = ntpb;
+  src.hybrid_indexer_token_size = 0;
+  src.num_kv_heads = kv_heads;
+  // conv_state_shape[2] (* gdn_conv_elem_size) must equal the sum of
+  // gdn_conv_channel_dims, otherwise parse_hybrid_gdn_block_send_p_gt_d asserts.
+  src.conv_state_shape = {1, 3, 4};
+  src.ssm_state_shape = {1, 1, 2, 2};
+  src.gdn_conv_channel_dims = {2, 2};
+  src.gdn_conv_elem_size = 1;
+  src.gdn_ssm_elem_size = 1;
+  src.token_sizes = {size_t(2 * (kv_heads / src.engine_tp_size) * head_dim * sizeof(uint16_t))};
+  src.block_sizes = {src.token_sizes[0] * ntpb};
+
+  WorkerInfo dst("1", 0);
+  dst.engine_tp_size = 2;
+  dst.worker_tp_rank = 0;
+  dst.num_gdn_layers = 1;
+  dst.indexer_blk_ntpb = 0;
+  dst.attn_kernel_blk_ntpb = ntpb;
+  dst.hybrid_indexer_token_size = 0;
+  dst.num_kv_heads = kv_heads;
+  dst.conv_state_shape = src.conv_state_shape;
+  dst.ssm_state_shape = src.ssm_state_shape;
+  dst.gdn_conv_channel_dims = src.gdn_conv_channel_dims;
+  dst.gdn_conv_elem_size = src.gdn_conv_elem_size;
+  dst.gdn_ssm_elem_size = src.gdn_ssm_elem_size;
+  dst.token_sizes = {size_t(2 * (kv_heads / dst.engine_tp_size) * head_dim * sizeof(uint16_t))};
+  dst.block_sizes = {dst.token_sizes[0] * ntpb};
+
+  auto valid_ranks = compute_valid_ranks_pd(src.engine_tp_size, dst.engine_tp_size, kv_heads);
+  uint32_t eff_tp_size = static_cast<uint32_t>(valid_ranks.count());
+  uint32_t eff_tp_rank = static_cast<uint32_t>(
+      (valid_ranks << (valid_ranks.size() - src.worker_tp_rank)).count());
+
+  auto req = std::make_shared<RequestInfo>(
+      "1", 0, "req0",
+      BlockIds{{100, 101}, {0, 1, 2}},
+      BlockIds{{200, 201}, {10, 11, 12}});
+  ReqSendTask task(req, 5, 18, true);
+
+  std::vector<std::vector<IpcBlock>> main_blocks;
+  vllm_parse_hybrid_block_send_p_gt_d(&src, &dst, valid_ranks, eff_tp_size, eff_tp_rank, &task, main_blocks);
+
+  auto plan = build_transfer_plan(QWEN3_NEXT_FLASH_CACHE_SHAPE, src, dst, valid_ranks, eff_tp_size, eff_tp_rank);
+  std::vector<std::vector<IpcBlock>> spec_blocks;
+  generate_all_ipc_blocks(plan, &task, spec_blocks);
+  expect_send_blocks_equivalent(main_blocks, spec_blocks);
+}
+
+TEST(CacheTransferSpecTest, FlashinferPEqD_CompareWithMainParse) {
+  if (env_cache_shape() != FLASHINFER_CACHE_SHAPE) return;
+
+  const int kv_heads = 8;
+  const int head_dim = 128;
+  const int ntpb = 16;
+
+  WorkerInfo src("0", 0);
+  src.engine_tp_size = 2;
+  src.worker_tp_rank = 0;
+  src.num_kv_heads = kv_heads;
+  src.num_gdn_layers = 0;
+  src.block_sizes = {size_t(2 * kv_heads * ntpb * head_dim)};
+  src.token_sizes = {src.block_sizes[0] / ntpb};
+
+  WorkerInfo dst("1", 0);
+  dst.engine_tp_size = 2;
+  dst.worker_tp_rank = 0;
+  dst.num_kv_heads = kv_heads;
+  dst.num_gdn_layers = 0;
+  dst.block_sizes = {size_t(2 * kv_heads * ntpb * head_dim)};
+  dst.token_sizes = {dst.block_sizes[0] / ntpb};
+
+  auto valid_ranks = compute_valid_ranks_pd(src.engine_tp_size, dst.engine_tp_size, kv_heads);
+  uint32_t eff_tp_size = static_cast<uint32_t>(valid_ranks.count());
+  uint32_t eff_tp_rank = static_cast<uint32_t>(
+      (valid_ranks << (valid_ranks.size() - src.worker_tp_rank)).count());
+
+  auto req = std::make_shared<RequestInfo>(
+      "1", 0, "req0",
+      BlockIds{{0, 1, 2}},
+      BlockIds{{10, 11, 12}});
+  ReqSendTask task(req, 0, 20, true);
+
+  std::vector<std::vector<IpcBlock>> main_blocks;
+  vllm_parse_flashinfer_block_send_p_eq_d(&src, &dst, valid_ranks, eff_tp_size, eff_tp_rank, &task, main_blocks);
+
+  auto plan = build_transfer_plan(FLASHINFER_CACHE_SHAPE, src, dst, valid_ranks, eff_tp_size, eff_tp_rank);
+  std::vector<std::vector<IpcBlock>> spec_blocks;
+  generate_all_ipc_blocks(plan, &task, spec_blocks);
+  expect_send_blocks_equivalent(main_blocks, spec_blocks);
+}
+
+TEST(CacheTransferSpecTest, FlashinferPGtD_CompareWithMainParse) {
+  if (env_cache_shape() != FLASHINFER_CACHE_SHAPE) return;
+
+  const int kv_heads = 8;
+  const int head_dim = 128;
+  const int ntpb = 16;
+
+  WorkerInfo src("0", 0);
+  src.engine_tp_size = 4;
+  src.worker_tp_rank = 0;
+  src.num_kv_heads = kv_heads;
+  src.num_gdn_layers = 0;
+  const int src_head_num = kv_heads / static_cast<int>(src.engine_tp_size);
+  src.block_sizes = {size_t(2 * src_head_num * ntpb * head_dim)};
+  src.token_sizes = {src.block_sizes[0] / ntpb};
+
+  WorkerInfo dst("1", 0);
+  dst.engine_tp_size = 2;
+  dst.worker_tp_rank = 0;
+  dst.num_kv_heads = kv_heads;
+  dst.num_gdn_layers = 0;
+  const int dst_head_num = kv_heads / static_cast<int>(dst.engine_tp_size);
+  dst.block_sizes = {size_t(2 * dst_head_num * ntpb * head_dim)};
+  dst.token_sizes = {dst.block_sizes[0] / ntpb};
+
+  auto valid_ranks = compute_valid_ranks_pd(src.engine_tp_size, dst.engine_tp_size, kv_heads);
+  uint32_t eff_tp_size = static_cast<uint32_t>(valid_ranks.count());
+  uint32_t eff_tp_rank = static_cast<uint32_t>(
+      (valid_ranks << (valid_ranks.size() - src.worker_tp_rank)).count());
+
+  auto req = std::make_shared<RequestInfo>(
+      "1", 0, "req0",
+      BlockIds{{0, 1, 2}},
+      BlockIds{{10, 11, 12}});
+  ReqSendTask task(req, 3, 15, true);
+
+  std::vector<std::vector<IpcBlock>> main_blocks;
+  vllm_parse_flashinfer_block_send_p_gt_d(&src, &dst, valid_ranks, eff_tp_size, eff_tp_rank, &task, main_blocks);
+
+  auto plan = build_transfer_plan(FLASHINFER_CACHE_SHAPE, src, dst, valid_ranks, eff_tp_size, eff_tp_rank);
+  std::vector<std::vector<IpcBlock>> spec_blocks;
+  generate_all_ipc_blocks(plan, &task, spec_blocks);
+  expect_send_blocks_equivalent(main_blocks, spec_blocks);
+}
+
+// =============================================================================
+// QWEN3_NEXT_FLASHINFER_CACHE_SHAPE tests
+// =============================================================================
+
+TEST(SendStubTest, Qwen3NextFlashinferPEqD) {
+  if (env_cache_shape() != QWEN3_NEXT_FLASHINFER_CACHE_SHAPE) return;
+
+  const int kv_heads = 4;
+  const int head_dim = 64;
+  const int ntpb = 16;
+  const size_t dtype_size = sizeof(uint16_t);
+  const size_t token_size =
+      static_cast<size_t>(2 * kv_heads * head_dim * dtype_size);
+  const size_t block_size = token_size * ntpb;
+
+  WorkerInfo src("0", 0);
+  src.engine_tp_size = 2;
+  src.worker_tp_rank = 0;
+  src.num_kv_heads = kv_heads;
+  src.num_gdn_layers = 1;
+  src.indexer_blk_ntpb = 0;
+  src.attn_kernel_blk_ntpb = ntpb;
+  src.token_sizes = {token_size};
+  src.block_sizes = {block_size};
+
+  WorkerInfo dst("1", 0);
+  dst.engine_tp_size = 2;
+  dst.worker_tp_rank = 0;
+  dst.num_kv_heads = kv_heads;
+  dst.num_gdn_layers = 1;
+  dst.indexer_blk_ntpb = 0;
+  dst.attn_kernel_blk_ntpb = ntpb;
+  dst.token_sizes = {token_size};
+  dst.block_sizes = {block_size};
+
+  // BlockIds: [gdn_layer_0, attn]
+  auto req = std::make_shared<RequestInfo>(
+      "1", 0, "req0",
+      BlockIds{{6}, {0, 1}},
+      BlockIds{{10}, {4, 5}});
+  // Full first block (16 tokens) + reach_last_token to flush GDN.
+  ReqSendTask task(req, 0, ntpb, true);
+
+  auto valid_ranks = compute_valid_ranks_pd(src.engine_tp_size, dst.engine_tp_size, kv_heads);
+  uint32_t eff_tp_size = static_cast<uint32_t>(valid_ranks.count());
+  uint32_t eff_tp_rank = static_cast<uint32_t>(
+      (valid_ranks << (valid_ranks.size() - src.worker_tp_rank)).count());
+
+  std::vector<std::vector<IpcBlock>> send_blocks;
+  vllm_parse_qwen3_next_flashinfer_block_send_p_eq_d(
+      &src, &dst, valid_ranks, eff_tp_size, eff_tp_rank, &task, send_blocks);
+
+  ASSERT_EQ(send_blocks.size(), 1u);
+  const auto& blocks = send_blocks.at(0);
+  // Attn: 1 block * 4 heads * 2 (K + V) = 8 records (FlashInfer HND).
+  // GDN: 1 layer * 1 block = 1 full-block record.
+  ASSERT_EQ(blocks.size(), 9u);
+
+  const size_t p_head_size = block_size / 2 / kv_heads;
+  const size_t p_k_block_size = block_size / 2;
+  const size_t per_token_per_head = p_head_size / ntpb;
+  const size_t length = per_token_per_head * ntpb;
+
+  // First 8 records are attn: pairs of (K, V) per head.
+  for (int h = 0; h < kv_heads; ++h) {
+    const auto& k = blocks[h * 2];
+    const auto& v = blocks[h * 2 + 1];
+    EXPECT_EQ(k.length, length);
+    EXPECT_EQ(v.length, length);
+    // src_block id = 0 -> p_blk_off = 0
+    EXPECT_EQ(k.src_offset, static_cast<size_t>(h) * p_head_size);
+    EXPECT_EQ(k.dst_offset, 4u * block_size + static_cast<size_t>(h) * p_head_size);
+    EXPECT_EQ(v.src_offset, p_k_block_size);
+    EXPECT_EQ(v.dst_offset, 4u * block_size + p_k_block_size);
+  }
+
+  // Last record is GDN block: src 6 -> dst 10, full block.
+  const auto& gdn = blocks.back();
+  EXPECT_EQ(gdn.src_offset, 6u * block_size);
+  EXPECT_EQ(gdn.dst_offset, 10u * block_size);
+  EXPECT_EQ(gdn.length, block_size);
+}
+
+TEST(SendStubTest, Qwen3NextFlashinferPGtD) {
+  if (env_cache_shape() != QWEN3_NEXT_FLASHINFER_CACHE_SHAPE) return;
+
+  const int kv_heads = 4;
+  const int head_dim = 64;
+  const int ntpb = 16;
+  const size_t dtype_size = sizeof(uint16_t);
+
+  // P engine_tp_size=4; D engine_tp_size=2 -> GDN selects P>D.
+  WorkerInfo src("0", 0);
+  src.engine_tp_size = 4;
+  src.worker_tp_rank = 0;
+  src.num_kv_heads = kv_heads;
+  src.num_gdn_layers = 1;
+  src.indexer_blk_ntpb = 0;
+  src.attn_kernel_blk_ntpb = ntpb;
+  src.hybrid_indexer_token_size = 0;
+  // conv channel_dims sum must equal conv_state_shape[2] * gdn_conv_elem_size.
+  src.conv_state_shape = {1, 3, 4};
+  src.ssm_state_shape = {1, 1, 2, 2};
+  src.gdn_conv_channel_dims = {2, 2};
+  src.gdn_conv_elem_size = 1;
+  src.gdn_ssm_elem_size = 1;
+  // FlashInfer per-rank attn token: 2 * (kv_heads/p_kvt_tp) * head_dim * dtype.
+  src.token_sizes = {static_cast<size_t>(
+      2 * (kv_heads / static_cast<int>(src.engine_tp_size)) * head_dim * dtype_size)};
+  src.block_sizes = {src.token_sizes[0] * ntpb};
+
+  WorkerInfo dst("1", 0);
+  dst.engine_tp_size = 2;
+  dst.worker_tp_rank = 0;
+  dst.num_kv_heads = kv_heads;
+  dst.num_gdn_layers = 1;
+  dst.indexer_blk_ntpb = 0;
+  dst.attn_kernel_blk_ntpb = ntpb;
+  dst.hybrid_indexer_token_size = 0;
+  dst.conv_state_shape = src.conv_state_shape;
+  dst.ssm_state_shape = src.ssm_state_shape;
+  dst.gdn_conv_channel_dims = src.gdn_conv_channel_dims;
+  dst.gdn_conv_elem_size = src.gdn_conv_elem_size;
+  dst.gdn_ssm_elem_size = src.gdn_ssm_elem_size;
+  dst.token_sizes = {static_cast<size_t>(
+      2 * (kv_heads / static_cast<int>(dst.engine_tp_size)) * head_dim * dtype_size)};
+  dst.block_sizes = {dst.token_sizes[0] * ntpb};
+
+  // BlockIds: [gdn_layer_0, attn]
+  auto req = std::make_shared<RequestInfo>(
+      "1", 0, "req0",
+      BlockIds{{100}, {0, 1}},
+      BlockIds{{200}, {10, 11}});
+  // Reach last token to flush GDN; send 16 attn tokens.
+  ReqSendTask task(req, 0, ntpb, true);
+
+  auto valid_ranks = compute_valid_ranks_pd(src.engine_tp_size, dst.engine_tp_size, kv_heads);
+  uint32_t eff_tp_size = static_cast<uint32_t>(valid_ranks.count());
+  uint32_t eff_tp_rank = static_cast<uint32_t>(
+      (valid_ranks << (valid_ranks.size() - src.worker_tp_rank)).count());
+
+  std::vector<std::vector<IpcBlock>> send_blocks;
+  vllm_parse_qwen3_next_flashinfer_block_send_p_gt_d(
+      &src, &dst, valid_ranks, eff_tp_size, eff_tp_rank, &task, send_blocks);
+
+  ASSERT_EQ(send_blocks.size(), 1u);
+  const auto& blocks = send_blocks.at(0);
+
+  // GDN P>D records:
+  //   conv: conv_state_shape[1] * conv_channel_dims.size() = 3 * 2 = 6 records.
+  //   ssm:  1 record.
+  //   Total per gdn block = 7. With 1 gdn layer * 1 block = 7 records.
+  // Attn records (FlashInfer HND): 1 block * (kv_heads/p_kvt_tp) heads * 2 KV
+  //   = 1 * 1 * 2 = 2 records.
+  // Order: GDN first, then indexer (none), then attn.
+  ASSERT_EQ(blocks.size(), 7u + 2u);
+
+  const size_t p_block_size = src.block_sizes[0];
+  const size_t d_block_size = dst.block_sizes[0];
+  const size_t p_token_size = src.token_sizes[0];
+  const size_t d_token_size = dst.token_sizes[0];
+  const int p_head_num = kv_heads / static_cast<int>(src.engine_tp_size);
+  const size_t p_head_size = p_block_size / 2 / p_head_num;
+  const size_t p_k_block_size = p_block_size / 2;
+  const size_t d_k_block_size = d_block_size / 2;
+
+  // attn_group_n = valid_ranks.count() / dst.engine_tp_size = 4 / 2 = 2.
+  // attn_group_off = kvt_tp_rank % attn_group_n = 0 (worker_tp_rank=0 maps to slot 0).
+  const uint32_t expected_attn_group_off = 0;
+
+  // GDN records occupy [0, 7). Skip-validate full GDN length sum equals
+  // expected raw conv+ssm bytes (3*(2+2)*1 + 1*1*2*2*1 = 12 + 4 = 16).
+  size_t gdn_total = 0;
+  for (size_t i = 0; i < 7; ++i) gdn_total += blocks[i].length;
+  EXPECT_EQ(gdn_total, 16u);
+
+  // Attn K + V (1 head per p rank, full block).
+  const auto& k_rec = blocks[7];
+  const auto& v_rec = blocks[8];
+  const size_t length = (p_head_size / ntpb) * ntpb;
+  EXPECT_EQ(k_rec.length, length);
+  EXPECT_EQ(v_rec.length, length);
+  // src_blocks attn is {0, 1}; first block id is 0 -> p_blk_off = 0.
+  EXPECT_EQ(k_rec.src_offset, 0u);
+  EXPECT_EQ(k_rec.dst_offset,
+            10u * d_block_size + expected_attn_group_off * p_k_block_size + 0u);
+  EXPECT_EQ(v_rec.src_offset, p_k_block_size);
+  EXPECT_EQ(v_rec.dst_offset, 10u * d_block_size + d_k_block_size);
+  // Suppress unused-warning when token sizes change in the future.
+  (void)p_token_size; (void)d_token_size;
+}
+
+// =============================================================================
+// Fill-last-decode-block tests (qwen3_next P>D, token-granularity attn).
+// BLLM_KVTRANS_PAD_LAST_ATTN_BLOCK defaults to enabled, so the parse functions
+// append fill records that pad the unfilled tail of the last decode block with
+// the request's block 0 data.
+// =============================================================================
+
+namespace {
+// Build the qwen3_next FLASH P>D src/dst WorkerInfo used by the fill tests.
+void make_qwen3_next_flash_pgtd_workers(WorkerInfo& src, WorkerInfo& dst) {
+  const int kv_heads = 8;
+  const int head_dim = 128;
+  const int ntpb = 16;
+
+  src.engine_tp_size = 4;
+  src.worker_tp_rank = 0;
+  src.num_gdn_layers = 1;
+  src.indexer_blk_ntpb = 0;
+  src.attn_kernel_blk_ntpb = ntpb;
+  src.hybrid_indexer_token_size = 0;
+  src.num_kv_heads = kv_heads;
+  src.conv_state_shape = {1, 3, 4};
+  src.ssm_state_shape = {1, 1, 2, 2};
+  src.gdn_conv_channel_dims = {2, 2};
+  src.gdn_conv_elem_size = 1;
+  src.gdn_ssm_elem_size = 1;
+  src.token_sizes = {size_t(2 * (kv_heads / src.engine_tp_size) * head_dim * sizeof(uint16_t))};
+  src.block_sizes = {src.token_sizes[0] * ntpb};
+
+  dst.engine_tp_size = 2;
+  dst.worker_tp_rank = 0;
+  dst.num_gdn_layers = 1;
+  dst.indexer_blk_ntpb = 0;
+  dst.attn_kernel_blk_ntpb = ntpb;
+  dst.hybrid_indexer_token_size = 0;
+  dst.num_kv_heads = kv_heads;
+  dst.conv_state_shape = src.conv_state_shape;
+  dst.ssm_state_shape = src.ssm_state_shape;
+  dst.gdn_conv_channel_dims = src.gdn_conv_channel_dims;
+  dst.gdn_conv_elem_size = src.gdn_conv_elem_size;
+  dst.gdn_ssm_elem_size = src.gdn_ssm_elem_size;
+  dst.token_sizes = {size_t(2 * (kv_heads / dst.engine_tp_size) * head_dim * sizeof(uint16_t))};
+  dst.block_sizes = {dst.token_sizes[0] * ntpb};
+}
+}  // namespace
+
+TEST(SendStubTest, Qwen3NextFlashPGtD_FillLastBlock) {
+  if (env_cache_shape() != QWEN3_NEXT_FLASH_CACHE_SHAPE) return;
+
+  WorkerInfo src("0", 0);
+  WorkerInfo dst("1", 0);
+  make_qwen3_next_flash_pgtd_workers(src, dst);
+
+  const size_t p_block_size = src.block_sizes[0];
+  const size_t d_block_size = dst.block_sizes[0];
+  const size_t p_token_step = src.token_sizes[0] / 2;
+  const size_t d_token_step = dst.token_sizes[0] / 2;
+  const uint32_t dst_ntpb = static_cast<uint32_t>(d_block_size / dst.token_sizes[0]);  // 16
+
+  auto valid_ranks = compute_valid_ranks_pd(src.engine_tp_size, dst.engine_tp_size, src.num_kv_heads);
+  uint32_t eff_tp_size = static_cast<uint32_t>(valid_ranks.count());
+  uint32_t eff_tp_rank = static_cast<uint32_t>(
+      (valid_ranks << (valid_ranks.size() - src.worker_tp_rank)).count());
+
+  // BlockIds: [gdn_layer_0 (2 blocks), attn (3 blocks)].
+  auto req = std::make_shared<RequestInfo>(
+      "1", 0, "req0",
+      BlockIds{{100, 101}, {0, 1, 2}},
+      BlockIds{{200, 201}, {10, 11, 12}});
+  // total = 5 + 18 = 23; 23 % 16 = 7 filled, 9 to fill in the last dst block.
+  ReqSendTask task(req, 5, 18, /*reach_last_token=*/true);
+
+  std::vector<std::vector<IpcBlock>> send_blocks;
+  vllm_parse_hybrid_block_send_p_gt_d(&src, &dst, valid_ranks, eff_tp_size, eff_tp_rank, &task, send_blocks);
+  ASSERT_EQ(send_blocks.size(), 1u);
+  const auto& blocks = send_blocks.at(0);
+
+  // GDN: 2 blocks * (3*2 conv + 1 ssm) = 14 records.
+  // Attn: 18 tokens * 2 (K,V) = 36 records.
+  // Fill: 9 tokens * 2 (K,V) = 18 records.
+  const uint32_t total = 23;
+  const uint32_t filled = total % dst_ntpb;  // 7
+  const uint32_t to_fill = dst_ntpb - filled; // 9
+  ASSERT_EQ(blocks.size(), 14u + 36u + to_fill * 2u);
+
+  // The fill records are the suffix; block 0 is all zeros, so every fill packet
+  // (both K and V) sources from the same zero region at block 0 start (offset 0).
+  // The first fill token zeroes the last dst block (id 11) at token slot `filled`.
+  const size_t fill_start = blocks.size() - to_fill * 2u;
+  const auto& fk = blocks[fill_start];      // K
+  const auto& fv = blocks[fill_start + 1];  // V
+  const size_t last_d_blk_off = 11u * d_block_size;
+  const size_t d_kernel_half = (dst.attn_kernel_blk_ntpb * dst.token_sizes[0]) / 2;
+  EXPECT_EQ(fk.src_offset, 0u);
+  EXPECT_EQ(fk.dst_offset, last_d_blk_off + filled * d_token_step);
+  EXPECT_EQ(fk.length, p_token_step);
+  EXPECT_EQ(fv.src_offset, 0u);
+  EXPECT_EQ(fv.dst_offset, last_d_blk_off + filled * d_token_step + d_kernel_half);
+  EXPECT_EQ(fv.length, p_token_step);
+}
+
+TEST(SendStubTest, Qwen3NextFlashPGtD_NoFillWhenAligned) {
+  if (env_cache_shape() != QWEN3_NEXT_FLASH_CACHE_SHAPE) return;
+
+  WorkerInfo src("0", 0);
+  WorkerInfo dst("1", 0);
+  make_qwen3_next_flash_pgtd_workers(src, dst);
+
+  auto valid_ranks = compute_valid_ranks_pd(src.engine_tp_size, dst.engine_tp_size, src.num_kv_heads);
+  uint32_t eff_tp_size = static_cast<uint32_t>(valid_ranks.count());
+  uint32_t eff_tp_rank = static_cast<uint32_t>(
+      (valid_ranks << (valid_ranks.size() - src.worker_tp_rank)).count());
+
+  auto req = std::make_shared<RequestInfo>(
+      "1", 0, "req0",
+      BlockIds{{100, 101}, {0, 1, 2}},
+      BlockIds{{200, 201}, {10, 11, 12}});
+  // total = 0 + 16 = 16, exactly one full dst block -> no fill.
+  ReqSendTask task(req, 0, 16, /*reach_last_token=*/true);
+
+  std::vector<std::vector<IpcBlock>> send_blocks;
+  vllm_parse_hybrid_block_send_p_gt_d(&src, &dst, valid_ranks, eff_tp_size, eff_tp_rank, &task, send_blocks);
+  ASSERT_EQ(send_blocks.size(), 1u);
+  // GDN 14 + attn (16 tokens * 2) = 32; no fill.
+  EXPECT_EQ(send_blocks.at(0).size(), 14u + 32u);
+}
+
+TEST(SendStubTest, Qwen3NextFlashPGtD_NoFillWhenNotLastToken) {
+  if (env_cache_shape() != QWEN3_NEXT_FLASH_CACHE_SHAPE) return;
+
+  WorkerInfo src("0", 0);
+  WorkerInfo dst("1", 0);
+  make_qwen3_next_flash_pgtd_workers(src, dst);
+
+  auto valid_ranks = compute_valid_ranks_pd(src.engine_tp_size, dst.engine_tp_size, src.num_kv_heads);
+  uint32_t eff_tp_size = static_cast<uint32_t>(valid_ranks.count());
+  uint32_t eff_tp_rank = static_cast<uint32_t>(
+      (valid_ranks << (valid_ranks.size() - src.worker_tp_rank)).count());
+
+  auto req = std::make_shared<RequestInfo>(
+      "1", 0, "req0",
+      BlockIds{{100, 101}, {0, 1, 2}},
+      BlockIds{{200, 201}, {10, 11, 12}});
+  // Partial last block but reach_last_token=false -> no GDN and no fill.
+  ReqSendTask task(req, 5, 18, /*reach_last_token=*/false);
+
+  std::vector<std::vector<IpcBlock>> send_blocks;
+  vllm_parse_hybrid_block_send_p_gt_d(&src, &dst, valid_ranks, eff_tp_size, eff_tp_rank, &task, send_blocks);
+  ASSERT_EQ(send_blocks.size(), 1u);
+  // Attn only: 18 tokens * 2 = 36 records.
+  EXPECT_EQ(send_blocks.at(0).size(), 36u);
+}
+
+namespace {
+// Build the qwen3_next FLASHINFER P>D src/dst WorkerInfo used by fill tests.
+void make_qwen3_next_flashinfer_pgtd_workers(WorkerInfo& src, WorkerInfo& dst) {
+  const int kv_heads = 4;
+  const int head_dim = 64;
+  const int ntpb = 16;
+  const size_t dtype_size = sizeof(uint16_t);
+
+  src.engine_tp_size = 4;
+  src.worker_tp_rank = 0;
+  src.num_kv_heads = kv_heads;
+  src.num_gdn_layers = 1;
+  src.indexer_blk_ntpb = 0;
+  src.attn_kernel_blk_ntpb = ntpb;
+  src.hybrid_indexer_token_size = 0;
+  src.conv_state_shape = {1, 3, 4};
+  src.ssm_state_shape = {1, 1, 2, 2};
+  src.gdn_conv_channel_dims = {2, 2};
+  src.gdn_conv_elem_size = 1;
+  src.gdn_ssm_elem_size = 1;
+  src.token_sizes = {static_cast<size_t>(
+      2 * (kv_heads / static_cast<int>(src.engine_tp_size)) * head_dim * dtype_size)};
+  src.block_sizes = {src.token_sizes[0] * ntpb};
+
+  dst.engine_tp_size = 2;
+  dst.worker_tp_rank = 0;
+  dst.num_kv_heads = kv_heads;
+  dst.num_gdn_layers = 1;
+  dst.indexer_blk_ntpb = 0;
+  dst.attn_kernel_blk_ntpb = ntpb;
+  dst.hybrid_indexer_token_size = 0;
+  dst.conv_state_shape = src.conv_state_shape;
+  dst.ssm_state_shape = src.ssm_state_shape;
+  dst.gdn_conv_channel_dims = src.gdn_conv_channel_dims;
+  dst.gdn_conv_elem_size = src.gdn_conv_elem_size;
+  dst.gdn_ssm_elem_size = src.gdn_ssm_elem_size;
+  dst.token_sizes = {static_cast<size_t>(
+      2 * (kv_heads / static_cast<int>(dst.engine_tp_size)) * head_dim * dtype_size)};
+  dst.block_sizes = {dst.token_sizes[0] * ntpb};
+}
+}  // namespace
+
+TEST(SendStubTest, Qwen3NextFlashinferPGtD_FillLastBlock) {
+  if (env_cache_shape() != QWEN3_NEXT_FLASHINFER_CACHE_SHAPE) return;
+
+  WorkerInfo src("0", 0);
+  WorkerInfo dst("1", 0);
+  make_qwen3_next_flashinfer_pgtd_workers(src, dst);
+
+  const size_t p_block_size = src.block_sizes[0];
+  const size_t d_block_size = dst.block_sizes[0];
+  const size_t p_token_size = src.token_sizes[0];
+  const size_t d_token_size = dst.token_sizes[0];
+  const uint32_t ntpb = static_cast<uint32_t>(p_block_size / p_token_size);  // 16
+  const int num_kv_heads = src.num_kv_heads;
+  const size_t head_dim_size = p_token_size / 2 / static_cast<size_t>(num_kv_heads);
+  const size_t d_kv_section = (ntpb * d_token_size) / 2;
+
+  auto valid_ranks = compute_valid_ranks_pd(src.engine_tp_size, dst.engine_tp_size, src.num_kv_heads);
+  uint32_t eff_tp_size = static_cast<uint32_t>(valid_ranks.count());
+  uint32_t eff_tp_rank = static_cast<uint32_t>(
+      (valid_ranks << (valid_ranks.size() - src.worker_tp_rank)).count());
+
+  // BlockIds: [gdn_layer_0 (1 block), attn (2 blocks)].
+  auto req = std::make_shared<RequestInfo>(
+      "1", 0, "req0",
+      BlockIds{{100}, {0, 1}},
+      BlockIds{{200}, {10, 11}});
+  // total = 0 + 20 = 20; 20 % 16 = 4 filled, 12 to fill in last dst block (11).
+  ReqSendTask task(req, 0, 20, /*reach_last_token=*/true);
+
+  std::vector<std::vector<IpcBlock>> send_blocks;
+  vllm_parse_qwen3_next_flashinfer_block_send_p_gt_d(
+      &src, &dst, valid_ranks, eff_tp_size, eff_tp_rank, &task, send_blocks);
+  ASSERT_EQ(send_blocks.size(), 1u);
+  const auto& blocks = send_blocks.at(0);
+
+  // GDN: 1 block * (3*2 conv + 1 ssm) = 7 records.
+  // Attn (HND): chunk[0..15] + chunk[16..19] -> 2 chunks * num_kv_heads * 2.
+  // Fill: single chunk * num_kv_heads * 2.
+  const uint32_t total = 20;
+  const uint32_t dst_ntpb = static_cast<uint32_t>(d_block_size / d_token_size);  // 16
+  const uint32_t filled = total % dst_ntpb;     // 4
+  const uint32_t to_fill = dst_ntpb - filled;   // 12
+  const size_t fill_records = static_cast<size_t>(num_kv_heads) * 2u;  // single chunk
+  ASSERT_EQ(blocks.size(),
+            7u + static_cast<size_t>(num_kv_heads) * 2u * 2u + fill_records);
+
+  // First fill record: head 0, writing zero data from block 0 into the last
+  // dst block (id 11) at token slot `filled`, length = to_fill * head_dim_size.
+  // Block 0 is all zeros, so both K and V source from the same zero region
+  // (block 0 start, offset 0).
+  const size_t fill_start = blocks.size() - fill_records;
+  const auto& fk = blocks[fill_start];      // head0 K
+  const auto& fv = blocks[fill_start + 1];  // head0 V
+  const size_t last_d_blk_off = 11u * d_block_size;
+  const size_t length = static_cast<size_t>(to_fill) * head_dim_size;
+  EXPECT_EQ(fk.src_offset, 0u);
+  EXPECT_EQ(fk.dst_offset, last_d_blk_off + filled * head_dim_size);
+  EXPECT_EQ(fk.length, length);
+  EXPECT_EQ(fv.src_offset, 0u);
+  EXPECT_EQ(fv.dst_offset, last_d_blk_off + filled * head_dim_size + d_kv_section);
+  EXPECT_EQ(fv.length, length);
+}
+
+TEST(SendStubTest, Qwen3NextFlashinferPGtD_NoFillWhenAligned) {
+  if (env_cache_shape() != QWEN3_NEXT_FLASHINFER_CACHE_SHAPE) return;
+
+  WorkerInfo src("0", 0);
+  WorkerInfo dst("1", 0);
+  make_qwen3_next_flashinfer_pgtd_workers(src, dst);
+
+  auto valid_ranks = compute_valid_ranks_pd(src.engine_tp_size, dst.engine_tp_size, src.num_kv_heads);
+  uint32_t eff_tp_size = static_cast<uint32_t>(valid_ranks.count());
+  uint32_t eff_tp_rank = static_cast<uint32_t>(
+      (valid_ranks << (valid_ranks.size() - src.worker_tp_rank)).count());
+
+  auto req = std::make_shared<RequestInfo>(
+      "1", 0, "req0",
+      BlockIds{{100}, {0, 1}},
+      BlockIds{{200}, {10, 11}});
+  // total = 0 + 16 = 16, exactly one full dst block -> no fill.
+  ReqSendTask task(req, 0, 16, /*reach_last_token=*/true);
+
+  std::vector<std::vector<IpcBlock>> send_blocks;
+  vllm_parse_qwen3_next_flashinfer_block_send_p_gt_d(
+      &src, &dst, valid_ranks, eff_tp_size, eff_tp_rank, &task, send_blocks);
+  ASSERT_EQ(send_blocks.size(), 1u);
+  // GDN 7 + attn (1 chunk * num_kv_heads * 2); no fill.
+  EXPECT_EQ(send_blocks.at(0).size(),
+            7u + static_cast<size_t>(src.num_kv_heads) * 2u);
+}
+
+TEST(SendStubTest, Qwen3NextFlashinferPGtD_NoFillWhenNotLastToken) {
+  if (env_cache_shape() != QWEN3_NEXT_FLASHINFER_CACHE_SHAPE) return;
+
+  WorkerInfo src("0", 0);
+  WorkerInfo dst("1", 0);
+  make_qwen3_next_flashinfer_pgtd_workers(src, dst);
+
+  auto valid_ranks = compute_valid_ranks_pd(src.engine_tp_size, dst.engine_tp_size, src.num_kv_heads);
+  uint32_t eff_tp_size = static_cast<uint32_t>(valid_ranks.count());
+  uint32_t eff_tp_rank = static_cast<uint32_t>(
+      (valid_ranks << (valid_ranks.size() - src.worker_tp_rank)).count());
+
+  auto req = std::make_shared<RequestInfo>(
+      "1", 0, "req0",
+      BlockIds{{100}, {0, 1}},
+      BlockIds{{200}, {10, 11}});
+  // Partial last block but reach_last_token=false -> no GDN and no fill.
+  ReqSendTask task(req, 0, 20, /*reach_last_token=*/false);
+
+  std::vector<std::vector<IpcBlock>> send_blocks;
+  vllm_parse_qwen3_next_flashinfer_block_send_p_gt_d(
+      &src, &dst, valid_ranks, eff_tp_size, eff_tp_rank, &task, send_blocks);
+  ASSERT_EQ(send_blocks.size(), 1u);
+  // Attn only: 2 chunks * num_kv_heads * 2 records.
+  EXPECT_EQ(send_blocks.at(0).size(),
+            static_cast<size_t>(src.num_kv_heads) * 2u * 2u);
+}
+
+TEST(SendStubTest, Qwen3NextFlashinferPEqDChunkedNoFlush) {
+  // Verify chunked-prefill mid-block does NOT emit GDN (reach_last=false).
+  if (env_cache_shape() != QWEN3_NEXT_FLASHINFER_CACHE_SHAPE) return;
+
+  const int kv_heads = 4;
+  const int head_dim = 64;
+  const int ntpb = 16;
+  const size_t dtype_size = sizeof(uint16_t);
+  const size_t token_size =
+      static_cast<size_t>(2 * kv_heads * head_dim * dtype_size);
+  const size_t block_size = token_size * ntpb;
+
+  WorkerInfo src("0", 0);
+  src.engine_tp_size = 2;
+  src.worker_tp_rank = 0;
+  src.num_kv_heads = kv_heads;
+  src.num_gdn_layers = 1;
+  src.indexer_blk_ntpb = 0;
+  src.attn_kernel_blk_ntpb = ntpb;
+  src.token_sizes = {token_size};
+  src.block_sizes = {block_size};
+
+  WorkerInfo dst = src;
+  dst.inst_id = "1";
+
+  auto req = std::make_shared<RequestInfo>(
+      "1", 0, "req0",
+      BlockIds{{6}, {0, 1}},
+      BlockIds{{10}, {4, 5}});
+  ReqSendTask task(req, 0, ntpb, /*reach_last_token=*/false);
+
+  auto valid_ranks = compute_valid_ranks_pd(src.engine_tp_size, dst.engine_tp_size, kv_heads);
+  uint32_t eff_tp_size = static_cast<uint32_t>(valid_ranks.count());
+  uint32_t eff_tp_rank = static_cast<uint32_t>(
+      (valid_ranks << (valid_ranks.size() - src.worker_tp_rank)).count());
+
+  std::vector<std::vector<IpcBlock>> send_blocks;
+  vllm_parse_qwen3_next_flashinfer_block_send_p_eq_d(
+      &src, &dst, valid_ranks, eff_tp_size, eff_tp_rank, &task, send_blocks);
+
+  ASSERT_EQ(send_blocks.size(), 1u);
+  // Only attn (4 heads * 2 = 8) records, no GDN.
+  EXPECT_EQ(send_blocks.at(0).size(), 8u);
+}
+
+TEST(ComputeValidRanksTest, AllRanksValidWhenKvHeadsEqPtp) {
+  // When d_tp <= num_kv_heads, use original logic
+  auto vr = compute_valid_ranks_pd(8, 4, 8);  // p_tp=8, d_tp=4, num_kv_heads=8
+  EXPECT_EQ(vr.count(), 8u);
+  for (uint32_t i = 0; i < 8; ++i) {
+    EXPECT_TRUE(vr[i]);
+  }
+}
+
+TEST(ComputeValidRanksTest, AllRanksValidWhenNoKvHeadsSet) {
+  // When num_kv_heads <= 0, all ranks are valid
+  auto vr = compute_valid_ranks_pd(8, 4, -1);  // p_tp=8, d_tp=4, num_kv_heads=-1
+  EXPECT_EQ(vr.count(), 8u);
+}
+
+TEST(ComputeValidRanksTest, StridedValidRanks) {
+  // When d_tp <= num_kv_heads, use original logic
+  auto vr = compute_valid_ranks_pd(8, 2, 2);  // p_tp=8, d_tp=2, num_kv_heads=2
+  EXPECT_EQ(vr.count(), 2u);
+  EXPECT_TRUE(vr[0]);
+  EXPECT_FALSE(vr[1]);
+  EXPECT_FALSE(vr[2]);
+  EXPECT_FALSE(vr[3]);
+  EXPECT_TRUE(vr[4]);
+  EXPECT_FALSE(vr[5]);
+  EXPECT_FALSE(vr[6]);
+  EXPECT_FALSE(vr[7]);
+}
+
+TEST(ComputeValidRanksTest, FourHeadsOnEightRanks) {
+  // When d_tp <= num_kv_heads, use original logic
+  auto vr = compute_valid_ranks_pd(8, 2, 4);  // p_tp=8, d_tp=2, num_kv_heads=4
+  EXPECT_EQ(vr.count(), 4u);
+  EXPECT_TRUE(vr[0]);
+  EXPECT_FALSE(vr[1]);
+  EXPECT_TRUE(vr[2]);
+  EXPECT_FALSE(vr[3]);
+  EXPECT_TRUE(vr[4]);
+  EXPECT_FALSE(vr[5]);
+  EXPECT_TRUE(vr[6]);
+  EXPECT_FALSE(vr[7]);
+}
+
+TEST(ComputeValidRanksTest, DTpGtKvHeads) {
+  // When d_tp > num_kv_heads, select one representative P rank per D subgroup.
+  auto vr = compute_valid_ranks_pd(8, 4, 2);
+  EXPECT_EQ(vr.count(), 4u);  // 4 valid ranks
+  EXPECT_TRUE(vr[0]);   // rank 0 valid
+  EXPECT_FALSE(vr[1]);  // rank 1 invalid
+  EXPECT_TRUE(vr[2]);   // rank 2 valid
+  EXPECT_FALSE(vr[3]);  // rank 3 invalid
+  EXPECT_TRUE(vr[4]);   // rank 4 valid
+  EXPECT_FALSE(vr[5]);  // rank 5 invalid
+  EXPECT_TRUE(vr[6]);   // rank 6 valid
+  EXPECT_FALSE(vr[7]);  // rank 7 invalid
+}
+
+}  // namespace blade_llm

@@ -8,15 +8,9 @@
 
 namespace blade_llm {
 
-class ITransferService : public noncopyable {
- public:
-  virtual void on_recv(const InstanceId&, WorkerId, const RequestId&, std::vector<uint32_t> &&block_ids) = 0;
-  virtual ~ITransferService() = default;
-};
-
 class ITransferServer : public noncopyable {
  public:
-  virtual void start_server(ITransferService *service, Context *ctx) = 0;
+  virtual void start_server(Context *ctx) = 0;
   virtual ~ITransferServer() = default;
 };
 ITransferServer *create_transfer_server(const TransferProtocol& protocol);

@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <queue>
+#include <mutex>
 #include "common.h"
 #include "context.h"
 #include "tx_stub.h"
@@ -25,18 +26,48 @@ class XThreadpool;
 
 namespace blade_llm {
 
-// The value length here is typically p_info->tp_size / d_info->tp_size; roughly 1/2/4.
-using StepTasks = std::unordered_map<InstanceId, std::vector<std::pair<WorkerId, BatchSendTask>>>;
-
 struct ReqMeta {
   InstanceId dst_inst;
   WorkerId dst_worker = 0;
   RequestId reqid;
   uint32_t seen_tokens = 0;
   uint32_t new_tokens = 0;
-  std::vector<uint32_t> src_block_ids;
-  std::vector<uint32_t> dst_block_ids;
-  std::optional<std::string> dst_worker_info;
+  BlockIds src_block_ids;
+  BlockIds dst_block_ids;
+  std::optional<WorkerInfo> dst_worker_info;
+};
+
+// Holds meta information for a specific step/substep
+struct StepMetas {
+  size_t stepid;
+  uint32_t substepid;
+  std::vector<ReqMeta> metas;
+};
+
+// StepTasks struct, contains substep-related information
+struct StepTasks {
+  // Maps InstanceId -> [(WorkerId, BatchSendTask)]
+  std::unordered_map<InstanceId, std::vector<std::pair<WorkerId, BatchSendTask>>> tasks;
+  // substep identifier
+  size_t stepid = 0;
+  uint32_t substepid = 0;
+  // sub_send_ts: substep task submission timestamp
+  const Timepoint send_ts;
+
+public:
+  StepTasks() : send_ts(SteadyClock::now()) {}
+  explicit StepTasks(Timepoint ts) : send_ts(ts) {}
+
+  StepTasks(StepTasks&&) = default;
+  StepTasks(const StepTasks&) = delete;
+
+  bool empty() const noexcept { return tasks.empty(); }
+  void swap(StepTasks& other) noexcept {
+    tasks.swap(other.tasks);
+    std::swap(stepid, other.stepid);
+    std::swap(substepid, other.substepid);
+    // send_ts is const, cannot swap
+  }
 };
 
 class KvTransferClient : public noncopyable {
@@ -58,7 +89,7 @@ class KvTransferClient : public noncopyable {
 
   // ReqMeta will be moved.
   // thread safe
-  void start_req_send(std::vector<ReqMeta>& metas);
+  void start_req_send(std::vector<ReqMeta>& metas, size_t stepid, uint32_t substepid);
 
   void submit_req_send(InstanceId dst_inst,
                        WorkerId dst_worker,
@@ -66,33 +97,33 @@ class KvTransferClient : public noncopyable {
                        uint32_t seen_tokens,
                        uint32_t new_tokens,
                        bool has_last_token,
-                       std::vector<uint32_t> src_block_ids,
-                       std::vector<uint32_t> dst_block_ids,
-                       std::optional<std::string> dst_worker_info = std::nullopt);
-
-  void submit_req_send(InstanceId dst_inst,
-                       WorkerId dst_worker,
-                       RequestId r,
-                       uint32_t new_tokens,
-                       bool has_last_token,
-                       std::vector<uint32_t> src_block_ids,
-                       std::vector<uint32_t> dst_block_ids) {
-    return submit_req_send(std::move(dst_inst), dst_worker,
-                           std::move(r), 0, new_tokens, has_last_token,
-                           std::move(src_block_ids),
-                           std::move(dst_block_ids));
-  }
+                       BlockIds src_block_ids,
+                       BlockIds dst_block_ids,
+                       std::optional<std::string> dst_worker_info,
+                       size_t stepid,
+                       uint32_t substepid);
 
   void submit_delta_send(const RequestId &,
                          uint32_t seen_tokens,
                          uint32_t new_tokens,
-                         bool has_last_token);
+                         bool has_last_token,
+                         size_t stepid,
+                         uint32_t substepid);
 
-  size_t start_send();
+  // start_send begins a new step
+  // stepid: step identifier, passed from the caller
+  // sched_tokens: number of tokens scheduled in this step, used for optimization
+  //   - sched_tokens == 0: skip Step/StepGuard creation, return EMPTY_STEP_ID
+  //   - sched_tokens > 0: create Step/StepGuard even if targets_tasks_buf_ is empty
+  size_t start_send(size_t stepid, size_t sched_tokens);
+
   void notify_event_record(size_t step_id);
   void flush_send(size_t step_id);
 
-  ReqState check_transfer_done(const RequestId &);
+  // start_send_substep appends send tasks to the current step (called from disaggw thread)
+  // metas: nonfreeze_metas, has_freeze=false, has_last_token may be false
+  void start_send_substep(size_t stepid, uint32_t substepid, std::vector<ReqMeta>& metas);
+
   Context *context() { return ctx_.get(); };
   void enable_auto_connect() { auto_connect_ = true; }
 
@@ -121,7 +152,7 @@ class KvTransferClient : public noncopyable {
     }
   };
 
-  // All state transitions happen on mgr_thd_.
+  // All state transitions happen in mgr_thd_.
   class TargetMgr {
     // OWNER: GLOBAL
     Context* const ctx_ = nullptr;
@@ -161,7 +192,7 @@ class KvTransferClient : public noncopyable {
 
     Target* create(const InstanceId& inst_id, WorkerId worker_id,
                    uint32_t start_layer, uint32_t num_layers,
-                   const std::optional<std::string>& worker_info);
+                   const std::optional<WorkerInfo>& worker_info);
 
     Target* create_or_get(const RequestInfo& req);
 
@@ -173,19 +204,25 @@ class KvTransferClient : public noncopyable {
     TargetMgr(const TargetMgr&) = delete;
   };
  private:
-  const bool auto_remove_req_;
   bool auto_connect_{false};
-  size_t step_id_{0};
   std::atomic<size_t> fast_step_id_{UINT64_MAX};
   static_assert(std::atomic<size_t>::is_always_lock_free);
   std::unique_ptr<Context> ctx_;
   std::unordered_map<RequestId, std::vector<std::shared_ptr<RequestInfo>>> reqs_;
   // Temporary buffer for send tasks created by submit_req_send/submit_delta_send.
   // start_send() clears this field.
+  // Semantically corresponds to substep with substepid=0
   StepTasks targets_tasks_buf_;
-  std::shared_ptr<StepGuard> last_step_guard_;  // may be null.
   ThreadPool single_thd_;
   TargetMgr mgr_;
+
+  // ========== Thread coordination state ==========
+  // lock protects the following fields
+  mutable std::mutex coord_lock_;
+  size_t coord_step_id_{0};
+  std::shared_ptr<StepGuard> last_step_guard_;
+  std::vector<StepMetas> pending_step_metas_;
 };
+
 }
 #endif //KVTRANSFER_INCLUDE_CLIENT_H_

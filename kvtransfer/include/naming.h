@@ -26,9 +26,6 @@ class INamingClient {
   virtual std::optional<std::string> get(const InstanceId &, const std::string &k) = 0;
   virtual std::vector<std::string> search(const InstanceId &, const std::string &prefix) = 0;
   virtual const std::vector<std::string> &list() = 0;
-  static constexpr bool is_binary_store() {
-    return false;
-  }
   virtual ~INamingClient() = default;
 };
 
@@ -83,25 +80,14 @@ class WorkerNamingClient : public INamingWorkerClient {
 
   void register_worker(const WorkerInfo &worker_info) override {
     auto worker_key = "worker_" + std::to_string(worker_info.worker_id);
-    if (client_->is_binary_store()) {
-      auto bytes = worker_info.to_bytes();
-      std::string worker_value(bytes.begin(), bytes.end());
-      client_->store(worker_key, worker_value);
-    } else {
-      client_->store(worker_key, worker_info.to_string());
-    }
+    client_->store(worker_key, worker_info.to_string());
   };
 
   std::optional<WorkerInfo> get_worker_info(const InstanceId &name, WorkerId wid) override {
     auto worker_key = "worker_" + std::to_string(wid);
     auto worker_value = client_->get(name, worker_key);
     if (worker_value.has_value()) {
-      auto worker_str = worker_value.value();
-      if (client_->is_binary_store()) {
-        return WorkerInfo::from_bytes((unsigned char *) worker_str.data(), worker_str.size());
-      } else {
-        return WorkerInfo::from_string(worker_str);
-      }
+      return WorkerInfo::from_string(worker_value.value());
     }
     return std::nullopt;
   };

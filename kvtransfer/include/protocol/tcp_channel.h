@@ -1,3 +1,6 @@
+#ifndef KVTRANSFER_TCP_CHANNEL_H
+#define KVTRANSFER_TCP_CHANNEL_H
+
 #include "common.h"
 #include "context.h"
 #include "channel.h"
@@ -16,9 +19,10 @@
 #include <mutex>
 #include <unordered_map>
 #include "thrid_party/logging.h"
-#include "protocol/rdma_protocol.h"
+#include "protocol/barex_protocol.h"
 #include "utils/thread_pool.h"
 #include <cuda_runtime.h>
+#include "copy_utils.h"
 
 #include <accl/barex/barex.h>
 #include <accl/barex/barex_types.h>
@@ -36,16 +40,7 @@ static constexpr uint32_t KERNEL_LAUNCH_ERROR = 505;
 // KERNEL_COPY_MAX_BLOCK_NUM is now obtained from environment variable via env_kernel_copy_max_block_num()
 // Default value is 8192 if BLLM_KVTRANS_KERNEL_COPY_MAX_BLOCK_NUM is not set
 
-struct TCPTimePoints {
-  std::chrono::system_clock::time_point send_data_start_ts_;
-  std::chrono::system_clock::time_point d2h_start_ts_;
-  std::chrono::system_clock::time_point d2h_end_ts_;
-  std::chrono::system_clock::time_point h2d_start_ts;
-  std::chrono::system_clock::time_point h2d_end_ts;
-  uint64_t recv_start_ = 0;
-  uint32_t recv_time_ = 0;
-  uint32_t onrecv_queue_us_ = 0;
-};
+using TCPTimePoints = StagedTimePoints;
 
 class TCPChannel : public IChannel, public noncopyable {
  public:
@@ -60,9 +55,7 @@ class TCPChannel : public IChannel, public noncopyable {
   void register_data(std::vector<std::vector<IpcBlock>>& data, TPKind kind) override;
   void send_data(size_t layer_index) override;
   void flush(std::string& out) override;
-  void send_notification(const std::vector<const ReqSendTask*>& reqs) override;
   bool is_active() override;
-  using IChannel::send_notification;
 
  private:
   // Get thread-local CUDA stream for D2H copy, lazily created on first use
@@ -93,8 +86,8 @@ class TCPChannel : public IChannel, public noncopyable {
   size_t sb_size_min_ = 0;
   size_t sb_size_max_ = 0;
   size_t sb_size_total_ = 0;
-  // write_us
-  std::vector<std::future<TCPTimePoints>> write_futs_;
+  // write_us: (reqid, future) pairs for timeout handling
+  std::vector<std::pair<uint64_t, std::future<TCPTimePoints>>> write_futs_;
   std::vector<std::future<void>> send_futs_;
 
   // init by do_init
@@ -105,23 +98,21 @@ class TCPChannel : public IChannel, public noncopyable {
 };
 
 struct TCPInfo {
-  char ip[INET_ADDRSTRLEN]{'\0'};  // Decode listen IP, null-terminated.
+  char ip[INET_ADDRSTRLEN]{'\0'};  // decode listen ip, null-terminated.
   int port = 0;  // decode listen port
   std::vector<void *> ptrs;
 };
 
 class TCPServer: public ITransferServer {
  public:
-  void start_server(ITransferService *service, Context *ctx) override;
+  void start_server(Context *ctx) override;
 
  private:
   class CtxCallback : public accl::barex::XChannelCallback {
-    ITransferService* const ser_ = nullptr;   // owner: KV_SERVICE
     TCPServer* const server_ = nullptr;   // owner: KV_SERVER
 
    public:
-    CtxCallback(ITransferService *s, TCPServer* v) noexcept:
-        ser_(s), server_(v) {}
+    explicit CtxCallback(TCPServer* v) noexcept: server_(v) {}
 
     void OnRecvCall(accl::barex::XChannel *channel,
                     char *in_buf,
@@ -146,10 +137,11 @@ class TCPServer: public ITransferServer {
 
  private:
   TCPInfo info_;
-  BarexCtx* ctx_ = nullptr;  // OWNER: KvTransferService.ctx_
-  uint32_t num_layers_ = 0;  // OWNER: KvTransferService.ctx (for num_layers access)
+  BarexCtx* ctx_ = nullptr;
+  uint32_t num_layers_ = 0;
   std::unique_ptr<accl::barex::XListener, XListenerDeleter> listener_;
-  // accl::barex::XThreadpool* sync_thread_pool_ = nullptr; // Thread pool for async CUDA stream synchronization
 };
 
 }
+
+#endif // KVTRANSFER_TCP_CHANNEL_H

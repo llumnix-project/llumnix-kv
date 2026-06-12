@@ -90,7 +90,9 @@ class FileBackend(HybridBackend):
         return sched_get_req(reqid)
 
     def _get_kvblks(self, reqid: str) -> list[int]:
-        return sched_get_kvblk_ids(reqid, self._gamma, self._enable_prefix_caching)
+        ret = sched_get_kvblk_ids(reqid)
+        assert len(ret) == 1, ret
+        return ret[0]
 
     async def async_get_num_new_matched_tokens(
         self, req: Request, num_computed_tokens: int

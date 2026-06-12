@@ -28,6 +28,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, get_open_port
+from vllm.utils.torch_utils import cuda_device_count_stateless
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
@@ -68,8 +69,6 @@ _g_core: Optional["EngineCoreProc"] = None
 def get_logger(name: str):
     return init_logger(name)
 
-logger = get_logger(__name__)
-
 
 def _sched() -> V1Scheduler:
     assert _g_core is not None
@@ -90,12 +89,20 @@ def sched_allocate_slots(req: Request, load: bool, save: bool,
     if save:
         num_new_tokens += gamma + 1
 
+    kv_cfg = self.vllm_config.kv_transfer_config
+    # Only D-side KVT receive blocks skip zeroing. P-side save/prefill blocks
+    # still need normal zeroing before forward, even though caching is delayed.
+    skip_zero_for_kvt_recv = bool(
+        load and kv_cfg is not None and kv_cfg.is_kv_consumer)
+    skip_new_block_zeroing = (
+        skip_zero_for_kvt_recv or not envs.VLLM_ZERO_HYBRID_KV_CACHE)
     new_blocks = self.kv_cache_manager.allocate_slots(
         req,
         num_new_tokens + prealloc,
         num_new_local_computed_tokens,
         new_computed_blocks,
-        delay_cache_blocks=True)
+        delay_cache_blocks=True,
+        skip_new_block_zeroing=skip_new_block_zeroing)
     if new_blocks is None:
         return None
 
@@ -121,11 +128,6 @@ def sched_get_blocks(reqid: str) -> KVCacheBlocks:
     assert _blk_check(oblks, nblks)
     return KVCacheBlocks(nblks)
 
-def sched_set_blocks(reqid: str, blks: KVCacheBlocks):
-    self = _sched()
-    
-    for manager, blocks in zip(self.kv_cache_manager.coordinator.single_type_managers, blks.blocks):
-        manager.req_to_blocks[reqid] = list(blocks)
 
 # sched_release_blocks
 def sched_free_blocks(blks: KVCacheBlocks):
@@ -148,22 +150,14 @@ def sched_finish_req(request_ids: Union[str, Iterable[str]]):
     self.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
 
-def sched_skip_migrating_req(reqid: str) -> bool:
-    self = _sched()
+def sched_get_finished_req_ids() -> set[str]:
+    """Get finished request ids from scheduler.
 
-    if reqid not in self.connector._sched._migrating_output_tokens_snapshot:
-        return False
-    
-    from .migration.kvtmigration import KVTMigration
-    if not isinstance(self.connector._sched._backend, KVTMigration):
-        return
-
-    _, touched = self.connector._sched._migrating_output_tokens_snapshot[reqid]
-
-    if touched:
-        logger.info("migrate in pd way: async scheduling skip reqid: %s", reqid)
-
-    return touched
+    This is needed in bypass loops where SchedulerOutput.finished_req_ids
+    may be empty but scheduler.finished_req_ids contains requests that
+    need to be processed.
+    """
+    return _sched().finished_req_ids
 
 
 # get_request() should receive a parameter similar to a scheduler,
@@ -173,13 +167,18 @@ def sched_get_req(reqid: str) -> Optional[Request]:
     return _sched().requests.get(reqid, None)
 
 
-def sched_get_kvblk_ids(reqid: str, gamma, enable_prefix_caching) -> list[int]:
+def sched_get_kvblk_ids(
+    reqid: str,
+) -> list[list[int]]:
+    """Get KV block IDs for a request.
+    Args:
+        reqid: Request ID
+    Returns:
+        List of block ID lists for each layer group
+    """
     sched = _sched()
-    r = sched.kv_cache_manager.get_block_ids(reqid)
-    # assert (len(r) == 1)
-    has_null_blk = enable_prefix_caching and len(r) > 1
-    concat_ids = merge_hybrid_blocks(r, gamma, has_null_blk)
-    return concat_ids
+    blk_ids = sched.kv_cache_manager.get_block_ids(reqid)
+    return blk_ids
 
 
 def sched_add_req(req: Request):
@@ -192,12 +191,13 @@ def req2corereq(req: Request) -> EngineCoreRequest:
     # just make mypy happy~
     if req.sampling_params and req.sampling_params.extra_args is not None:
         req.sampling_params.extra_args["kv_transfer_params"] = None
-    ret = EngineCoreRequest(
+    return EngineCoreRequest(
         request_id=req.request_id,
         prompt_token_ids=req.prompt_token_ids,
         mm_features=req.mm_features,
         sampling_params=req.sampling_params,
         pooling_params=req.pooling_params,
+        eos_token_id=req.eos_token_id,
         arrival_time=req.arrival_time,
         lora_request=req.lora_request,
         cache_salt=req.cache_salt,
@@ -208,12 +208,6 @@ def req2corereq(req: Request) -> EngineCoreRequest:
         queue_server_address=req.queue_server_address,
     )
 
-    if hasattr(ret, "eos_token_id"):
-        from .hybrid_modules import _get_eos_token_id
-        ret.eos_token_id = _get_eos_token_id(req)
-    
-    return ret
-
 
 def core_abort_req(reqid: str, reason: str, output: bool):
     self = _sched()
@@ -223,26 +217,10 @@ def core_abort_req(reqid: str, reason: str, output: bool):
     return
 
 
-def merge_hybrid_blocks(grouped_blks, gamma=0, has_null_blk=False) -> list[int]:
-    concated_blk_ids = []
-    # Align with AttnSpec order in vllm
-    if has_null_blk:
-        for i in range(len(grouped_blks)-1):
-            blocks = grouped_blks[i]
-            concated_blk_ids.extend(blocks[1:gamma+2])
-    else:
-        for i in range(len(grouped_blks)-1):
-            blocks = grouped_blks[i]
-            assert len(blocks) >= gamma + 1 # may have extra blks for caching
-            concated_blk_ids.extend(blocks[:gamma+1])
-    concated_blk_ids.extend(grouped_blks[-1])
-    return concated_blk_ids
-
-
 def get_p_node_pop_len(vllm_config: VllmConfig) -> int:
     pop_len = 1
     # We enable the logic only for hybrid models at current time, as it breaks
-    # normal P/D for other models, both offline and in dual-request mode.
+    # normal P/D for other models, both offline and on dash.
     if (vllm_config.model_config.is_hybrid
         and vllm_config.speculative_config
         and vllm_config.speculative_config.num_speculative_tokens
@@ -337,7 +315,8 @@ def sched_rpc_server() -> RpcServer:
 
 
 def sched_rpc_server_port(cfg: VllmConfig) -> int:
-    if "AQUILA_RPC_PROTOCOL" in os.environ and envs.VLLM_DP_MASTER_PORT>0:
+    if (envs.VLLM_DP_MASTER_PORT > 0
+            and (os.getenv("AQUILA_RPC_PROTOCOL") or os.getenv("MASTER_ADDRESS"))):
         dprank = cfg.parallel_config.data_parallel_rank
         return envs.VLLM_DP_MASTER_PORT + 10 + dprank + 256
     rpc_port = cfg.kv_transfer_config.kv_connector_extra_config.get("rpc_port", None)
@@ -345,6 +324,14 @@ def sched_rpc_server_port(cfg: VllmConfig) -> int:
         return rpc_port
     assert cfg.kv_transfer_config.engine_available_port > 0
     return cfg.kv_transfer_config.engine_available_port
+
+
+def scheduler_rpc_host(cfg: VllmConfig) -> str:
+    if cfg.parallel_config.tensor_parallel_size > cuda_device_count_stateless():
+        master_addr = os.getenv("MASTER_ADDRESS")
+        assert master_addr
+        return master_addr
+    return "127.0.0.1"
 
 
 def use_mla() -> bool:
@@ -363,14 +350,39 @@ def use_flashinfer() -> bool:
     import vllm.envs as envs
 
     attn_backend = envs.VLLM_ATTENTION_BACKEND
-    return attn_backend and "flashinfer" in attn_backend.lower()
+    use_flashinfer = attn_backend and "flashinfer" in attn_backend.lower()
+    if use_flashinfer:
+        from vllm.platforms import current_platform
+        capability = current_platform.get_device_capability()
+        if capability is None or capability.major != 10:
+            cap_str = (
+                f"SM{capability.major}.{capability.minor}"
+                if capability is not None else "unknown"
+            )
+            raise ValueError(
+                "FlashInfer KVT path requires Blackwell (SM 10.x); "
+                f"detected device capability = {cap_str}. "
+                f"Set VLLM_ATTENTION_BACKEND to a non-FlashInfer backend "
+                f"(e.g. FLASH_ATTN, FLASH_MLA_SPARSE) to run on this device."
+            )
+    return use_flashinfer
+
+def use_turboquant(cfg: VllmConfig) -> bool:
+    import vllm.envs as envs
+
+    if envs.VLLM_FLASH_ATTN_USE_FAST_TURBOQUANT:
+        return True
+    if envs.VLLM_FLASH_ATTN_USE_FAKE_TURBOQUANT:
+        return True
+    cache_dtype = cfg.cache_config.cache_dtype
+    return bool(cache_dtype and "tq" in cache_dtype.lower())
 
 def kvt_protocol() -> str:
     import vllm.envs as envs
 
     return envs.VLLM_KV_TRANS_PROTOCOL
 
-def group_layers_by_index(kv_caches: dict[str, Any]) -> dict[str, list[int]]:
+def group_layers_by_index(kv_caches: dict[str, Any]) -> dict[int, list[str]]:
     from vllm.model_executor.models.utils import extract_layer_index
 
     index2name = defaultdict[Any, list](list)

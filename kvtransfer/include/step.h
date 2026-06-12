@@ -4,6 +4,7 @@
 #pragma once
 #include <atomic>
 #include <chrono>
+#include <unordered_map>
 #include "context.h"
 #include "utils/semaphore.h"
 #include "utils/timer.h"
@@ -28,78 +29,13 @@ T atomic_fetch_max_explicit(std::atomic<T>* pv, typename std::atomic<T>::value_t
   return t;
 }
 
-
-template <typename T>
-T atomic_fetch_min_explicit(std::atomic<T>* pv, typename std::atomic<T>::value_type v, std::memory_order m) noexcept {
-  auto const mr = drop_release(m);
-  auto t = pv->load(mr);
-  while (std::min(v, t) != t) {
-    if (pv->compare_exchange_weak(t, v, m, mr)) {
-      break;
-    }
-  }
-  return t;
-}
-
-class AtomicMinMaxTotal {
-  std::atomic<uint64_t> min_{UINT64_MAX};
-  std::atomic<uint64_t> max_{0};
-  std::atomic<uint64_t> total_{0};
-public:
-  // may be called in multi-thread.
-  void observe(uint64_t val) const noexcept {
-    auto& self = *const_cast<AtomicMinMaxTotal*>(this);  // SAFETY: atomic
-    atomic_fetch_min_explicit(&self.min_, val, std::memory_order_relaxed);
-    atomic_fetch_max_explicit(&self.max_, val, std::memory_order_relaxed);
-    std::atomic_fetch_add_explicit(&self.total_, val, std::memory_order_relaxed);
-  }
-
-  uint64_t min() const noexcept {
-    return this->min_.load(std::memory_order_relaxed);
-  }
-
-  uint64_t max() const noexcept {
-    return this->max_.load(std::memory_order_relaxed);
-  }
-
-  uint64_t total() const noexcept {
-    return this->total_.load(std::memory_order_relaxed);
-  }
-
-  double avg(uint64_t cnt) const noexcept {
-    return this->total() / double(cnt);
-  }
-};
-
-struct StepMetrics {
-  Timepoint start_send_ts;
-public:
-  uint64_t python_exec_ns = 0;
-  uint64_t wait_layers_queue_ns = 0;
-  uint64_t wait_layers_exec_ns = 0;
-
-  // may be update by multi thread.
-  std::atomic<uint64_t> send_stub_cnt_{0};
-  AtomicMinMaxTotal send_queue_ns;
-  AtomicMinMaxTotal send_wait_data_ns;
-  AtomicMinMaxTotal send_non_overlay_ns;
-  AtomicMinMaxTotal send_notification_ns;
-  AtomicMinMaxTotal send_finished_req_n;
-  AtomicMinMaxTotal send_data_size;  // per layer
-
-public:
-  void inc_send_stub() const noexcept {
-    auto& self = *const_cast<StepMetrics*>(this);  // SAFETY: atomic
-    self.send_stub_cnt_.fetch_add(1, std::memory_order_relaxed);
-  }
-};
-
 class Step {
  public:
   const size_t step_idx;
   const Timepoint start_send_ts = SteadyClock::now();
-  // write by target mgr thread
-  Timepoint submit_ts;
+  // sub_queue_time_us[i] = sub_submit_ts - sub_send_ts, appended in substep submission order
+  // write by target mgr thread (do_submit)
+  std::vector<int64_t> sub_queue_time_us;
   // write by python main thread
   Timepoint flush_send_ts;
   // write by wait layers thread.
@@ -107,7 +43,7 @@ class Step {
   Timepoint wait_layers_end_ts;
  private:
   // write by multi send stub thread.
-  // std::atomic<Timepoint> last_send_finish_ts_; causes compilation error on g++9.
+  // std::atomic<Timepoint> last_send_finish_ts_; causes compile error on g++9.
   std::atomic<Timepoint> last_send_finish_ts_{Timepoint::min()};
  private:
   static_assert(std::atomic<Timepoint>::is_always_lock_free);

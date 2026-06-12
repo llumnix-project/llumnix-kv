@@ -286,135 +286,18 @@ int env_shrink_tpsize() {
   return val;
 }
 
-std::bitset<MAX_TP_SIZE> env_p_valid_ranks() noexcept {
-  static std::bitset<MAX_TP_SIZE> val("1111111111111111111111111111111111111111111111111111111111111111");
-  static std::once_flag flag;
-  std::call_once(flag, [] () {
-    auto* valenv = getenv("BLLM_KVTRANS_P_VALID_RANKS");
-    fprintf(stdout, "kvtenv: env=BLLM_KVTRANS_P_VALID_RANKS val=%s\n", (valenv == nullptr ? "NULL" : valenv));
-    fflush(stdout);
-    if (valenv == nullptr) {
-      return;
-    }
-    val = std::bitset<MAX_TP_SIZE>(valenv);
-  });
-  return val;
-}
 
-int env_attn_head_num(){
+int env_attn_kernel_blk_size() {
   static constexpr int DEFVAL = -1;
   static int val = DEFVAL;
   static std::once_flag flag;
   std::call_once(flag, [] () {
-    val = env2posint("BLLM_KVTRANS_ATTN_HEAD_NUM", DEFVAL);
+    val = env2posint("BLLM_KVTRANS_ATTN_KERNEL_BLK_SIZE", DEFVAL);
   });
   return val;
 }
 
-int env_gdn_element_size() {
-  static constexpr int DEFVAL = 1;
-  static int val = DEFVAL;
-  static std::once_flag flag;
-  std::call_once(flag, [] () {
-    val = env2posint("GDN_ELEMENT_SIZE", DEFVAL);
-  });
-  return val;
-}
-
-static void parse_tensor_shape(std::vector<size_t>* out, const char* inputval) {
-  if (inputval == nullptr) {
-    return;
-  }
-  auto input = std::string(inputval);
-  size_t start = 0;
-  size_t end = 0;
-  while ((end = input.find(',', start)) != std::string::npos) {
-    assert(end >= start);
-    auto part = input.substr(start, end - start);
-    start = end + 1;
-    if (!part.empty()) {
-      try {
-        size_t dim = std::stoull(part);
-        out->push_back(dim);
-      } catch (const std::exception& e) {
-        fprintf(stderr, "parse_tensor_shape: failed to parse dimension '%s': %s\n", part.c_str(), e.what());
-      }
-    }
-  }
-  if (start < input.length()) {
-    auto part = input.substr(start);
-    if (!part.empty()) {
-      try {
-        size_t dim = std::stoull(part);
-        out->push_back(dim);
-      } catch (const std::exception& e) {
-        fprintf(stderr, "parse_tensor_shape: failed to parse dimension '%s': %s\n", part.c_str(), e.what());
-      }
-    }
-  }
-  return;
-}
-
-const std::vector<size_t>* env_ssm_state_shape() {
-  static std::vector<size_t> val;
-  static std::once_flag flag;
-  std::call_once(flag, [] () {
-    auto* valenv = getenv("QWEN3_NEXT_SSM_SHAPE");
-    fprintf(stdout, "kvtenv: env=QWEN3_NEXT_SSM_SHAPE val=%s\n", (valenv == nullptr ? "NULL" : valenv));
-    fflush(stdout);
-    if (valenv == nullptr) {
-      return;
-    }
-    try {
-      parse_tensor_shape(&val, valenv);
-    } catch (const std::exception& e) {
-      fprintf(stderr, "env_ssm_state_shape: bad input=%s;ex=%s\n", valenv, e.what());
-    }
-  });
-  return &val;
-}
-
-const std::vector<size_t>* env_conv_state_shape() {
-  static std::vector<size_t> val;
-  static std::once_flag flag;
-  std::call_once(flag, [] () {
-    auto* valenv = getenv("QWEN3_NEXT_CONV_SHAPE");
-    fprintf(stdout, "kvtenv: env=QWEN3_NEXT_CONV_SHAPE val=%s\n", (valenv == nullptr ? "NULL" : valenv));
-    fflush(stdout);
-    if (valenv == nullptr) {
-      return;
-    }
-    try {
-      parse_tensor_shape(&val, valenv);
-    } catch (const std::exception& e) {
-      fprintf(stderr, "env_conv_state_shape: bad input=%s;ex=%s\n", valenv, e.what());
-    }
-  });
-  return &val;
-}
-
-int env_gdn_block_num() {
-  static constexpr int DEFVAL = 3;
-  static int val = DEFVAL;
-  static std::once_flag flag;
-  std::call_once(flag, [] () {
-    val = env2posint("BLLM_KVTRANS_GDN_BLOCK_NUM", DEFVAL);
-  });
-  return val;
-}
-
-uint32_t env_origin_p_tp_size() noexcept {
-  static uint32_t val = 0;
-  static std::once_flag flag;
-  std::call_once(flag, [] () {
-    auto* valenv = getenv("BLLM_KVTRANS_ORIGIN_P_TP_SIZE");
-    if (valenv != nullptr) {
-      val = static_cast<uint32_t>(atoi(valenv));
-    }
-  });
-  return val;
-}
-
+// Use for tcp protocol
 size_t env_kernel_copy_max_block_num() noexcept {
   static constexpr size_t DEFVAL = 8192;
   static size_t val = DEFVAL;
@@ -441,13 +324,44 @@ double env_kernel_copy_sm_usage() noexcept {
   return val;
 }
 
-
 bool env_bf162fp8_conversion() noexcept {
   static constexpr bool DEFVAL = false;  // Disabled by default
   static bool val = DEFVAL;
   static std::once_flag flag;
   std::call_once(flag, [] () {
     val = env2posint("BLLM_KVTRANS_BF162FP8_CONV", static_cast<int>(DEFVAL)) != 0;
+  });
+  return val;
+}
+
+bool env_tx_use_cache_transfer_spec() noexcept {
+  static constexpr bool DEFVAL = false;  // Disabled by default
+  static bool val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    // Use numeric switch to share env2posint logging behavior.
+    // 0 = main parse path (default), non-zero = cache_transfer_spec path.
+    val = env2posint("BLLM_KVTRANS_TX_PARSE_MODE", static_cast<int>(DEFVAL)) != 0;
+  });
+  return val;
+}
+
+bool env_pad_last_attn_block() noexcept {
+  static constexpr bool DEFVAL = true;  // Enabled by default
+  static bool val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_PAD_LAST_ATTN_BLOCK", static_cast<int>(DEFVAL)) != 0;
+  });
+  return val;
+}
+
+bool env_rdma_staged() noexcept {
+  static constexpr bool DEFVAL = false;
+  static bool val = DEFVAL;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    val = env2posint("BLLM_KVTRANS_RDMA_STAGED", static_cast<int>(DEFVAL)) != 0;
   });
   return val;
 }

@@ -4,6 +4,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <string>
+#include <chrono>
 #include <unordered_map>
 #include "thrid_party/logging.h"
 
@@ -130,14 +131,20 @@ LogMessage::~LogMessage() {
 }
 
 void LogMessage::GenerateLogMessage() {
-  time_t result = time(nullptr);
-  const size_t time_buffer_size = 30;
+  auto now = std::chrono::system_clock::now();
+  auto us_since_epoch = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+  time_t sec = static_cast<time_t>(us_since_epoch.count() / 1000000);
+  int micros = static_cast<int>(us_since_epoch.count() % 1000000);
+  std::tm tm_local;
+  localtime_r(&sec, &tm_local);
+  const size_t time_buffer_size = 32;
   char time_buffer[time_buffer_size];
-  strftime(time_buffer, time_buffer_size, "%Y-%m-%d %H:%M:%S",
-           localtime(&result));
+  strftime(time_buffer, time_buffer_size, "%Y-%m-%d %H:%M:%S", &tm_local);
+
   const char *last_slash = strrchr(fname_, '/');
   const char *short_fname = last_slash == nullptr ? fname_ : last_slash + 1;
-  fprintf(stderr, "%s:%d:%d %c %s:%d] %s\n", time_buffer, g_sys_pid, g_sys_tid, "IWEF"[severity_],
+  fprintf(stderr, "%s.%06d:%d:%d %c %s:%d] %s\n", time_buffer, micros,
+          g_sys_pid, g_sys_tid, "IWEF"[severity_],
           short_fname, line_, str().c_str());
 }
 

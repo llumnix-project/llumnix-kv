@@ -2,53 +2,40 @@
 #include "thrid_party/logging.h"
 #include <iostream>
 #include <iomanip>
+#include <algorithm>
+#include <numeric>
 
 namespace blade_llm {
 
-
-static std::ostream& operator<<(std::ostream& os, const StepMetrics& self) {
-  auto US = [] (uint64_t ns) {
-    return ns / 1000.0;
-  };
-
-  const auto send_stub_cnt = self.send_stub_cnt_.load(std::memory_order_relaxed);
-  os << std::fixed << std::setprecision(3) << "PythonExecTimeUs=" << US(self.python_exec_ns)
-     << ",WaitLayersQueueUs=" << US(self.wait_layers_queue_ns)
-     << ",WaitLayersExecUs=" << US(self.wait_layers_exec_ns)
-     << ",SendStubCnt=" << send_stub_cnt
-     << ",SendQueueUs(min|max|avg)" << US(self.send_queue_ns.min()) << '|'
-     << US(self.send_queue_ns.max()) << '|'
-     << US(self.send_queue_ns.avg(send_stub_cnt))
-     << ",SendWaitDataUs(min|max|avg)" << US(self.send_wait_data_ns.min()) << '|'
-     << US(self.send_wait_data_ns.max()) << '|'
-     << US(self.send_wait_data_ns.avg(send_stub_cnt))
-     << ",SendNonOverlapUs(min|max|avg)" << US(self.send_non_overlay_ns.min()) << '|'
-     << US(self.send_non_overlay_ns.max()) << '|'
-     << US(self.send_non_overlay_ns.avg(send_stub_cnt))
-     << ",SendNotifyUs(min|max|avg)" << US(self.send_notification_ns.min()) << '|'
-     << US(self.send_notification_ns.max()) << '|'
-     << US(self.send_notification_ns.avg(send_stub_cnt))
-     << ",SendFinishedReq(min|max|total)" << self.send_finished_req_n.min() << '|'
-     << self.send_finished_req_n.max() << '|'
-     << self.send_finished_req_n.total()
-     << ",SendDataSize(min|max|total)" << self.send_data_size.min() << '|'
-     << self.send_data_size.max() << '|'
-     << self.send_data_size.total();
-  return os;
-}
-
 Step::~Step() noexcept {
-  // When step is destructed, all related activities are finished; emit metrics here.
+  // When a step is destructed, all related activities have finished; suitable for metric output.
   auto& self = *this;
   const auto last_send_ts = self.last_send_finish_ts();
+
+  // Only log when sub_queue_time_us is not empty
+  if (self.sub_queue_time_us.empty()) {
+    return;
+  }
+
+  // Compute statistics
+  int64_t min_queue_us = 0, max_queue_us = 0, avg_queue_us = 0;
+  if (!self.sub_queue_time_us.empty()) {
+    min_queue_us = *std::min_element(self.sub_queue_time_us.begin(), self.sub_queue_time_us.end());
+    max_queue_us = *std::max_element(self.sub_queue_time_us.begin(), self.sub_queue_time_us.end());
+    avg_queue_us = std::accumulate(self.sub_queue_time_us.begin(), self.sub_queue_time_us.end(), 0LL) / self.sub_queue_time_us.size();
+  }
+
   LOG(INFO) << std::fixed << std::setprecision(3)
             << "StepMetrics. StepIdx=" << self.step_idx
-            << ",SubmitQueueUs=" << elapse_us(self.start_send_ts, self.submit_ts)
+            << ",SubstepCnt=" << self.sub_queue_time_us.size()
+            << ",SubQueueMinUs=" << min_queue_us
+            << ",SubQueueMaxUs=" << max_queue_us
+            << ",SubQueueAvgUs=" << avg_queue_us
             << ",PythonExecUs=" << elapse_us(self.start_send_ts, self.flush_send_ts)
             << ",WaitLayerQueueUs=" << elapse_us(self.start_send_ts, self.wait_layers_start_ts)
             << ",ForwardExecUs=" << elapse_us(self.wait_layers_start_ts, self.wait_layers_end_ts)
             << ",SendNonoverlapUs=" << ielapse_us(self.wait_layers_end_ts, last_send_ts)
-            << ",LastSendFlushTs=" << last_send_ts.time_since_epoch().count();  // send stub id
+            << ",LastSendFlushTs=" << last_send_ts.time_since_epoch().count();
 }
 
 void Step::wait_layer_ready(uint32_t layer_i) {

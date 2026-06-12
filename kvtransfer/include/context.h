@@ -36,7 +36,7 @@ class Context : noncopyable {
 
   Context(const InstanceId& inst_name, const WorkerId& worker_id);
   void set_tp(uint32_t tp_size, uint32_t worker_tp_rank);
-  void set_block_params(std::vector<size_t> block_sizes, std::vector<size_t> token_sizes, uint32_t layer_num_blocks);
+  void set_block_params(std::vector<size_t> block_sizes, std::vector<size_t> token_sizes, uint32_t layer_num_blocks, uint32_t indexer_blk_ntpb = 0);
   void set_layer_info(uint8_t device_id, const std::vector<std::vector<LayerInfo>> &all_layer_infos);
   void set_cuda_barrier(std::unique_ptr<ICUDABarrier> &&);
   void register_protocol(std::unique_ptr<IProtocolContext> &&);

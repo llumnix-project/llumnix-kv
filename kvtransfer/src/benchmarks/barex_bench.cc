@@ -143,7 +143,7 @@ public:
     return BAREX_SUCCESS;
   }
 
-  /** Use RDMA write to probe whether the remote side is alive */
+  /** Use RDMA write to probe whether the peer is alive */
   BarexResult WriteHeartbeat(
     DoneCallback done = [](Status s) {}, bool done_inline = true) override {
     done(Status::OK());
@@ -217,7 +217,7 @@ public:
     qp_info.nic_id = ibv_device_->GetId();
 
     out.context = (uint64_t)ctx_;
-    // Use the parent class pointer
+    // Use the base class pointer
     XChannel *ch = this;
     out.channel = (uint64_t)ch;
     out.qp_infos.push_back(qp_info);
@@ -848,7 +848,7 @@ static std::vector<int> env_src_block_ids() {
 
 
 static std::vector<int> env_dst_block_ids() {
-  // Doesn't seem necessary to have two separate block ids?
+  // Do we really need two block ids?
   return env_src_block_ids();
 }
 
@@ -870,7 +870,7 @@ static std::future<T> make_exp_future(E ex) {
 
   auto result = ch->WriteBatch(std::move(datas),
                                [pr = std::move(pr), d = std::move(datasp)](Status s) mutable {
-                                 // WriteBatch requires datasp to stay alive until this callback.
+                                 // WriteBatch requires datasp to remain valid until the callback.
                                  if (!s.IsOk()) {
                                    auto ex = std::make_exception_ptr(std::runtime_error("Write ERR: " + s.ErrMsg()));
                                    pr->set_exception(std::move(ex));
@@ -895,7 +895,7 @@ static void WriteBatch(const std::vector<XChannel*>& chs, std::shared_ptr<std::v
     return WriteBatch(chs.front(), std::move(datasp)).get();
   }
 
-  // Here we assume each block in datasp has roughly the same size.
+  // Assuming each block in datasp has a similar size.
   std::vector<std::future<void>> futs;
   futs.reserve(chs.size());
   auto const part_size = (datasp->size() + chs.size() - 1) / chs.size();
@@ -1187,8 +1187,8 @@ class QPState {
   const uint64_t end_;
   ZYChannel* const ch_;
   const uint64_t qpid_;
-  uint64_t sent_;  // < sent_ is the count of completed post sends.
-  uint64_t acked_;  // < acked_ is the count of acknowledged post sends.
+  uint64_t sent_;  // count of posted sends
+  uint64_t acked_;  // count of acknowledged sends
   std::vector<ibv_sge> sges_;
   std::vector<ibv_send_wr> wrs_;
 public:
@@ -1456,10 +1456,10 @@ struct SgBlock {
 };
 
 
-// After grouping, the input looks like:
+// After grouping, input looks like:
 // <src_off_1, dst_off_0, len1>
 // <src_off_2, dst_off_0, len2>
-// This means the contents at src_off_1,len1 and src_off_2,len2 are written to dst_off_0
+// This means src_off_1,len1; src_off_2,len2 will be written to dst_off_0
 // <src_off_3, dst_off_1, len3>
 // <src_off_4, dst_off_1, len4>
 // <src_off_5, dst_off_1, len5>
@@ -1503,7 +1503,7 @@ static void group_by_dst(std::vector<IpcBlock>& input) {
     /* signal_peer */ false,
     /* imm_data */ 0,
     [prefills=std::move(prefills), pr=std::move(pr)] (Status s) {
-      // WriteBySgList requires prefills to stay alive until this callback.
+      // WriteBySgList requires prefills to remain valid until the callback.
       if (!s.IsOk()) {
         auto ex = std::make_exception_ptr(std::runtime_error("Write ERR: " + s.ErrMsg()));
         pr->set_exception(std::move(ex));
@@ -1773,7 +1773,7 @@ void client_main() {
     double(max) / 1000,
     double(sum) / 1000,
     double(sum) / 1000 / round);
-  _exit(0);  // Don't exit gracefully.
+  _exit(0);  // exit immediately.
   return ;
 }
 

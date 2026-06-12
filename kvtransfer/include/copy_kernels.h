@@ -13,6 +13,15 @@ enum class CopyDirection {
 };
 
 /**
+ * @brief Initialize the startup copy strategy profile table for a CUDA device.
+ *
+ * Controlled by BLLM_KVTRANS_COPY_PROFILE_ENABLE and related
+ * BLLM_KVTRANS_COPY_PROFILE_* environment variables. Safe to call multiple
+ * times; profiling is done once per process.
+ */
+void initialize_copy_method_profile(int target_device);
+
+/**
  * @brief Copy data directly between CPU pinned memory and scattered GPU memory (single batch).
  *
  * Low-level helper: builds src/dst/length arrays in host_blk_buffer_ptr, copies them to
@@ -45,7 +54,8 @@ void copy_handle_data_kernel_direct(
     int64_t* src_offsets_dev,
     int64_t* dst_offsets_dev,
     int64_t* lengths_dev,
-    int64_t* host_blk_buffer_ptr
+    int64_t* host_blk_buffer_ptr,
+    bool use_explicit_host_offsets = false
 );
 
 /**
