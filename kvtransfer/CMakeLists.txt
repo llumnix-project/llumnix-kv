@@ -89,10 +89,18 @@ elseif (CURL_REQUIRED)
     add_compile_definitions(ENABLE_CURL)
 endif ()
 
+option(BUILD_BENCHMARKS "build benchmark binaries" OFF)
+
 file(GLOB_RECURSE SRCS CONFIGURE_DEPENDS src/*.cpp src/*.cu)
-# Exclude test files and standalone implementations from production build
-list(FILTER SRCS EXCLUDE REGEX ".*/benchmarks/.*/test_.*\\.cpp$")
-list(FILTER SRCS EXCLUDE REGEX ".*/benchmarks/.*/d2h_stream_impl\\.cpp$")
+if (NOT BUILD_BENCHMARKS)
+    list(FILTER SRCS EXCLUDE REGEX ".*/benchmarks/.*")
+    message(STATUS "BUILD_BENCHMARKS is OFF, excluding benchmarks from build")
+else()
+    # Even with benchmarks enabled, exclude test files and standalone implementations
+    list(FILTER SRCS EXCLUDE REGEX ".*/benchmarks/.*/test_.*\\.cpp$")
+    list(FILTER SRCS EXCLUDE REGEX ".*/benchmarks/.*/d2h_stream_impl\\.cpp$")
+    message(STATUS "BUILD_BENCHMARKS is ON, including benchmarks in build")
+endif()
 
 set(Python3_EXECUTABLE "/usr/bin/python3")
 find_package (Python3 COMPONENTS Interpreter Development)

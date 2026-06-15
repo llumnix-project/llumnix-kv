@@ -8,7 +8,7 @@ logger = logging.getLogger("blade_kvt")
 import blade_kvt.kvtransfer_ops
 
 def support_async_sched() -> bool:
-    return True
+    return False
 
 
 @functools.cache
@@ -49,9 +49,12 @@ def set_envs():
     os.environ.setdefault('ACCL_WRITEBATCH_OPT', '2')
     os.environ.setdefault('ACCL_TX_DEPTH', '1024')
     os.environ.setdefault('ACCL_TX_CONN_DEPTH', '1024')  # eic
+
     os.environ.setdefault('ACCL_RELEASE_CHANNEL', '1')
+
     os.environ.setdefault('ACCL_RETRANSMIT_TIMEOUT', '17')
     os.environ.setdefault('ACCL_HEARTBEAT_INTERVAL', '3')
+
     os.environ.setdefault('ACCL_SOFT_TX_DEPTH', '327680')
     if is_erdma():
         os.environ.setdefault('ACCL_SET_ERDMA', '1')

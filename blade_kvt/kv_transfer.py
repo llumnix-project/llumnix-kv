@@ -45,6 +45,9 @@ except ImportError:
         def flush_send_step(self, *args, **kwargs):
             raise RuntimeError("KVTransferOps is not available, please build BladeLLM with it.")
 
+        async def send_error_done_req(self, *args, **kwargs):
+            raise RuntimeError("KVTransferOps is not available, please build BladeLLM with it.")
+
     class KVTransferServer:
         def __init__(self, *args, **kwargs):
             raise RuntimeError("KVTransferOps is not available, please build BladeLLM with it.")

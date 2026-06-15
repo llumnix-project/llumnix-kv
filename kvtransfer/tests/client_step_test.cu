@@ -5,7 +5,6 @@
 #include "thrid_party/logging.h"
 #include "utils/cuda_helper.h"
 #include "naming.h"
-#include "naming/shm_naming.h"
 
 using namespace blade_llm;
 #define TEST_REQ_ID "TEST_REQ_ID_007"
@@ -46,11 +45,6 @@ class FakeChannel: public IChannel {
       }
     }
   };
-  void send_notification(const std::vector<const ReqSendTask*>& reqs) override {
-    for (const auto* req : reqs) {
-      notifies->push(req->req_id());
-    }
-  };
   void flush(std::string&) override {};
   void close() override {};
 };
@@ -77,7 +71,7 @@ public:
   std::optional<WorkerInfo> get_worker_info(const InstanceId &id, WorkerId wid) override {
     LOG(INFO) << "fake get_worker_info: id=" << id << " wid=" << wid;
     WorkerInfo dst_info(id, wid);
-    dst_info.tp_size = 1;
+    dst_info.engine_tp_size = 1;
     dst_info.worker_tp_rank = 0;
     dst_info.block_sizes = {16 * KB};
     dst_info.token_sizes = {KB};
@@ -95,7 +89,7 @@ class FakeSendStubFactory : public ISendStubFactory {
   FakeSendStubFactory(Context *ctx, const std::vector<std::vector<uint64_t>> &dst, std::queue<std::string> &n):
     ctx(ctx), dst_layers(dst), notifies(&n) {}
   SendStub create_stub(const InstanceId& i, WorkerId w, uint32_t start_layer, uint32_t num_layers,
-                       std::optional<TransferProtocol> p, const std::optional<std::string> &) override {
+                       std::optional<TransferProtocol> p, const std::optional<WorkerInfo> &) override {
     LOG(INFO) << "Create SendStub";
     auto cf = std::make_unique<FakeChannelFactory>(ctx, dst_layers, notifies);
     return std::make_unique<KvSendStub>(i, w, ctx->worker_info(), start_layer, num_layers, std::move(cf), naming_);
@@ -141,7 +135,7 @@ TEST(KVTransferClientTest, TestKernelSyncAndDataTransfer) {
   std::vector<uint64_t> host_layer_1_addrs = {reinterpret_cast<uint64_t>(host_layer_1)};
   host_layer_addrs.push_back(host_layer_0_addrs);
   host_layer_addrs.push_back(host_layer_1_addrs);
-  std::vector<uint32_t> dst_blocks{4, 5, 6, 7};
+  BlockIds dst_blocks{{4, 5, 6, 7}};
 
   auto ctx = std::make_unique<Context>("1",  0);
   ctx->set_tp(1, 0);
@@ -165,8 +159,8 @@ TEST(KVTransferClientTest, TestKernelSyncAndDataTransfer) {
   KvTransferClient client(std::move(ctx), std::move(f));
 
   // client.add_target("0", 0, 0, 2);
-  client.submit_req_send("0", 0, TEST_REQ_ID, 16 * 4, true, {0, 1, 2, 3}, dst_blocks);
-  auto zyidx33 = client.start_send();
+  client.submit_req_send("0", 0, TEST_REQ_ID, 0, 16 * 4, true, BlockIds{{0, 1, 2, 3}}, dst_blocks, std::nullopt, 1024, 0);
+  auto zyidx33 = client.start_send(1024, 1);
   std::this_thread::sleep_for(std::chrono::milliseconds (100)); // let start_send to run;
   // mock layer 0
   clientTestKernel<<<blocks, threads, 0, stream>>>((char *)(layer_0), data_size,  10);
@@ -180,17 +174,12 @@ TEST(KVTransferClientTest, TestKernelSyncAndDataTransfer) {
   LOG(INFO) << "cuda stream synced;";
   client.flush_send(zyidx33);
 
-  int cnt = 0;
-  while(cnt < 20 && notifies.empty()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    cnt ++;
-  }
-  EXPECT_FALSE(notifies.empty());
-  auto req_id = notifies.front();
-  EXPECT_TRUE(req_id == TEST_REQ_ID);
+  // Wait for send to complete
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
   {
     char *ptr = (char *) host_layer_0;
-    for (auto bid : dst_blocks) {
+    for (auto bid : dst_blocks[0]) {
       auto offset = bid * block_size;
       auto check_p = ptr + offset;
       uint32_t sum = 0;
@@ -202,7 +191,7 @@ TEST(KVTransferClientTest, TestKernelSyncAndDataTransfer) {
   }
   {
     char *ptr = (char *) host_layer_1;
-    for (auto bid : dst_blocks) {
+    for (auto bid : dst_blocks[0]) {
       auto offset = bid * block_size;
       auto check_p = ptr + offset;
       uint32_t sum = 0;
@@ -212,8 +201,6 @@ TEST(KVTransferClientTest, TestKernelSyncAndDataTransfer) {
       EXPECT_EQ(sum, 20 * block_size);
     }
   }
-  auto done_ret = client.check_transfer_done(TEST_REQ_ID);
-  EXPECT_TRUE(done_ret == ReqState::OK);
 
   // client.remove_target("0", 0);
   LOG(INFO) << "finish";

@@ -15,7 +15,7 @@ TEST(ContextTest, TestContextBasicMethod) {
   ctx.set_layer_info(1, all_layer_infos);
   ctx.set_block_params({KB}, {256}, 1);
   const auto w_info = ctx.worker_info();
-  EXPECT_EQ(w_info.tp_size, 2);
+  EXPECT_EQ(w_info.engine_tp_size, 2);
   EXPECT_EQ(w_info.worker_tp_rank, 0);
   EXPECT_EQ(w_info.inst_id, "1");
   EXPECT_EQ(w_info.worker_id, 0);

@@ -27,25 +27,21 @@ from ..engine_proxy import (
     get_ip,
     get_logger,
     get_param,
+    sched_get_finished_req_ids,
     sched_rpc_server,
     set_param,
-    get_p_node_pop_len,
-    merge_hybrid_blocks,
 )
 from ..kvtbackend import (
-    CODE_INTERNALERROR,
     CODE_MIGRATE_REJECTED_BUSY,
     CODE_OK,
     CODE_REQNOTFOUND,
     TRANSFER_KV_REQ,
     TRANSFER_KV_RESP,
-    D_LOCAL_PREFILL,
     KVTDInfo,
     KVTResp,
     RKVTDInfo,
     get_inst_id,
     reg_naming,
-    _get_inst_id
 )
 from ..utils import (
     CodeError,
@@ -68,7 +64,6 @@ from . import (
     NEW_REQ_RESP,
     OUTPUT_TOKENS_N,
     SRC_INFO,
-    MIGRATION_TRIGGER_POLICY,
     MigrateResp,
     _g_migrate_in_req_ids,
     _g_migrate_in_req_info,
@@ -79,7 +74,6 @@ from . import (
     int2ipport,
     ipport2int,
     is_migration,
-    migrate_in_pd_way
 )
 
 try:
@@ -154,36 +148,33 @@ SUSPEND_EVT = "__HybridConnector_Migration_Suspend_Event__"
 
 class MigrationBackend(HybridBackend):
     def __init__(
-        self, vllm_config: VllmConfig, role: KVConnectorRole, workers_info: list[str], ncli: Optional[Any] = None,
+        self, vllm_config: VllmConfig, role: KVConnectorRole, ncli: Optional[Any] = None
     ):
         super().__init__(vllm_config, role)
         if role == KVConnectorRole.WORKER:
             return
-        self._workers_info = workers_info
-        self._cfg = vllm_config
-        self._loop = get_hybrid_sched_loop()
 
-        self._naming_url = vllm_config.kv_transfer_config.get_from_extra_config(
-            "naming_url", "fake://"
-        )
+        self._cfg = vllm_config
+        self.max_model_len = vllm_config.scheduler_config.max_model_len
+        self._loop = get_hybrid_sched_loop()
+        self._inst_id = get_inst_id(vllm_config)
+        tpsize = vllm_config.parallel_config.tensor_parallel_size
+        dprank = vllm_config.parallel_config.data_parallel_rank
+        self.peer_id = _get_peer_id(self._inst_id, dprank, tpsize)
+
         self._naming_cli = ncli
         if self._naming_cli is None:
-            if self._naming_url == "fake://":
-                self._inst_id = _get_inst_id(vllm_config, fake_naming=True)
-                self._naming_cli = None
-            else:
-                self._inst_id = _get_inst_id(vllm_config)
-                self._naming_cli = connect_naming(self._inst_id, self._naming_url)
-        self._conn_mgr = ConnManager(envs.VLLM_PD_CONNMANAGER_CAP)
-        if self._naming_cli is not None:
-            self._pmgr = PeerManager(
-                self._naming_cli, None, self._conn_mgr
-            )  # None means ALL, empty connpool
-            self._pmgr.start(self._loop)
-        else:
-            self._pmgr = None
+            self._naming_url = vllm_config.kv_transfer_config.get_from_extra_config(
+                "naming_url", "badbad"
+            )
+            self._naming_cli = connect_naming(self._inst_id, self._naming_url)
+            reg_naming(self._naming_cli, vllm_config)
 
-
+        self._conn_mgr = ConnManager()
+        self._pmgr = PeerManager(
+            self._naming_cli, None, self._conn_mgr
+        )  # None means ALL, empty connpool
+        self._pmgr.start(self._loop)
 
         rpcsrv = sched_rpc_server()
         rpcsrv.register_method(ABORT_REQS_REQ, self._on_abort_reqs)
@@ -209,20 +200,16 @@ class MigrationBackend(HybridBackend):
         # migration in limits
         self.max_migrate_in_reqs = envs.LLUMNIX_MAX_REQ_MIG_IN
         max_migrate_in_tokens = envs.LLUMNIX_MAX_TOKEN_MIG_IN
-        max_migrate_in_kv_cache_usage_ratio = envs.LLUMNIX_MAX_KV_CACHE_USAGE_RATIO_MIG_IN
+        max_migrate_in_block_ratio = envs.LLUMNIX_MAX_BLOCK_RATIO_MIG_IN
         total_tokens = self._cfg.cache_config.num_gpu_blocks * \
             self._cfg.cache_config.block_size
         # Only works when LLUMNIX_DETAILED_MIG_STATUS is True
         self.max_migrate_in_tokens = min(
             max_migrate_in_tokens,
-            int(total_tokens * max_migrate_in_kv_cache_usage_ratio))
+            int(total_tokens * max_migrate_in_block_ratio))
 
         global _g_backend
         _g_backend = self
-
-        self._gamma = get_p_node_pop_len(self._cfg) - 1
-        self._enable_prefix_caching = self._cfg.cache_config.enable_prefix_caching
-
         return
 
     def get_peer(
@@ -332,9 +319,6 @@ class MigrationBackend(HybridBackend):
 
             req = self._reqdec.decode(reqbuf)
             prealloc = core_get_param(req, OUTPUT_TOKENS_N, 0)
-            if migrate_in_pd_way(req):
-                prealloc += envs.LLUMNIX_MIGRATE_IN_PD_WAY_EXTRA_TOKENS
-
             if not self._has_migrate_in_slots(req, prealloc):
                 migresp = MigrateResp(code=CODE_MIGRATE_REJECTED_BUSY)
                 msgbuf = bytearray.fromhex("00 00 00 00 00 00 00 00")
@@ -343,7 +327,7 @@ class MigrationBackend(HybridBackend):
                 struct.pack_into("=I", msgbuf, 4, len(msgbuf) - 8)
                 writer.write(msgbuf)
                 await writer.drain()
-                logger.warning("no migrate in slots available, reqid=%s", req.request_id)
+                logger.warning("no migrate in slots available")
                 return
 
             migresp = MigrateResp(code=CODE_OK)
@@ -368,12 +352,12 @@ class MigrationBackend(HybridBackend):
                 with _g_migrate_in_req_info_lock:
                     _g_migrate_in_req_info[req.request_id] = len(
                         req.prompt_token_ids) + prealloc - 1
-                    
             logger.info(
-                "migrate. req=%s prealloc=%s srcinfo=%s",
+                "migrate. req=%s prealloc=%s srcinfo=%s dstinfo=%s",
                 req.request_id,
                 prealloc,
-                srcinfo
+                self._pmgr._running.get_peerid(srcinfo),
+                self.peer_id,
             )
             await writer.drain()
         except Exception as e:
@@ -613,20 +597,11 @@ class MigrationBackend(HybridBackend):
             self, srcinfo: tuple[str, int], req: Request,
             blocks: KVCacheBlocks) -> KVTResp:
         blockids = blocks.get_block_ids()
-        num_token_blocks = len(blockids[-1])
-        has_null_blk = self._enable_prefix_caching and len(blockids) > 1
-        blockids = merge_hybrid_blocks(blockids, self._gamma, has_null_blk)
-
+        assert len(blockids) == 1
         blksize = self._cfg.cache_config.block_size
-        if migrate_in_pd_way(req):
-            # actually, less token may be transfered, prompt tokens + output tokens 
-            # + LLUMNIX_MIGRATE_IN_PD_WAY_EXTRA_TOKENS are allocated to ensure
-            # enough space.
-            numtokens = get_param(req, PREALLOC_KEY, 0)
-        else:
-            numtokens = get_param(req, OUTPUT_TOKENS_N, 0)
+        numtokens = get_param(req, OUTPUT_TOKENS_N, 0)
         alltokens = numtokens + len(req.prompt_token_ids)
-        assert num_token_blocks * blksize >= alltokens, f"expected {num_token_blocks * blksize} >= {alltokens}"
+        assert len(blockids[0]) * blksize >= alltokens
         start_ts = time.monotonic()
 
         resp: Optional[KVTResp] = None
@@ -644,29 +619,28 @@ class MigrationBackend(HybridBackend):
             inst_id = f"{self._inst_id}|{dprank}|{tpsize}"
             kvtdinfo = KVTDInfo(
                 instid=inst_id,
-                blkids=blockids,
+                blkids=blockids[0],
                 cached_tokens=req.num_computed_tokens,
                 max_tokens=alltokens,
-                d_workers_info=self._workers_info,
+                d_workers_info=[],
             )
             kvtreq = RKVTDInfo(reqid=req.request_id,
                                migration=True,
-                               dinfo=kvtdinfo,
-                               migration_reason=get_param(req, MIGRATION_TRIGGER_POLICY, ""))
+                               dinfo=kvtdinfo)
             resp = await self._kvt_suspend_rpc(srcinfo, kvtreq)
 
         end_ts = time.monotonic()
         dur_ms = (end_ts - start_ts) * 1000
         logger.info(
-            "migrate end kvt: dur_ms=%s, reqid=%s cached=%s max=%s len_prompt=%s kvtresp=%s",
-            dur_ms, req.request_id, req.num_computed_tokens, alltokens, len(req.prompt_token_ids), resp)
+            "migrate end kvt: dur_ms=%s, reqid=%s cached=%s max=%s kvtresp=%s",
+            dur_ms, req.request_id, req.num_computed_tokens, alltokens, resp)
 
         if (
             resp is None or resp.code != CODE_OK or
             (not (req.num_computed_tokens <= resp.cached <= alltokens)) or
             resp.output_token_ids is None
         ):
-            raise CodeError(CODE_INTERNALERROR, 'migration backend kvt rpc failed')
+            raise RuntimeError('migration backend kvt rpc failed')
         return resp
 
     async def _kvt(self, srcinfo: tuple[str, int], req: Request,
@@ -718,15 +692,19 @@ class MigrationBackend(HybridBackend):
 
     def get_operations(self, req: Request) -> tuple[int, int]:
         # logger.info(f">>>DBG: {self._reqstate.get(req.request_id)=}")
-        if not get_param(req, D_LOCAL_PREFILL, False):
-            assert req.request_id not in self._reqstate
+        assert req.request_id not in self._reqstate
         self._reqstate[req.request_id] = req
 
         srcinfo = get_param(req, SRC_INFO)
         return int(srcinfo is not None), 0
 
     def build_backend_meta(self, sout: SchedulerOutput) -> BackendMeta:
+        # In bypass loops, sout.finished_req_ids may be empty, but we still
+        # need to process requests that are finished in the scheduler.
+        # Process both sources to handle all cases.
         for reqid in sout.finished_req_ids:
+            self._finish_req(reqid)
+        for reqid in sched_get_finished_req_ids():
             self._finish_req(reqid)
         return BackendMeta()
 
@@ -747,8 +725,8 @@ class MigrationBackend(HybridBackend):
                 assert req.num_computed_tokens >= 1
                 gamma = 0
                 if (
-                    self._cfg.speculative_config
-                    and self._cfg.speculative_config.num_speculative_tokens
+                        self._cfg.speculative_config
+                        and self._cfg.speculative_config.num_speculative_tokens
                 ):
                     gamma = self._cfg.speculative_config.num_speculative_tokens
                 req.num_computed_tokens -= (1 + gamma)
@@ -762,22 +740,12 @@ class MigrationBackend(HybridBackend):
                 migration_e2e_time_ms,
             )
 
-        except CodeError as e:
-            logger.warning(
-                "migration backend async_update failed. req_id=%s, srcinfo=%s, code=%s, msg=%s",
-                req.request_id,
-                srcinfo,
-                e.code,
-                e.msg,
-            )
-            ioret.ex = e
         except Exception as e:
             logger.warning(
-                "migration backend async_update failed. req_id=%s, srcinfo=%s, e=%r",
+                "migration backend async_update failed. req_id=%s, srcinfo=%s, e=%s",
                 req.request_id,
                 srcinfo,
                 e,
-                exc_info=True
             )
             ioret.ex = e
         finally:

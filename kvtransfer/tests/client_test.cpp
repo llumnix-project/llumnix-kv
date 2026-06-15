@@ -94,7 +94,7 @@ class FakeStubFactory : public ISendStubFactory {
 
   FakeStubFactory() = default;
   SendStub create_stub(const InstanceId &dst_inst, WorkerId dst_worker, uint32_t, uint32_t,
-                       std::optional<TransferProtocol> p, const std::optional<std::string> &) override {
+                       std::optional<TransferProtocol> p, const std::optional<WorkerInfo> &) override {
     auto iter = stubs.find(dst_inst + "-" + std::to_string(dst_worker));
     if (iter == stubs.end()) {
       RTASSERT(false);
@@ -106,7 +106,7 @@ class FakeStubFactory : public ISendStubFactory {
 
 TEST(KVTransferClientTest, SendTo1) {
   auto ctx = std::make_unique<Context>("1", 1);
-  auto req1p = std::make_shared<TestRequestInfo>("2", 1, "REQ00000001", std::vector<uint32_t>{0, 1}, std::vector<uint32_t>{0, 1});
+  auto req1p = std::make_shared<TestRequestInfo>("2", 1, "REQ00000001", BlockIds{{0, 1}}, BlockIds{{0, 1}});
   auto& req1 = *req1p;
   req1.add_send_task(0, 1, false);
   std::vector<TestRequestInfo*> expect_reqs{&req1};
@@ -123,9 +123,9 @@ TEST(KVTransferClientTest, SendTo1) {
   //                                       req1.src_blocks, req1.dst_blocks), KVTransferException);
   // }
   {
-    client.submit_req_send("2", 1, req1.req_id, 1, false,
-                           req1.src_blocks, req1.dst_blocks);
-    auto idx = client.start_send();
+    client.submit_req_send("2", 1, req1.req_id, 0, 1, false,
+                           req1.src_blocks, req1.dst_blocks, std::nullopt, 1024, 0);
+    auto idx = client.start_send(1024, 1);
     client.target_try_shrink(0);
     usleep(10 * 1000);
     client.target_try_shrink(0);
@@ -140,12 +140,12 @@ TEST(KVTransferClientTest, SendTo1) {
   }
 
   {
-    EXPECT_THROW(client.submit_delta_send("UNKNOWN_REQ_ID", 1, 1, false), KVTransferException);
+    client.submit_delta_send("UNKNOWN_REQ_ID", 1, 1, false, 1025, 0);
     req1.add_send_task(1, 1, false);
     req1.add_send_task(2, 0, true);
-    client.submit_delta_send(req1.req_id, 1, 1, false);
-    client.submit_delta_send(req1.req_id, 2, 0, true);
-    auto idx = client.start_send();
+    client.submit_delta_send(req1.req_id, 1, 1, false, 1025, 0);
+    client.submit_delta_send(req1.req_id, 2, 0, true, 1025, 0);
+    auto idx = client.start_send(1025, 1);
     client.target_try_shrink(0);
     usleep(10 * 1000);
     client.target_try_shrink(0);
@@ -162,10 +162,10 @@ TEST(KVTransferClientTest, SendTo1) {
 
 TEST(KVTransferClientTest, SendTo2) {
   auto ctx = std::make_unique<Context>("1", 1);
-  auto req0p = std::make_shared<TestRequestInfo>("3", 1, "REQ00000000", std::vector<uint32_t>{0, 1}, std::vector<uint32_t>{0, 1});
+  auto req0p = std::make_shared<TestRequestInfo>("3", 1, "REQ00000000", BlockIds{{0, 1}}, BlockIds{{0, 1}});
   auto& req0 = *req0p;
   req0.add_send_task(0, 1, false);
-  auto req1p = std::make_shared<TestRequestInfo>("2", 1, "REQ00000001", std::vector<uint32_t>{2, 3}, std::vector<uint32_t>{2, 3});
+  auto req1p = std::make_shared<TestRequestInfo>("2", 1, "REQ00000001", BlockIds{{2, 3}}, BlockIds{{2, 3}});
   auto& req1 = *req1p;
   req1.add_send_task(0, 1, false);
   std::vector<TestRequestInfo*> expect_reqs0{&req1};
@@ -183,12 +183,12 @@ TEST(KVTransferClientTest, SendTo2) {
   // client.add_target("2", 1, 0, 2);
   // client.add_target("3", 1, 0, 2);
   client.submit_req_send("3", 1, req0.req_id,
-                         1, false,
-                         req0.src_blocks, req0.dst_blocks);
+                         0, 1, false,
+                         req0.src_blocks, req0.dst_blocks, std::nullopt, 1026, 0);
   client.submit_req_send("2", 1, req1.req_id,
-                         1, false,
-                         req1.src_blocks, req1.dst_blocks);
-  auto idx35 = client.start_send();
+                         0, 1, false,
+                         req1.src_blocks, req1.dst_blocks, std::nullopt, 1026, 0);
+  auto idx35 = client.start_send(1026, 1);
   client.target_try_shrink(0);
   usleep(10 * 1000);
   client.target_try_shrink(0);
@@ -204,11 +204,11 @@ TEST(KVTransferClientTest, SendTo2) {
   req1.add_send_task(2, 0, true);
   req0.add_send_task(1, 1, false);
   req0.add_send_task(2, 0, true);
-  client.submit_delta_send(req0.req_id, 1, 1, false);
-  client.submit_delta_send(req0.req_id, 2, 0, true);
-  client.submit_delta_send(req1.req_id, 1, 1, false);
-  client.submit_delta_send(req1.req_id, 2, 0, true);
-  auto idx33 = client.start_send();
+  client.submit_delta_send(req0.req_id, 1, 1, false, 1027, 0);
+  client.submit_delta_send(req0.req_id, 2, 0, true, 1027, 0);
+  client.submit_delta_send(req1.req_id, 1, 1, false, 1027, 0);
+  client.submit_delta_send(req1.req_id, 2, 0, true, 1027, 0);
+  auto idx33 = client.start_send(1027, 1);
   client.target_try_shrink(0);
   usleep(10 * 1000);
   client.target_try_shrink(0);
@@ -224,8 +224,8 @@ TEST(KVTransferClientTest, SendTo2) {
 
 TEST(KVTransferClientTest, SendToPP2) {
   auto ctx = std::make_unique<Context>("1", 1);
-  auto req0p = std::make_shared<TestRequestInfo>("3", 1, "REQ00000000", std::vector<uint32_t>{0, 1}, std::vector<uint32_t>{0, 1});
-  auto req1p = std::make_shared<TestRequestInfo>("2", 1, "REQ00000001", std::vector<uint32_t>{0, 1}, std::vector<uint32_t>{2, 3});
+  auto req0p = std::make_shared<TestRequestInfo>("3", 1, "REQ00000000", BlockIds{{0, 1}}, BlockIds{{0, 1}});
+  auto req1p = std::make_shared<TestRequestInfo>("2", 1, "REQ00000001", BlockIds{{0, 1}}, BlockIds{{2, 3}});
   auto& req0 = *req0p;
   auto& req1 = *req1p;
   req0.add_send_task(0, 1, false);
@@ -246,12 +246,12 @@ TEST(KVTransferClientTest, SendToPP2) {
   // client.add_target("2", 1, 0, 2);
   // client.add_target("3", 1, 0, 2);
   client.submit_req_send("3", 1, req0.req_id,
-                         1, false,
-                         req0.src_blocks, req0.dst_blocks);
+                         0, 1, false,
+                         req0.src_blocks, req0.dst_blocks, std::nullopt, 1028, 0);
   client.submit_req_send("2", 1, req1.req_id,
-                         1, false,
-                         req1.src_blocks, req1.dst_blocks);
-  auto idx36 = client.start_send();
+                         0, 1, false,
+                         req1.src_blocks, req1.dst_blocks, std::nullopt, 1028, 0);
+  auto idx36 = client.start_send(1028, 1);
   client.target_try_shrink(0);
   usleep(10 * 1000);
   client.target_try_shrink(0);
@@ -265,9 +265,9 @@ TEST(KVTransferClientTest, SendToPP2) {
 
   req1.add_send_task(1, 1, true);
   req0.add_send_task(1, 1, true);
-  client.submit_delta_send(req1.req_id, 1, 1, true);
-  client.submit_delta_send(req0.req_id, 1, 1, true);
-  auto zyidx34 = client.start_send();
+  client.submit_delta_send(req1.req_id, 1, 1, true, 1029, 0);
+  client.submit_delta_send(req0.req_id, 1, 1, true, 1029, 0);
+  auto zyidx34 = client.start_send(1029, 1);
   client.target_try_shrink(0);
   usleep(10 * 1000);
   client.target_try_shrink(0);

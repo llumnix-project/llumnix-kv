@@ -152,6 +152,44 @@ void initialize_test_data(char* cpu_buf, size_t size) {
     }
 }
 
+size_t round_up_to_alignment(size_t value, size_t alignment) {
+    return ((value + alignment - 1) / alignment) * alignment;
+}
+
+bool generate_non_overlapping_offsets(
+    size_t num_blocks,
+    size_t block_size,
+    size_t total_gpu_size,
+    size_t alignment,
+    std::mt19937& gen,
+    std::vector<size_t>& offsets
+) {
+    if (block_size == 0 || total_gpu_size < block_size) {
+        return false;
+    }
+
+    const size_t stride = round_up_to_alignment(block_size, alignment);
+    const size_t max_non_overlapping_blocks = (total_gpu_size - block_size) / stride + 1;
+    if (num_blocks > max_non_overlapping_blocks) {
+        std::cerr << "Not enough GPU space for non-overlapping blocks: num_blocks="
+                  << num_blocks << ", block_size=" << block_size
+                  << ", total_gpu_size=" << total_gpu_size
+                  << ", alignment=" << alignment
+                  << ", max_non_overlapping_blocks=" << max_non_overlapping_blocks
+                  << std::endl;
+        return false;
+    }
+
+    offsets.clear();
+    offsets.reserve(max_non_overlapping_blocks);
+    for (size_t i = 0; i < max_non_overlapping_blocks; ++i) {
+        offsets.push_back(i * stride);
+    }
+    std::shuffle(offsets.begin(), offsets.end(), gen);
+    offsets.resize(num_blocks);
+    return true;
+}
+
 // Verify the H2D copy result
 bool verify_copy_result(
     const char* cpu_src,
@@ -202,7 +240,7 @@ bool verify_d2h_copy_result(
     for (size_t i = 0; i < blocks.size(); ++i) {
         const auto& block = blocks[i];
         char* gpu_block = new char[block.length];
-        const char* gpu_src = static_cast<const char*>(gpu_src_base) + block.src_offset;
+        const char* gpu_src = static_cast<const char*>(gpu_src_base) + block.dst_offset;
         
         cudaError_t err = cudaMemcpy(gpu_block, gpu_src, block.length, cudaMemcpyDeviceToHost);
         if (err != cudaSuccess) {
@@ -283,6 +321,10 @@ int run_benchmark_for_direction(
         std::cerr << "Failed to create CUDA stream: " << cudaGetErrorString(err) << std::endl;
         return 1;
     }
+
+    // Keep startup profiling out of measured copy timings. Production code
+    // triggers this during copy buffer pre-warm; benchmark does it explicitly.
+    initialize_copy_method_profile(device_id);
     
     // Calculate tensor data size
     size_t tensor_data_size = num_blocks * block_size;
@@ -308,7 +350,14 @@ int run_benchmark_for_direction(
     std::vector<IpcBlock> blocks;
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_int_distribution<size_t> offset_dis(0, total_gpu_size - block_size);
+    std::vector<size_t> scattered_offsets;
+    if (!generate_non_overlapping_offsets(
+            static_cast<size_t>(num_blocks), block_size, total_gpu_size, 16, gen, scattered_offsets)) {
+        free_gpu_memory(gpu_mem);
+        free_pinned_memory(cpu_buf);
+        cudaStreamDestroy(stream);
+        return 1;
+    }
     
     if (direction == CopyDirection::H2D) {
         // H2D: Initialize CPU data, GPU memory starts at zero
@@ -324,9 +373,7 @@ int run_benchmark_for_direction(
         
         // For H2D: src_offset is cumulative (contiguous CPU buffer), dst_offset is scattered in GPU
         for (int i = 0; i < num_blocks; ++i) {
-            size_t dst_offset = offset_dis(gen);
-            dst_offset = (dst_offset / 16) * 16;  // Ensure alignment
-            blocks.emplace_back(0, dst_offset, block_size);
+            blocks.emplace_back(0, scattered_offsets[i], block_size);
         }
     } else {
         // D2H: Initialize GPU data, CPU buffer starts at zero
@@ -337,11 +384,10 @@ int run_benchmark_for_direction(
         // Initialize CPU buffer to zero
         memset(cpu_buf, 0, tensor_data_size);
         
-        // For D2H: src_offset is scattered in GPU, dst_offset is cumulative (contiguous CPU buffer)
+        // copy_handle_data_with_kernel uses dst_offset as the GPU source offset for D2H.
         size_t cpu_offset = 0;
         for (int i = 0; i < num_blocks; ++i) {
-            size_t src_offset = offset_dis(gen);
-            src_offset = (src_offset / 16) * 16;  // Ensure alignment
+            size_t src_offset = scattered_offsets[i];
             
             // Copy test data to GPU at scattered locations
             err = cudaMemcpy(static_cast<char*>(gpu_mem) + src_offset, 
@@ -355,7 +401,7 @@ int run_benchmark_for_direction(
                 return 1;
             }
             
-            blocks.emplace_back(src_offset, 0, block_size);
+            blocks.emplace_back(0, src_offset, block_size);
             cpu_offset += block_size;
         }
         delete[] gpu_test_data;
@@ -564,11 +610,24 @@ int run_benchmark_for_direction(
               << ", threads_per_block=" << threads_per_block_optimal
               << ", max_blocks_per_sm (estimated)=" << max_blocks_per_sm << std::endl;
     
-    // Prepare offset/length arrays once (reused for all SM usage tests)
+    // Prepare offset/length arrays once (reused for all SM usage tests).
+    // This sweep launches kernels directly with all num_blocks at once, so it
+    // needs metadata storage sized by num_blocks rather than max batch size.
     size_t array_size = num_blocks * sizeof(int64_t);
-    int64_t* src_offsets_dev = reinterpret_cast<int64_t*>(preallocated_buffer);
-    int64_t* dst_offsets_dev = reinterpret_cast<int64_t*>(reinterpret_cast<char*>(preallocated_buffer) + array_size);
-    int64_t* lengths_dev = reinterpret_cast<int64_t*>(reinterpret_cast<char*>(preallocated_buffer) + array_size * 2);
+    int64_t* sm_usage_metadata_buffer = nullptr;
+    err = cudaMalloc(&sm_usage_metadata_buffer, array_size * 3);
+    if (err != cudaSuccess) {
+        std::cerr << "Failed to allocate SM usage metadata buffer: " << cudaGetErrorString(err) << std::endl;
+        cudaFreeHost(host_blk_buffer_ptr);
+        cudaFree(preallocated_buffer);
+        free_gpu_memory(gpu_mem);
+        free_pinned_memory(cpu_buf);
+        cudaStreamDestroy(stream);
+        return 1;
+    }
+    int64_t* src_offsets_dev = sm_usage_metadata_buffer;
+    int64_t* dst_offsets_dev = reinterpret_cast<int64_t*>(reinterpret_cast<char*>(sm_usage_metadata_buffer) + array_size);
+    int64_t* lengths_dev = reinterpret_cast<int64_t*>(reinterpret_cast<char*>(sm_usage_metadata_buffer) + array_size * 2);
     
     std::vector<int64_t> src_offsets_host(num_blocks);
     std::vector<int64_t> dst_offsets_host(num_blocks);
@@ -582,8 +641,8 @@ int run_benchmark_for_direction(
             src_offsets_host[i] = static_cast<int64_t>(tensor_offset);
             dst_offsets_host[i] = static_cast<int64_t>(block.dst_offset);
         } else {
-            // D2H: src_offset is scattered in GPU, dst_offset is cumulative (contiguous CPU buffer)
-            src_offsets_host[i] = static_cast<int64_t>(block.src_offset);
+            // D2H: dst_offset stores the scattered GPU source offset in copy_handle_data_with_kernel.
+            src_offsets_host[i] = static_cast<int64_t>(block.dst_offset);
             dst_offsets_host[i] = static_cast<int64_t>(tensor_offset);
         }
         lengths_host[i] = static_cast<int64_t>(block.length);
@@ -594,6 +653,7 @@ int run_benchmark_for_direction(
     err = cudaMemcpyAsync(src_offsets_dev, src_offsets_host.data(), array_size, cudaMemcpyHostToDevice, stream);
     if (err != cudaSuccess) {
         std::cerr << "Failed to copy src_offsets to GPU: " << cudaGetErrorString(err) << std::endl;
+        cudaFree(sm_usage_metadata_buffer);
         cudaFreeHost(host_blk_buffer_ptr);
         cudaFree(preallocated_buffer);
         free_gpu_memory(gpu_mem);
@@ -604,6 +664,7 @@ int run_benchmark_for_direction(
     err = cudaMemcpyAsync(dst_offsets_dev, dst_offsets_host.data(), array_size, cudaMemcpyHostToDevice, stream);
     if (err != cudaSuccess) {
         std::cerr << "Failed to copy dst_offsets to GPU: " << cudaGetErrorString(err) << std::endl;
+        cudaFree(sm_usage_metadata_buffer);
         cudaFreeHost(host_blk_buffer_ptr);
         cudaFree(preallocated_buffer);
         free_gpu_memory(gpu_mem);
@@ -614,6 +675,7 @@ int run_benchmark_for_direction(
     err = cudaMemcpyAsync(lengths_dev, lengths_host.data(), array_size, cudaMemcpyHostToDevice, stream);
     if (err != cudaSuccess) {
         std::cerr << "Failed to copy lengths to GPU: " << cudaGetErrorString(err) << std::endl;
+        cudaFree(sm_usage_metadata_buffer);
         cudaFreeHost(host_blk_buffer_ptr);
         cudaFree(preallocated_buffer);
         free_gpu_memory(gpu_mem);
@@ -786,6 +848,7 @@ int run_benchmark_for_direction(
     }
     
     // Cleanup
+    cudaFree(sm_usage_metadata_buffer);
     cudaFreeHost(host_blk_buffer_ptr);
     cudaFree(preallocated_buffer);
     free_gpu_memory(gpu_mem);
@@ -1052,7 +1115,15 @@ int run_fp8_benchmark(
     std::vector<IpcBlock> blocks;
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_int_distribution<size_t> offset_dis(0, total_gpu_size - block_size_bf16);
+    std::vector<size_t> scattered_offsets;
+    if (!generate_non_overlapping_offsets(
+            static_cast<size_t>(num_blocks), block_size_bf16, total_gpu_size, 16, gen, scattered_offsets)) {
+        free_pinned_memory(bf16_buf);
+        free_pinned_memory(fp8_buf);
+        free_gpu_memory(gpu_mem);
+        cudaStreamDestroy(stream);
+        return 1;
+    }
     
     // D2H copy pattern: 
     //   - src_offset: scattered locations in GPU memory (BF16 format)
@@ -1070,8 +1141,7 @@ int run_fp8_benchmark(
     
     size_t cpu_offset = 0;
     for (int i = 0; i < num_blocks; ++i) {
-        size_t src_offset = offset_dis(gen);
-        src_offset = (src_offset / 16) * 16;  // Ensure alignment
+        size_t src_offset = scattered_offsets[i];
         
         // Copy BF16 data to GPU at scattered location (preparing D2H test data)
         err = cudaMemcpy(static_cast<char*>(gpu_mem) + src_offset, 
@@ -1085,7 +1155,7 @@ int run_fp8_benchmark(
             return 1;
         }
         
-        blocks.emplace_back(src_offset, 0, block_size_bf16);
+        blocks.emplace_back(0, src_offset, block_size_bf16);
         cpu_offset += block_size_bf16;
     }
     

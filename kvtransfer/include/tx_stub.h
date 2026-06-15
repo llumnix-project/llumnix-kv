@@ -8,6 +8,7 @@
 #include <optional>
 #include "common.h"
 #include "channel.h"
+#include "envcfg.h"
 #include "step.h"
 #include "naming.h"
 #include "utils/block_queue.h"
@@ -15,15 +16,27 @@
 
 namespace blade_llm {
 
+// Compute which P ranks should participate in KV transfer when P>D.
+// This function considers both P's tp_size and D's tp_size.
+// When d_tp > num_kv_heads, valid_ranks picks one representative P rank for
+// each D-rank subgroup.
+// Example: num_kv_heads=2, d_tp=4, p_tp=8 -> valid_ranks = 10101010
+std::bitset<MAX_TP_SIZE> compute_valid_ranks_pd(uint32_t p_tp, uint32_t d_tp, int num_kv_heads);
+
 struct BatchSendTask {
   BatchSendTask() = default;
 
-  BatchSendTask(std::shared_ptr<Step> s) noexcept:
-    step(std::move(s)) {}
+  BatchSendTask(std::shared_ptr<Step> s, uint32_t substep = 0) noexcept:
+    step(std::move(s)), substepid(substep) {}
 
 public:
   std::shared_ptr<Step> step;
   std::vector<ReqSendTask> tasks;
+  // substepid is used for logging
+  uint32_t substepid = 0;
+  // send_ts records the sub_submit_ts of the corresponding substep
+  // Used to compute queue_us = iter_start_ts - send_ts
+  Timepoint send_ts;
 };
 
 class ISendStub {
@@ -57,7 +70,7 @@ class ISendStubFactory {
                                uint32_t start_layer,
                                uint32_t num_layers,
                                std::optional<TransferProtocol> ,
-                               const std::optional<std::string> &) = 0;
+                               const std::optional<WorkerInfo> &) = 0;
   virtual ~ISendStubFactory() = default;
 };
 
@@ -100,7 +113,7 @@ class KvSendStubFactory : public ISendStubFactory, public noncopyable {
                        uint32_t start_layer,
                        uint32_t num_layers,
                        std::optional<TransferProtocol>,
-                       const std::optional<std::string> &) override;
+                       const std::optional<WorkerInfo> &) override;
  private:
   Context *ctx_;
   std::shared_ptr<INamingWorkerClient> naming_worker_;

@@ -1,7 +1,9 @@
 #include <stdexcept>
 #include "channel.h"
-#include "protocol/rdma_protocol.h"
+#include "protocol/rdma_channel.h"
+#include "protocol/rdma_staged_channel.h"
 #include "protocol/tcp_channel.h"
+#include "envcfg.h"
 
 namespace blade_llm {
 
@@ -48,7 +50,7 @@ std::tuple<size_t, size_t, size_t, size_t> merge_interval(std::vector<IpcBlock> 
     total_size += prev_len;
     cnt += 1;
   }
-  // Not necessary for now..
+  // Not needed for now..
   // std::remove_if(input, [] len == 0)
   return {min_size, max_size, total_size, cnt};
 }
@@ -66,7 +68,7 @@ std::unique_ptr<IChannel> create_channel(Context *ctx, const TransferProtocol &p
   }
   switch (proto.type) {
     case TransferProtocol::Kind::TCP: {
-      //llx: Rename RDMAProtoContext?
+      // TODO: rename RDMAProtoContext?
       auto proto_ctx = ctx->get_protocol_ctx<BarexProtoContext>(proto);
       if (proto_ctx == nullptr) {
         throw std::runtime_error("tcp channel context not registered;");
@@ -78,6 +80,9 @@ std::unique_ptr<IChannel> create_channel(Context *ctx, const TransferProtocol &p
       auto proto_ctx = ctx->get_protocol_ctx<BarexProtoContext>(proto);
       if (proto_ctx == nullptr) {
         throw std::runtime_error("RDMA channel context not registered;");
+      }
+      if (env_rdma_staged()) {
+        return std::make_unique<RDMAStagedChannel>(ctx->inst_name, ctx->worker_id, proto_ctx->cli_barex_ctx());
       }
       return std::make_unique<RDMAChannel>(ctx->inst_name, ctx->worker_id, proto_ctx->cli_barex_ctx());
 

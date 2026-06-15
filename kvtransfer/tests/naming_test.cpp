@@ -3,52 +3,14 @@
 #include <gmock/gmock.h>
 #include <filesystem>
 #include "naming.h"
-#include "naming/shm_naming.h"
 #include "naming/eas_naming.h"
 #include "naming/filesys_naming.h"
 #include "context.h"
 #include "thrid_party/logging.h"
-#include "protocol/rdma_protocol.h"
+#include "protocol/barex_protocol.h"
 
 
 using namespace blade_llm;
-
-TEST(NamingTest, TestShmNaming) {
-  const std::string PATH = "shm_naming_test_x";
-  ShmNamingServer n_server(PATH);
-  n_server.start();
-
-  ShmNamingClient n_client;
-  n_client.connect(PATH);
-  auto info = n_client.get_worker_info("1", 1);
-  EXPECT_FALSE(info.has_value());
-  Context ctx("1", 1);
-  ctx.set_tp(2, 0);
-  ctx.set_block_params({512}, {128}, 8);
-  SupportTransferProtocols protocols;
-  protocols.set_support(TransferProtocol::Kind::RDMA_DIRECT);
-  auto worker_info = ctx.worker_info();
-  worker_info.transfer_protocols = protocols.value();
-  n_client.register_worker(worker_info);
-
-  ShmNamingClient n_client2;
-  n_client2.connect(PATH);
-  auto info_opt = n_client2.get_worker_info("1", 1);
-  EXPECT_TRUE(info_opt.has_value());
-  EXPECT_EQ(worker_info.inst_id, info_opt->inst_id);
-  EXPECT_EQ(worker_info.worker_id, info_opt->worker_id);
-  EXPECT_EQ(worker_info.tp_size, info_opt->tp_size);
-  EXPECT_EQ(worker_info.worker_tp_rank, info_opt->worker_tp_rank);
-  EXPECT_EQ(worker_info.block_sizes, info_opt->block_sizes);
-  EXPECT_EQ(worker_info.token_sizes, info_opt->token_sizes);
-  EXPECT_EQ(worker_info.transfer_protocols, info_opt->transfer_protocols);
-  SupportTransferProtocols check_protocol(info_opt->transfer_protocols);
-  EXPECT_TRUE(check_protocol.is_support(TransferProtocol::Kind::RDMA_DIRECT));
-}
-
-
-
-
 using namespace std;
 using ::testing::Eq;
 using ::testing::Assign;
@@ -206,7 +168,7 @@ const std::string FakeHttpClient::FAKE_URL = "http://fake";
 void worker_naming_test(INamingClient* client) {
   WorkerNamingClient worker_client(client);
   WorkerInfo wi(client->inst_id, 1);
-  wi.tp_size = 4;
+  wi.engine_tp_size = 4;
   wi.worker_tp_rank = 1;
   wi.block_sizes = {1024 * 64};
   wi.token_sizes = {512};
@@ -214,22 +176,6 @@ void worker_naming_test(INamingClient* client) {
   wi.num_layers = 80;
   wi.transfer_protocols = 1;
   wi.addr = "127.0.0.1:8800";
-
-  std::vector<void *> ptrs(80);
-  std::vector<uint32_t> rkeys(80);
-
-  for (auto i = 0; i < 80; ++i) {
-    ptrs[i] = &wi;
-    rkeys[i] = 512;
-  }
-
-  auto ptr_size = sizeof(void *) * ptrs.size();
-  auto other_info_size = sizeof(uint32_t) * rkeys.size() + ptr_size;
-  wi.other_info.resize(other_info_size);
-  auto other_info_ptr = wi.other_info.data();
-  memcpy(other_info_ptr, ptrs.data(), ptr_size);
-  other_info_ptr += ptr_size;
-  memcpy(other_info_ptr, rkeys.data(), sizeof(uint32_t) * rkeys.size());
   worker_client.register_worker(wi);
 
   auto worker_opt = worker_client.get_worker_info(client->inst_id, wi.worker_id);
@@ -238,7 +184,7 @@ void worker_naming_test(INamingClient* client) {
   auto wii = worker_opt.value();
   EXPECT_EQ(wi.inst_id, wii.inst_id);
   EXPECT_EQ(wi.worker_id, wii.worker_id);
-  EXPECT_EQ(wi.tp_size, wii.tp_size);
+  EXPECT_EQ(wi.engine_tp_size, wii.engine_tp_size);
   EXPECT_EQ(wi.worker_tp_rank, wii.worker_tp_rank);
   EXPECT_EQ(wi.block_sizes, wii.block_sizes);
   EXPECT_EQ(wi.token_sizes, wii.token_sizes);
@@ -246,7 +192,6 @@ void worker_naming_test(INamingClient* client) {
   EXPECT_EQ(wi.num_layers, wii.num_layers);
   EXPECT_EQ(wi.transfer_protocols, wii.transfer_protocols);
   EXPECT_EQ(wi.addr, wii.addr);
-  EXPECT_EQ(wi.other_info, wii.other_info);
 }
 
 TEST(NamingTest, TestWorkerEASNamingClient) {

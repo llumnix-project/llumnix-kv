@@ -4,6 +4,7 @@ from setuptools_scm.version import get_local_node_and_date
 
 import os
 import re
+import sys
 import subprocess
 from pathlib import Path
 from shutil import which
@@ -13,6 +14,10 @@ import torch
 from torch.utils.cpp_extension import (
     BuildExtension,
 )
+
+_build_bench = "--bench" in sys.argv
+if _build_bench:
+    sys.argv.remove("--bench")
 
 
 def is_ninja_available() -> bool:
@@ -42,7 +47,7 @@ int main(int argc, char** argv)
     // Symbol to search for
     const char* symbol = "cudaMemcpyBatchAsync";
 
-    // Automatically search for libcudart.so paths
+    // Paths to search for libcudart.so
     char lib_paths[10][512];
     int path_count = 0;
 
@@ -153,7 +158,7 @@ class CustomBuildExtension(BuildExtension):
         ext_output = self.get_ext_filename(ext.name)
         ext_suffix = ext_output.split('.')[-2]
         debug = int(os.environ.get("BLADELLM_CMAKE_DEBUG", 0)) if self.debug is None else self.debug
-        cfg = "Debug" if debug else "Release"
+        cfg = "Debug" if debug else "RelWithDebInfo"
 
         build_temp = Path(self.build_temp) / ext.name
         if not build_temp.exists():
@@ -191,6 +196,7 @@ class CustomBuildExtension(BuildExtension):
 
 _kvtransfer_src = os.path.join(os.getcwd(), "kvtransfer")
 _build_options = ["-DBUILD_TESTS=OFF", "-DBUILD_RDMA=ON", "-DBUILD_PYTHON_BIND=ON"]
+_build_options.append(f"-DBUILD_BENCHMARKS={'ON' if _build_bench else 'OFF'}")
 
 # Check CUDA batch copy support and add corresponding CMake option
 # If PPU_VERSION_NUM environment variable exists, force disable batch copy
@@ -228,7 +234,7 @@ def _local_version(version) -> str:
     version_parts = [local_ver]
     if int(os.environ.get("BLADELLM_CMAKE_DEBUG", 0)):
         version_parts.append('debug')
-    # This is a misuse of python local version... needs fixing
+    # NOTE: abusing python local version scheme... needs fix
     version_parts.append(f"barex.{_barex_ver()}")
     return '.'.join(version_parts)
 

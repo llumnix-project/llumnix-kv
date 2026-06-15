@@ -5,7 +5,7 @@ import struct
 import threading
 import time
 import uuid
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable, Coroutine, Optional
 
@@ -419,6 +419,8 @@ class IoRet(
     gc=False,
 ):  # type: ignore[call-arg]
     reqid: Optional[str] = None
+    # WARNING: Exception is not serializable by msgspec; sending non-None
+    # ex over io_done_rpc will crash the worker process.
     ex: Optional[Exception] = None
     n: Optional[int] = None
 
@@ -463,42 +465,6 @@ class IoState:
                 ret.n = wio.n
         return ret
 
-
-class EventPool:
-    def __init__(self, reserve_num_events: int, device: torch.device):
-        self.reserve_num_events = reserve_num_events
-        self.event_queue: deque[torch.cuda.Event] = deque()
-        self.device = device
-        with torch.cuda.device(device):
-            for i in range(reserve_num_events):
-                event = torch.cuda.Event()
-                # create the detail new event
-                event.record()
-                event.synchronize()
-                self.event_queue.append(event)
-
-    def get_event(self) -> torch.cuda.Event:
-        if len(self.event_queue) == 0:
-            with torch.cuda.device(self.device):
-                event = torch.cuda.Event()
-                # create the detail new event
-                event.record()
-                event.synchronize()
-                self.event_queue.append(event)
-        return self.event_queue.popleft()
-
-    def put_event(self, event: torch.cuda.Event):
-        self.event_queue.append(event)
-
-    def get_events(self, num_events: int) -> list[torch.cuda.Event]:
-        ret = []
-        for i in range(num_events):
-            ret.append(self.get_event())
-        return ret
-
-    def put_events(self, events: list[torch.cuda.Event]):
-        for event in events:
-            self.event_queue.append(event)
 
 def try_advance(
     state_dict: dict[str, Any], ioret: IoRet, worker_tprank: int, tpsize: int
@@ -561,7 +527,7 @@ class CodeError(Exception):
 # | worker tp | n   | plen| code| len | reqid | plen| code| len | reqid  |
 # +-----------+-----+-----+-----+-----+-------+-----+-----+-----+--------+
 async def handle_done_req(
-    reader, writer, cb: Callable[[int, IoRet], Coroutine[Any, Any, None]], respcode: int
+    reader, writer, cb: Callable[[int, IoRet], Any], respcode: int
 ):
     HAS_VER2 = 0x40000000
     HAS_PLEN = 0x80000000
@@ -599,10 +565,13 @@ async def handle_done_req(
     resp = struct.pack("=I", respcode)
     writer.write(resp)
 
-    tasks = []
+    coros = []
     for ioret in iorets:
-        tasks.append(cb(worker_tprank, ioret))
-    await asyncio.gather(*tasks)
+        ret = cb(worker_tprank, ioret)
+        if asyncio.iscoroutine(ret):
+            coros.append(ret)
+    if coros:
+        await asyncio.gather(*coros)
 
     await writer.drain()
     return

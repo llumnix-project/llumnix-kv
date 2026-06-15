@@ -24,6 +24,12 @@ struct IpcBlock {
 // return min_size, max_size, total_size, cnt
 std::tuple<size_t, size_t, size_t, size_t> merge_interval(std::vector<IpcBlock> &input);
 
+static inline std::ostream& operator<<(std::ostream& os, const IpcBlock& data) {
+  os << "IpcBlock(" << "src=" << data.src_offset
+     << ",dst=" << data.dst_offset
+     << ",len=" << data.length << ")";
+  return os;
+}
 
 enum class TPKind {
   PEQD,
@@ -37,20 +43,19 @@ class IChannel {
  public:
   virtual void connect(const WorkerInfo &dst_info) = 0;
 
-  // Here defines the communication protocol between KvSendStub.start_async and IChannel.
-  // start_async first calls register_data to register data to send, along with data characteristics:
-  // - kind: PEQD indicates data was produced when P tp size equals D tp size.
-  // - data: register_data takes ownership; start_async must not access data afterwards. A cleaner
-  //   interface would be register_data(std::vector<IpcBlock>&& data), std::vector<IpcBlock> flush();
-  //   i.e. flush would return data back for the next iteration, but that's too cumbersome.
-  // After each layer computation, send_data is called. send_data may be asynchronous -- its return
-  // does not mean the transfer is complete. flush() blocks until all in-flight send_data calls finish.
+  // Defines the protocol between KvSendStub.start_async and IChannel.
+  // start_async first calls register_data to register data to send, passing extra data characteristics.
+  // - kind: PEQD indicates data was produced when P tp_size == D tp_size.
+  // - data: register_data takes ownership; start_async must not access data afterwards.
+  //   register_data(std::vector<IpcBlock>&& data), std::vector<IpcBlock> flush(); i.e., flush
+  //   should return data back for start_async to reuse in the next iteration, but that is overly complex.
+  // After each layer finishes, send_data is called. send_data may be async: its return does not mean
+  // data transfer is complete. flush() blocks until all in-flight send_data calls finish.
   virtual void register_data(std::vector<std::vector<IpcBlock>>& data, TPKind kind) = 0;
   virtual void send_data(size_t layer_index) = 0;
-  // out holds metrics collected during register_data and send_data, such as data characteristics
-  // and send times. Prefer key=val,key2=val2 format for easy script processing.
+  // out stores metrics produced during register_data/send_data, e.g., data characteristics and timing.
+  // out format should be key=val,key2=val2 for easy scripted processing.
   virtual void flush(std::string& out) = 0;
-  virtual void send_notification(const std::vector<const ReqSendTask*>& reqs) = 0;
 
   virtual bool is_active() {
     return true;
@@ -58,21 +63,6 @@ class IChannel {
 
   virtual void close() {};
   virtual ~IChannel() = default;
-
-  // ONLY FOR TEST
-  void send_notification(IIterator<const ReqSendTask *> *reqs) {
-    std::vector<const ReqSendTask*> vreqs;
-    auto opt = reqs->next();
-    while (opt.has_value()) {
-      vreqs.emplace_back(opt.value());
-      opt = reqs->next();
-    }
-    if (vreqs.empty()) {
-      return ;
-    }
-    return this->send_notification(vreqs);
-  }
-
 };
 
 using Channel = std::unique_ptr<IChannel>;

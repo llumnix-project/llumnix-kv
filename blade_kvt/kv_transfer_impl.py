@@ -1,16 +1,21 @@
+import asyncio
 import enum
 import os
-from typing import List, Optional, Set, Union
+import socket
+import struct
+from typing import List, Optional, Union
 
 import torch
 import logging
 
 
+# Default stepid and substepid for API compatibility with older vLLM
+DEFAULT_STEPID = 1024
+DEFAULT_SUBSTEPID = 0
+
 from blade_kvt.kvtransfer_ops import (
     TransferProtocol,
     add_target,
-    check_recv_done,
-    check_transfer_done,
     flush_send,
     init_kv_transfer_client,
     init_kv_transfer_server,
@@ -18,14 +23,44 @@ from blade_kvt.kvtransfer_ops import (
     notify_event_record,
     start_send,
     submit_delta_send,
-    submit_req_recv,
     submit_req_send2,
     start_req_send,
+    start_send_substep,
     ReqMeta,
 )
 
 
 logger = logging.getLogger("blade_kvt")
+
+
+# Constants for send done request
+SEND_DONE_REQ = 0x20181219
+SEND_DONE_RESP = 0x91218102
+SAVE_DONE2_REQ = 0x20181223
+
+SEND_DONE_HEAD_KIND = 1
+SEND_SAVE_DONE_HEAD_KIND = 2
+
+CODE_INTERNALERROR = 500
+
+
+def _get_send_done_addr() -> Optional[tuple[str, int]]:
+    """Parse BLLM_KVTRANS_SEND_DONE_ADDR env, return (ip, port) or None."""
+    addr_str = os.environ.get("BLLM_KVTRANS_SEND_DONE_ADDR")
+    if not addr_str:
+        return None
+    parts = addr_str.split(":")
+    if len(parts) != 2:
+        return None
+    return parts[0], int(parts[1])
+
+
+def _get_send_done_head_kind() -> int:
+    """Get BLLM_KVTRANS_SDH_KIND env, default to SEND_SAVE_DONE_HEAD_KIND."""
+    val = os.environ.get("BLLM_KVTRANS_SDH_KIND")
+    if val is None:
+        return SEND_SAVE_DONE_HEAD_KIND
+    return int(val)
 
 
 @enum.unique
@@ -86,6 +121,16 @@ class KVTransferClient:
         naming_url: str,
         layers: Union[List[List[torch.Tensor]], List[torch.Tensor]],
         protocols: List[KVTransferProtocolType],
+        num_kv_heads: int = -1,
+        num_gdn_layers: int = 3,
+        indexer_blk_ntpb: int = 0,
+        hybrid_indexer_token_size: int = 0,
+        gdn_conv_elem_size: int = 1,
+        gdn_ssm_elem_size: int = 1,
+        conv_state_shape: Optional[List[int]] = None,
+        ssm_state_shape: Optional[List[int]] = None,
+        gdn_conv_channel_dims: Optional[List[int]] = None,
+        attn_pack_size: int = 1,
     ):
         """
         Create and init a client used to send kv cache data to remote instances;
@@ -112,16 +157,16 @@ class KVTransferClient:
 
         for layer in layers:
             assert len(layer) == len(layers[0]), "All layer should have the same number of cache tensors"
-        assert (len(block_bytes) == len(token_bytes) == len(layers[0]), 
+        assert (len(block_bytes) == len(token_bytes) == len(layers[0]),
                 "block_bytes and token_bytes should align with layers' cache number")
-        
+
         layer_num_blocks_list = [
             _get_layer_num_blocks([
                 layer[cache_index] for layer in layers
             ], block_bytes[cache_index]) for cache_index in range(len(block_bytes))
         ]
-        assert (all(layer_num_blocks == layer_num_blocks_list[0] 
-                   for layer_num_blocks in layer_num_blocks_list), 
+        assert (all(layer_num_blocks == layer_num_blocks_list[0]
+                   for layer_num_blocks in layer_num_blocks_list),
                 "Currently all cache in one layer should have the same number of blocks")
         layer_num_blocks = layer_num_blocks_list[0]
 
@@ -136,8 +181,8 @@ class KVTransferClient:
             inst_id, tp_size, worker_id, worker_tp_rank,
             block_bytes, token_bytes,
             naming_url, protocols,
-            [cache.shape for cache in layers[0]], 
-            [cache.dtype for cache in layers[0]], 
+            [cache.shape for cache in layers[0]],
+            [cache.dtype for cache in layers[0]],
             [cache.device for cache in layers[0]],
             layer_num_blocks, len(layers)
         )
@@ -159,10 +204,22 @@ class KVTransferClient:
             self._event_addrs,
             layer_addrs,
             ops_protocols,
+            num_kv_heads=num_kv_heads,
+            num_gdn_layers=num_gdn_layers,
+            indexer_blk_ntpb=indexer_blk_ntpb,
+            hybrid_indexer_token_size=hybrid_indexer_token_size,
+            gdn_conv_elem_size=gdn_conv_elem_size,
+            gdn_ssm_elem_size=gdn_ssm_elem_size,
+            conv_state_shape=conv_state_shape if conv_state_shape is not None else [],
+            ssm_state_shape=ssm_state_shape if ssm_state_shape is not None else [],
+            gdn_conv_channel_dims=gdn_conv_channel_dims if gdn_conv_channel_dims is not None else [],
+            attn_pack_size=attn_pack_size,
         )
         self._inited = True
         # None means that start_send is not invoked.
         self._cur_step_id: Optional[int] = None
+        self._worker_tp_rank = worker_tp_rank
+        self._async_sched_warned = False
 
     def _init_events(self):
         self._events = [torch.cuda.Event() for _ in range(self._num_layers)]
@@ -213,18 +270,23 @@ class KVTransferClient:
         req_id: str,
         new_tokens: int,
         has_last_token: bool,
-        src_block_ids: List[int],
-        dst_block_ids: List[int],
+        src_block_ids: Union[List[List[int]], List[int]],
+        dst_block_ids: Union[List[List[int]], List[int]],
         dst_worker_info: Optional[str] = None,
     ):
+        if isinstance(src_block_ids, list) and src_block_ids and isinstance(src_block_ids[0], int):
+            # older version vllm: list[int] -> list[list[int]]
+            assert isinstance(dst_block_ids, list) and dst_block_ids and isinstance(dst_block_ids[0], int)
+            src_block_ids = [src_block_ids]
+            dst_block_ids = [dst_block_ids]
         return self.submit_req_send2(
             dst_inst_id, dst_worker_id, req_id, 0, new_tokens, has_last_token, src_block_ids, dst_block_ids, dst_worker_info
         )
 
-    def start_req_send(self, metas: list[ReqMeta]):
+    def start_req_send(self, metas: list[ReqMeta], stepid: int = DEFAULT_STEPID, substepid: int = DEFAULT_SUBSTEPID):
         if not self._inited:
             raise RuntimeError("KVTransferClient not inited")
-        start_req_send(metas)
+        start_req_send(metas, stepid, substepid)
 
     def submit_req_send2(
         self,
@@ -234,9 +296,10 @@ class KVTransferClient:
         seen_tokens: int,
         new_tokens: int,
         has_last_token: bool,
-        src_block_ids: List[int],
-        dst_block_ids: List[int],
+        src_block_ids: Union[List[List[int]], List[int]],
+        dst_block_ids: Union[List[List[int]], List[int]],
         dst_worker_info: Optional[str] = None,
+        stepid: int = DEFAULT_STEPID,
     ):
         """
         Submit requests which need to send kv to remote;
@@ -254,14 +317,29 @@ class KVTransferClient:
             src_block_ids(List[int]): id of blocks of the request on current worker;
             dst_block_ids(List[int]): id of blocks on remote worker the request want to send to;
             dst_worker_info(Optional[str]): optional worker info for the destination worker;
+            stepid(int): step identifier from upper layer, default 1024 for compatibility;
+            substepid(int): substep identifier, default 0 for compatibility;
         """
         if not self._inited:
             raise RuntimeError("KVTransferClient not inited")
+        if isinstance(src_block_ids, list) and src_block_ids and isinstance(src_block_ids[0], int):
+            # older verson vllm
+            assert isinstance(dst_block_ids, list) and dst_block_ids and isinstance(dst_block_ids[0], int)
+            src_block_ids = [src_block_ids]
+            dst_block_ids = [dst_block_ids]
         submit_req_send2(
-            dst_inst_id, dst_worker_id, req_id, seen_tokens, new_tokens, has_last_token, src_block_ids, dst_block_ids, dst_worker_info
+            dst_inst_id, dst_worker_id, req_id, seen_tokens, new_tokens, has_last_token,
+            src_block_ids, dst_block_ids, dst_worker_info, stepid, 0
         )
 
-    def submit_delta_send(self, req_id: str, seen_tokens: int, new_tokens: int, has_last_token: bool):
+    def submit_delta_send(
+        self,
+        req_id: str,
+        seen_tokens: int,
+        new_tokens: int,
+        has_last_token: bool,
+        stepid: int = DEFAULT_STEPID,
+    ):
         """
         Submit KV data send of new tokens of a previously submitted request;
         Args:
@@ -269,17 +347,25 @@ class KVTransferClient:
             seen_tokens: number of tokens has been submitted to send previously;
             new_tokens: number of tokens need to be sent this time;
             has_last_token: indicate whether the last token is included in this send;
+            stepid(int): step identifier from upper layer, default 1024 for compatibility;
+            substepid(int): substep identifier, default 0 for compatibility;
         """
         if not self._inited:
             raise RuntimeError("KVTransferClient not inited")
-        submit_delta_send(req_id, seen_tokens, new_tokens, has_last_token)
+        submit_delta_send(req_id, seen_tokens, new_tokens, has_last_token, stepid, 0)
 
-    def start_send_step(self):
+    def start_send_step(self, stepid: int = DEFAULT_STEPID, sched_tokens: int = 1):
         """
         Start to send kv data of requests submitted previously layer by layer;
         This function just tell the underlying transfer module to start the transfer progress,
         and won't wait the progress to finish, so the function call will return immediately
         without any blocking;
+
+        Args:
+            stepid(int): step identifier from upper layer, default 1024 for compatibility;
+            sched_tokens(int): number of scheduled tokens for this step, default 1;
+                - sched_tokens == 0: skip Step/StepGuard creation, return EMPTY_STEP_ID
+                - sched_tokens > 0: create Step/StepGuard even if targets_tasks_buf_ is empty
 
         """
         if not self._inited:
@@ -292,10 +378,30 @@ class KVTransferClient:
         EMPTY_STEP_ID = 9223372036854775807
 
         # assert self._cur_step_id is None
-        step_id = start_send()
+        step_id = start_send(stepid, sched_tokens)
         if step_id != EMPTY_STEP_ID:
+            assert step_id == stepid
             self._cur_step_id = step_id
         # self._cur_step_id = start_send()
+
+    def start_send_substep(
+        self,
+        stepid: int,
+        substepid: int,
+        metas: list[ReqMeta],
+    ) -> None:
+        """
+        Submit bypass substep metas to the current step.
+        This method is called from disaggw thread.
+
+        Args:
+            stepid(int): step identifier, must match current step;
+            substepid(int): substep identifier, must be > 0 and monotonically increasing;
+            metas(list[ReqMeta]): list of ReqMeta with has_freeze=false;
+        """
+        if not self._inited:
+            raise RuntimeError("KVTransferClient not inited")
+        start_send_substep(stepid, substepid, metas)
 
     def flush_send_step(self):
         """
@@ -316,30 +422,92 @@ class KVTransferClient:
             # _disagg_step -> post_step
             return
 
+        # When async sched is not supported, model forward should be done when flush_send is called
+        # Check if the last layer event is ready
+        if not self._events[-1].query() and not self._async_sched_warned:
+            self._async_sched_warned = True
+            logger.warning(
+                "flush_send_step called before last layer event is ready; "
+                "this indicates async sched may be enabled but not properly supported",
+                stack_info=True,
+            )
+
         flush_send(self._cur_step_id)
         self._cur_step_id = None
 
-    def check_req_transfer_done(self, req_id: str) -> bool:
-        """
-        Check if the request with the specify id has transferred all its kv data to the remote worker;
-        A request may want to transfer its kv data to multiple workers, this function only check the
-        transfer progress to one worker specified by the params.
+    async def send_error_done_req(
+        self,
+        reqids: list[str],
+        plen: int = 0,
+    ):
+        """Send SEND_DONE_REQ or SAVE_DONE2_REQ with CODE_INTERNALERROR.
+
+        This method is used to notify PBackend scheduler when _get_dist fails
+        during worker-side processing. It mimics the rpc_send_done logic in
+        tx_stub.cpp but always sends CODE_INTERNALERROR (500).
 
         Args:
-            req_id(str): id of request;
-
-        Note:
-            Different with the 'check_send_step_done' above, this function check transfer progress for
-            specific request.
-            Returns true if and only if the last token of the request had been submitted to send, and the
-            underlying transfer module make sure all data had been written to remote worker's memory(e.g.
-            received an acknowledgment from remote);
+            reqids: List of request IDs that failed.
+            plen: The plen value (default 0, unused for error case).
         """
+        if not reqids:
+            return
 
-        if not self._inited:
-            raise RuntimeError("KVTransferClient not inited")
-        is_done = check_transfer_done(req_id)
-        return is_done
+        addr = _get_send_done_addr()
+        assert addr is not None, "send_error_done_req: BLLM_KVTRANS_SEND_DONE_ADDR not set"
+
+        ip, port = addr
+        has_ver2 = 0x40000000
+        worker_tp_rank = self._worker_tp_rank
+        assert worker_tp_rank < 0xFFFF, f"worker_tp_rank too large: {worker_tp_rank}"
+        worker_tp_rank_flags = worker_tp_rank | has_ver2
+        num_req = len(reqids)
+
+        # Build SEND_DONE_REQ body
+        body = bytearray()
+        body += struct.pack(
+            "=III",
+            SEND_DONE_REQ,
+            worker_tp_rank_flags,
+            num_req,
+        )
+        for reqid in reqids:
+            reqid_bytes = reqid.encode("utf-8")
+            rlen = len(reqid_bytes)
+            body += struct.pack(
+                "=III",
+                plen,
+                CODE_INTERNALERROR,
+                rlen,
+            )
+            body += reqid_bytes
+
+        # If SEND_SAVE_DONE_HEAD_KIND, append a copy with SAVE_DONE2_REQ header
+        head_kind = _get_send_done_head_kind()
+        respsize = 4
+        if head_kind == SEND_SAVE_DONE_HEAD_KIND:
+            reqsize = len(body)
+            # Copy the entire body and change header to SAVE_DONE2_REQ
+            body.extend(body)
+            # Overwrite the second copy's header with SAVE_DONE2_REQ
+            struct.pack_into("=I", body, reqsize, SAVE_DONE2_REQ)
+            respsize = 8
+
+        # Send via TCP socket using asyncio
+        reader, writer = await asyncio.open_connection(ip, port)
+        writer.write(body)
+        await writer.drain()
+
+        # Read response
+        resp = await reader.readexactly(respsize)
+        writer.close()
+        await writer.wait_closed()
+
+        logger.info(
+            "send_error_done_req: sent error done reqids=%s addr=%s:%d head_kind=%d worker_tp_rank=%d",
+            reqids, ip, port, head_kind, worker_tp_rank
+        )
+
 
 
 class KVTransferServer:
@@ -354,7 +522,16 @@ class KVTransferServer:
         naming_url: str,
         layers: Union[List[List[torch.Tensor]], List[torch.Tensor]],
         protocols: List[KVTransferProtocolType],
-
+        num_kv_heads: int = -1,
+        num_gdn_layers: int = 3,
+        indexer_blk_ntpb: int = 0,
+        hybrid_indexer_token_size: int = 0,
+        gdn_conv_elem_size: int = 1,
+        gdn_ssm_elem_size: int = 1,
+        conv_state_shape: Optional[List[int]] = None,
+        ssm_state_shape: Optional[List[int]] = None,
+        gdn_conv_channel_dims: Optional[List[int]] = None,
+        attn_pack_size: int = 1,
     ):
         # older version vllm, should only contain simple model architecture
         if isinstance(block_bytes, int) and isinstance(token_bytes, int):
@@ -366,7 +543,7 @@ class KVTransferServer:
 
         for layer in layers:
             assert len(layer) == len(layers[0]), "All layer should have the same number of cache tensors"
-        assert (len(block_bytes) == len(token_bytes) == len(layers[0]), 
+        assert (len(block_bytes) == len(token_bytes) == len(layers[0]),
                 "block_bytes and token_bytes should align with layers' cache number")
 
         layer_num_blocks_list = [
@@ -375,7 +552,7 @@ class KVTransferServer:
             ], block_bytes[cache_index]) for cache_index in range(len(block_bytes))
         ]
         assert (all(layer_num_blocks == layer_num_blocks_list[0]
-                   for layer_num_blocks in layer_num_blocks_list), 
+                   for layer_num_blocks in layer_num_blocks_list),
                 "Currently all cache in one layer should have the same number of blocks")
         layer_num_blocks = layer_num_blocks_list[0]
 
@@ -391,8 +568,8 @@ class KVTransferServer:
             inst_id, tp_size, worker_id, worker_tp_rank,
             block_bytes, token_bytes,
             naming_url, protocols,
-            [cache.shape for cache in layers[0]], 
-            [cache.dtype for cache in layers[0]], 
+            [cache.shape for cache in layers[0]],
+            [cache.dtype for cache in layers[0]],
             [cache.device for cache in layers[0]],
             layer_num_blocks, len(layers)
         )
@@ -411,28 +588,15 @@ class KVTransferServer:
             naming_url,
             layer_addrs,
             ops_protocols,
+            num_kv_heads=num_kv_heads,
+            num_gdn_layers=num_gdn_layers,
+            indexer_blk_ntpb=indexer_blk_ntpb,
+            hybrid_indexer_token_size=hybrid_indexer_token_size,
+            gdn_conv_elem_size=gdn_conv_elem_size,
+            gdn_ssm_elem_size=gdn_ssm_elem_size,
+            conv_state_shape=conv_state_shape if conv_state_shape is not None else [],
+            ssm_state_shape=ssm_state_shape if ssm_state_shape is not None else [],
+            gdn_conv_channel_dims=gdn_conv_channel_dims if gdn_conv_channel_dims is not None else [],
+            attn_pack_size=attn_pack_size,
         )
         self._inited = True
-        self._recv_done_reqs: Set[str] = set()
-
-    def submit_req_recv(self, src_inst_id: str, src_worker_id: int, req_id: str, dst_block_ids: List[int]):
-        if not self._inited:
-            raise RuntimeError("KVTransferServer not inited")
-
-        submit_req_recv(src_inst_id, src_worker_id, req_id, dst_block_ids)
-
-    def check_req_transfer_done(self, req_id: str) -> bool:
-        if not self._inited:
-            raise RuntimeError("KVTransferServer not inited")
-
-        if req_id not in self._recv_done_reqs:
-            is_done = check_recv_done(req_id)
-            if is_done:
-                self._recv_done_reqs.add(req_id)
-            return is_done
-        else:
-            return True
-
-    def clear_done_reqs(self, req_external_ids: List[str]):
-        for _req_external_id in req_external_ids:
-            self._recv_done_reqs.remove(_req_external_id)

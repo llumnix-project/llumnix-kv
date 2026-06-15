@@ -16,7 +16,6 @@ from ..engine_proxy import (
     SchedulerOutput,
     VllmConfig,
     get_param,
-    get_logger,
     sched_rpc_server,
 )
 
@@ -27,7 +26,6 @@ from ..kvtbackend import (
     P_KVT_STATE,
     P_REMOTE_DECODE,
     PREFILL_RESP,
-    D_LOCAL_PREFILL,
     DBackend,
     PBackend,
     RKVTDInfo,
@@ -38,29 +36,18 @@ from ..kvtbackend import (
 
 # yapf: enable
 from ..utils import IoRet
-from . import KVT_SUSPEND_REQ, SRC_INFO, migrate_in_pd_way
+from . import KVT_SUSPEND_REQ, SRC_INFO
 from .backend import MigrationBackend, SuspendReq
-
-logger = get_logger(__name__)
 
 
 class KVTMigration(HybridBackend):
     def __init__(
             self, cfg: VllmConfig, role: KVConnectorRole,
             kv_cache_config:KVCacheConfig = None):
-
-        if cfg.model_config.is_hybrid and cfg.cache_config.enable_prefix_caching:
-            logger.fatal("migration is not support for hybrid model when prefix caching is enabled")
-        
-        if cfg.model_config.is_hybrid and not migrate_in_pd_way():
-            logger.fatal("migration based on recompute is not support for hybrid model")
-
         self._p = PBackend(cfg, role, kv_cache_config)
         self._d = DBackend(cfg, role, kv_cache_config)
-
-        workers_info = getattr(self._d, "_workers_info", None)
-        self._m = MigrationBackend(cfg, role, workers_info, self._p.naming_cli())
-
+        self._m = MigrationBackend(cfg, role, self._p.naming_cli())
+        
         if role == KVConnectorRole.SCHEDULER:
             rpcsrv = sched_rpc_server()
             rpcsrv.register_method(KVT_SUSPEND_REQ, self._on_transfer_suspend_kv)
@@ -83,6 +70,12 @@ class KVTMigration(HybridBackend):
     # bind_backend_metadata([R]) happen before async_load_kv(R)
     def bind_backend_metadata(self, meta: BackendMeta):
         self._p.bind_backend_metadata(meta)
+
+    def bypass_bind(self, meta: BackendMeta):
+        self._p.bypass_bind(meta)
+
+    def bypass_clear(self):
+        self._p.bypass_clear()
         return
 
     # worker thread
@@ -114,10 +107,7 @@ class KVTMigration(HybridBackend):
     async def async_update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ) -> Optional[IoRet]:
-        if get_param(request, D_LOCAL_PREFILL, False):
-            r = IoRet(n=request.num_tokens-1)
-            self._p._dual_req_done.pop(request.request_id, None)
-        elif get_param(request, SRC_INFO):
+        if get_param(request, SRC_INFO):
             r = await self._m.async_update_state_after_alloc(
                 request, blocks, num_external_tokens
             )
@@ -144,7 +134,6 @@ class KVTMigration(HybridBackend):
         kvt = self._p.build_backend_meta(sout)
         return kvt
     
-    # disagg thread
     async def _on_transfer_suspend_kv(self, reader, writer):
         bodylenbuf = await reader.readexactly(4)
         (bodylen,) = struct.unpack("=I", bodylenbuf)
@@ -153,7 +142,7 @@ class KVTMigration(HybridBackend):
         resp = await self._p.submit_transfer_kv(req)
         if resp.computed == -1:
             resp.code = CODE_REQNOTFOUND
-        if resp.code == CODE_OK and not migrate_in_pd_way(req):
+        if resp.code == CODE_OK:
             susreq = SuspendReq(reqid=req.reqid)
             susresp = await self._m.do_suspend(susreq)
             if susresp.code != CODE_OK:
@@ -165,8 +154,6 @@ class KVTMigration(HybridBackend):
                 if envs.LLUMNIX_DETAILED_MIG_STATUS:
                     with _g_migrate_out_req_info_lock:
                         _g_migrate_out_req_info.pop(req.reqid)
-
-        logger.info(f"migration transfer kv and suspend req ({req.reqid}) done, resp: {resp}")
 
         respbuf = bytearray.fromhex("00 00 00 00 00 00 00 00")
         struct.pack_into("=II", respbuf, 0, PREFILL_RESP, 0)
