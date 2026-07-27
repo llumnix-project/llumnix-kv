@@ -20,6 +20,8 @@ static void do_parse_block_send_internal(
   const std::vector<uint32_t>& d_blocks,
   uint32_t wrote_tokens,
   uint32_t left_tokens,
+  const IpcBlockBounds& bounds,
+  bool swap_offsets,
   std::vector<std::vector<IpcBlock>> &send_blocks
 );
 
@@ -49,9 +51,11 @@ void parse_block_send_p_eq_d(
   assert(block_sizes.size() == 1);
   send_blocks.resize(token_sizes.size());
   std::vector<IpcBlock> &per_cache_send_blocks = send_blocks[0];
+  const auto bounds = make_ipc_block_bounds(
+      *src_worker_info, *dst_worker_info, 0);
   do_parse_block_send_p_eq_d(
     block_sizes[0], token_sizes[0],
-    task, per_cache_send_blocks
+    task, bounds, per_cache_send_blocks
   );
 }
 
@@ -66,14 +70,14 @@ void parse_block_send_p_gt_d_dpsk(
   std::vector<std::vector<IpcBlock>> &send_blocks
 ) {
   assert(p_info->token_sizes == d_info->token_sizes);
-  // This means kvcache is identical across all P ranks.
-  // Only the tp rank=0 worker needs to transfer kvcache.
+  // At this point, the KV cache is identical across all P ranks.
+  // Only the worker with TP rank 0 needs to transfer the KV cache.
   if (p_info->worker_tp_rank != 0) {
     return;
   }
 
   assert(d_info->worker_tp_rank == 0);
-  // PD blocks must contain the same number of tokens
+  // P and D blocks must contain the same number of tokens.
   assert(p_info->block_sizes == d_info->block_sizes);
   auto &token_sizes = p_info->token_sizes;
   auto &block_sizes = p_info->block_sizes;
@@ -84,8 +88,9 @@ void parse_block_send_p_gt_d_dpsk(
 
   send_blocks.resize(token_sizes.size());
   std::vector<IpcBlock> &per_cache_send_blocks = send_blocks[0];
+  const auto bounds = make_ipc_block_bounds(*p_info, *d_info, 0);
   do_parse_block_send_p_eq_d(
-    block_sizes[0], token_sizes[0], task, per_cache_send_blocks
+    block_sizes[0], token_sizes[0], task, bounds, per_cache_send_blocks
   );
 }
 
@@ -100,6 +105,8 @@ static void do_parse_block_send_internal(
   const std::vector<uint32_t>& d_blocks,
   uint32_t wrote_tokens,
   uint32_t left_tokens,
+  const IpcBlockBounds& bounds,
+  bool swap_offsets,
   std::vector<std::vector<IpcBlock>> &send_blocks
 ) {
   // for bladellm
@@ -145,6 +152,7 @@ static void do_parse_block_send_internal(
   parse_block_send_gt(
     p_token_size, p_k_size, d_token_size, ntpb, group_off,
     p_blocks, d_blocks, wrote_tokens, left_tokens,
+    bounds, swap_offsets,
     per_cache_send_blocks
   );
   const size_t sbsize_after = per_cache_send_blocks.size();
@@ -152,10 +160,16 @@ static void do_parse_block_send_internal(
   per_cache_send_blocks.reserve(per_cache_send_blocks.size() + sbsize_after - sbsize);
   for (size_t idx = sbsize; idx < sbsize_after; ++idx) {
     const auto& sb = per_cache_send_blocks.at(idx);
-    const size_t pv_token_off = sb.src_offset + p_k_size;
-    const size_t dv_token_off = sb.dst_offset + d_k_size;
+    const size_t pv_token_off = sb.src_offset +
+        (swap_offsets ? d_k_size : p_k_size);
+    const size_t dv_token_off = sb.dst_offset +
+        (swap_offsets ? p_k_size : d_k_size);
     assert(p_k_size == sb.length);
-    per_cache_send_blocks.emplace_back(pv_token_off, dv_token_off, p_k_size);
+    append_ipc_block_checked(
+        per_cache_send_blocks, bounds,
+        pv_token_off,
+        dv_token_off,
+        p_k_size);
   }
 }
 
@@ -169,11 +183,14 @@ void parse_block_send_p_gt_d(
   const ReqSendTask *task,
   std::vector<std::vector<IpcBlock>> &send_blocks
 ) {
+  const auto bounds = make_ipc_block_bounds(*p_info, *d_info, 0);
   return do_parse_block_send_internal(
     p_info, kvt_tp_size, task->src_blocks()[0],
     d_info, d_info->engine_tp_size, task->dst_blocks()[0],
     task->seen_tokens,
     task->new_tokens,
+    bounds,
+    false,
     send_blocks);
 }
 
@@ -187,20 +204,16 @@ void parse_block_send_p_lt_d(
   const ReqSendTask *task,
   std::vector<std::vector<IpcBlock>> &send_blocks
 ) {
-  size_t cache_idx = send_blocks.size();
+  const auto bounds = make_ipc_block_bounds(*p_info, *d_info, 0);
   // P<D: swap (p, d) so the helper's "p side" is actually the larger TP (D).
   do_parse_block_send_internal(
     d_info, d_info->engine_tp_size, task->dst_blocks()[0],
     p_info, kvt_tp_size, task->src_blocks()[0],
     task->seen_tokens,
     task->new_tokens,
+    bounds,
+    true,
     send_blocks);
-  for (; cache_idx < send_blocks.size(); ++cache_idx) {
-    auto &per_cache_sbs = send_blocks.at(cache_idx);
-    for(size_t sb_idx = 0; sb_idx < per_cache_sbs.size(); ++sb_idx){
-      std::swap(per_cache_sbs.at(sb_idx).src_offset, per_cache_sbs.at(sb_idx).dst_offset);
-    }
-  }
 }
 
 }  // namespace blade_llm

@@ -30,7 +30,13 @@ from typing import Optional
 
 import torch
 
-from . import BackendMeta, HybridBackend, IoRet
+from . import (
+    BackendMeta,
+    HybridBackend,
+    IoRet,
+    OperationPlan,
+    merge_operation_plans,
+)
 from .engine_proxy import (
     KVCacheBlocks,
     KVCacheConfig,
@@ -116,6 +122,9 @@ class V6dObjectKVTBackend(HybridBackend):
         self._kvt.async_save_kv_layer(layer_name, kv_layer, m.kvt)
         return self._v6d.async_save_kv_layer(layer_name, kv_layer, m.v6d)
 
+    def save_done_source(self) -> str | None:
+        return self._v6d.save_done_source()
+
     # ==============================
     # Scheduler-side methods
     # ==============================
@@ -147,7 +156,7 @@ class V6dObjectKVTBackend(HybridBackend):
         if inspect.isawaitable(maybe_awaitable):
             await maybe_awaitable
 
-    def get_operations(self, req: Request) -> tuple[int, int]:
+    def get_operations(self, req: Request) -> OperationPlan:
         # =====================================================================
         # Owner-Sidecar Pattern with Shared Truncation
         # =====================================================================
@@ -161,9 +170,9 @@ class V6dObjectKVTBackend(HybridBackend):
         # V6D remains the sole decision-maker for save_count (owner pattern).
         # KVT's truncate affects the request state, so both backends see the
         # same truncated prompt.
-        kvt_load_count, kvt_save_count = self._kvt.get_operations(req)
-        v6d_load_count, v6d_save_count = self._v6d.get_operations(req)
-        return kvt_load_count + v6d_load_count, kvt_save_count + v6d_save_count
+        kvt_ops = self._kvt.get_operations(req)
+        v6d_ops = self._v6d.get_operations(req)
+        return merge_operation_plans(v6d_ops, kvt_ops)
 
     def build_backend_meta(self, sout: SchedulerOutput) -> BackendMeta:
         # Both backends build meta independently:

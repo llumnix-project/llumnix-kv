@@ -97,6 +97,31 @@ struct CopyKernelCtx : public noncopyable {
   }
 
   ~CopyKernelCtx() {
+    if (device_id >= 0) {
+      cudaError_t err = cudaSetDevice(device_id);
+      if (err != cudaSuccess) {
+        LOG(ERROR) << "CopyKernelCtx: Failed to restore device " << device_id
+                   << " during teardown: " << cudaGetErrorString(err);
+      }
+    }
+    if (h2d_stream != nullptr) {
+      cudaError_t err = cudaStreamSynchronize(h2d_stream);
+      if (err != cudaSuccess) {
+        LOG(ERROR) << "CopyKernelCtx: Failed to synchronize h2d_stream: "
+                   << cudaGetErrorString(err);
+      }
+    }
+    if (d2h_stream != nullptr) {
+      cudaError_t err = cudaStreamSynchronize(d2h_stream);
+      if (err != cudaSuccess) {
+        LOG(ERROR) << "CopyKernelCtx: Failed to synchronize d2h_stream: "
+                   << cudaGetErrorString(err);
+      }
+    }
+    // Streams may still reference the metadata buffers. Destroy them before
+    // releasing device or pinned-host storage.
+    destroy_h2d_stream();
+    destroy_d2h_stream();
     if (device_blk_buffer != nullptr) {
       cudaFree(device_blk_buffer);
       device_blk_buffer = nullptr;
@@ -105,8 +130,6 @@ struct CopyKernelCtx : public noncopyable {
       cudaFreeHost(host_blk_buffer);
       host_blk_buffer = nullptr;
     }
-    destroy_h2d_stream();
-    destroy_d2h_stream();
   }
 };
 

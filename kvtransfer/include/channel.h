@@ -20,6 +20,23 @@ struct IpcBlock {
   bool operator==(const IpcBlock &other) const;
 };
 
+enum class IpcBlockOffset {
+  SOURCE,
+  DESTINATION,
+};
+
+// Validate a set of offsets against the registered GPU buffer before handing
+// them to CUDA or RDMA. Unlike assert(), this remains active in release builds
+// and emits the exact offending range before throwing.
+void validate_ipc_block_bounds(
+    const std::vector<IpcBlock>& blocks,
+    size_t capacity,
+    IpcBlockOffset offset_kind,
+    const char* copy_path,
+    size_t layer_idx,
+    size_t tensor_idx,
+    size_t length_scale = 1);
+
 // src_offset, dst_offset, len
 // return min_size, max_size, total_size, cnt
 std::tuple<size_t, size_t, size_t, size_t> merge_interval(std::vector<IpcBlock> &input);

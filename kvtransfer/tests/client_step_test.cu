@@ -75,6 +75,9 @@ public:
     dst_info.worker_tp_rank = 0;
     dst_info.block_sizes = {16 * KB};
     dst_info.token_sizes = {KB};
+    // Match the 128-block destination allocation used by the test. The
+    // synthetic request writes destination block ids 4 through 7.
+    dst_info.layer_num_blocks = 128;
     return dst_info;
   }
 };

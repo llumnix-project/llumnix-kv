@@ -1,4 +1,5 @@
 #include <stdexcept>
+#include <limits>
 #include "channel.h"
 #include "protocol/rdma_channel.h"
 #include "protocol/rdma_staged_channel.h"
@@ -6,6 +7,47 @@
 #include "envcfg.h"
 
 namespace blade_llm {
+
+void validate_ipc_block_bounds(
+    const std::vector<IpcBlock>& blocks,
+    size_t capacity,
+    IpcBlockOffset offset_kind,
+    const char* copy_path,
+    size_t layer_idx,
+    size_t tensor_idx,
+    size_t length_scale) {
+  for (size_t block_idx = 0; block_idx < blocks.size(); ++block_idx) {
+    const auto& block = blocks[block_idx];
+    const size_t offset = offset_kind == IpcBlockOffset::SOURCE
+                              ? block.src_offset
+                              : block.dst_offset;
+    const bool length_overflow = length_scale == 0 ||
+        block.length > std::numeric_limits<size_t>::max() / length_scale;
+    const size_t effective_length = length_overflow
+                                        ? std::numeric_limits<size_t>::max()
+                                        : block.length * length_scale;
+    // Use subtraction after checking offset to avoid overflow in offset+length.
+    const bool invalid = block.length == 0 || length_overflow ||
+                         offset > capacity ||
+                         effective_length > capacity - offset;
+    if (invalid) {
+      LOG(ERROR) << "KVT GPU buffer range validation failed"
+                 << ",copy_path=" << copy_path
+                 << ",layer_idx=" << layer_idx
+                 << ",tensor_idx=" << tensor_idx
+                 << ",block_idx=" << block_idx
+                 << ",offset_kind="
+                 << (offset_kind == IpcBlockOffset::SOURCE ? "src" : "dst")
+                 << ",src_offset=" << block.src_offset
+                 << ",dst_offset=" << block.dst_offset
+                 << ",length=" << block.length
+                 << ",length_scale=" << length_scale
+                 << ",effective_length=" << effective_length
+                 << ",capacity=" << capacity;
+      throw std::out_of_range("KVT GPU buffer range validation failed");
+    }
+  }
+}
 
 // return true if merged
 static bool can_merge(IpcBlock& pre_block, IpcBlock& cur_block) {

@@ -7,7 +7,6 @@
 #include "channel.h"
 #include "envcfg.h"
 #include "naming/fake_naming.h"
-#include "cache_transfer_spec.h"
 #include <string.h>
 #include <unistd.h>
 #include "fault_inject.h"
@@ -18,6 +17,30 @@ namespace blade_llm {
 
 std::bitset<MAX_TP_SIZE> compute_valid_ranks_pd(uint32_t p_tp, uint32_t d_tp, int num_kv_heads) {
   std::bitset<MAX_TP_SIZE> result;
+
+  // P_tp < D_tp: one P rank fans out to group_n = d_tp / p_tp D ranks.
+  // Every P rank is a valid sender -- even head-replicated duplicate ranks
+  // serve distinct D targets in the fan-out. Three regimes:
+  //   - num_kv_heads <= p_tp: attn full-copy (replicated on both sides);
+  //   - num_kv_heads >= d_tp: fully head-split, D row is the group_off-th
+  //     contiguous sub-slice of the P row;
+  //   - p_tp < num_kv_heads < d_tp (mixed): each P rank holds
+  //     num_kv_heads/p_tp distinct heads and each head is replicated on
+  //     d_tp/num_kv_heads D ranks. Per-target head sub-slicing is done in the
+  //     p_lt_d parse functions; here we only require divisibility.
+  if (p_tp < d_tp) {
+    assert(d_tp % p_tp == 0);
+    if (num_kv_heads > 0 &&
+        static_cast<uint32_t>(num_kv_heads) > p_tp &&
+        static_cast<uint32_t>(num_kv_heads) < d_tp) {
+      assert(static_cast<uint32_t>(num_kv_heads) % p_tp == 0);
+      assert(d_tp % static_cast<uint32_t>(num_kv_heads) == 0);
+    }
+    for (uint32_t i = 0; i < p_tp; ++i) {
+      result.set(i);
+    }
+    return result;
+  }
 
   // Case 1: num_kv_heads <= 0 or num_kv_heads >= p_tp: all ranks are valid
   if (num_kv_heads <= 0 || static_cast<uint32_t>(num_kv_heads) >= p_tp) {
@@ -83,7 +106,8 @@ static uint32_t selection_p_tp(int cache_shape,
                                const WorkerInfo& src,
                                uint32_t effective_kvt_tp_size) noexcept {
   if (cache_shape == QWEN3_NEXT_FLASH_CACHE_SHAPE ||
-      cache_shape == QWEN3_NEXT_FLASHINFER_CACHE_SHAPE) {
+      cache_shape == QWEN3_NEXT_FLASHINFER_CACHE_SHAPE ||
+      cache_shape == KIMI_K3_MLA_CACHE_SHAPE) {
     return src.engine_tp_size;
   }
   return effective_kvt_tp_size;
@@ -114,7 +138,6 @@ struct KvSendStub::TaskContext {
   std::vector<const ReqSendTask *> finished_req;
   TPKind tpkind = TPKind::UNKNOWN;
   ParseBlockFunc parse_block = nullptr;
-  std::optional<TransferPlan> transfer_plan;
   std::optional<WorkerInfo> dstinfo;
   Channel ch;
 
@@ -139,7 +162,7 @@ public:
     const auto& dst_id = self.stub->dstid_;
     const auto dst_worker_id = self.stub->dstworkerid_;
 
-    // Used to increase fault injection reproduction probability.
+    // Increase the probability of reproducing the connection-race issue.
     fault_inject_sleep(300 * 1000);
 
     self.iter_start_ts = SteadyClock::now();  // iterator begin;
@@ -173,17 +196,12 @@ public:
       try {
         self.try_create_channel();
         const auto& srcinfo = self.stub->src_info_;
-        if (self.transfer_plan.has_value()) {
-          assert(self.transfer_plan->tpkind != TPKind::UNKNOWN);
-          for (auto* task : self.send_req) {
-            generate_all_ipc_blocks(self.transfer_plan.value(), task, self.send_blocks);
-          }
-        } else {
-          assert(self.parse_block != nullptr);
-          assert(self.tpkind != TPKind::UNKNOWN);
-          for (auto* task : self.send_req) {
-            self.parse_block(&srcinfo, &self.dstinfo.value(), self.valid_ranks, self.kvt_tp_size, self.kvt_tp_rank, task, self.send_blocks);
-          }
+        assert(self.parse_block != nullptr);
+        assert(self.tpkind != TPKind::UNKNOWN);
+        for (auto* task : self.send_req) {
+          self.parse_block(&srcinfo, &self.dstinfo.value(), self.valid_ranks,
+                           self.kvt_tp_size, self.kvt_tp_rank, task,
+                           self.send_blocks);
         }
         if (!self.send_blocks.empty() && !self.send_blocks[0].empty()) {
 #ifndef NDEBUG
@@ -317,7 +335,7 @@ private:
     uint32_t num_req = reqs.size();
 
     // len('cfb0aa74-6752-9bcd-879e-19d1d1cf368b-ee5d8cdc-57d1-478f-a1d7-5b0c05bd8fb3')
-    // == 73, a typical dual_req reqid length.
+    // == 73, a typical dual-request request ID length.
     self.send_done_buf.reserve((4 + 4 + 4 + num_req * (4 + 73 + 4 + 4)) * 2ul);
 
     self.send_done_buf.resize(4 + 4 + 4);
@@ -346,8 +364,8 @@ private:
       respsize = 8;
     }
 
-    // Since we use a persistent connection that may have become stale,
-    // we retry and recreate a connection when needed. Once is enough.
+    // A persistent connection may become stale. Recreate it and retry once
+    // when necessary.
     try {
       self.do_rpc_send_done(respsize);
       return ;
@@ -385,7 +403,8 @@ private:
       TimeWatch wait_start;
       batch.step->wait_layer_ready(i);
       self.wait_time_us += wait_start.get_elapse_us();
-      // NOTE: write may be async! Returning does not mean data was sent!
+      // NOTE: write may be asynchronous. Returning from write does not mean
+      // the data has been sent.
       self.ch->send_data(i);
     }
     fault_inject_throw();
@@ -449,20 +468,6 @@ private:
         << ",Dst Info: engine_tp_size=" << dst_tp
         << ",worker_tp_rank=" << self.dstinfo->worker_tp_rank;
 
-    if (env_tx_use_cache_transfer_spec()) {
-      assert(!self.transfer_plan.has_value());
-      self.parse_block = nullptr;
-      self.transfer_plan = build_transfer_plan(
-        cache_shape,
-        srcinfo, *self.dstinfo,
-        self.valid_ranks,
-        self.kvt_tp_size,
-        self.kvt_tp_rank
-      );
-      self.tpkind = self.transfer_plan->tpkind;
-      return;
-    }
-
     assert(self.parse_block == nullptr);
     assert(self.tpkind == TPKind::UNKNOWN);
 
@@ -509,6 +514,9 @@ private:
         self.tpkind = TPKind::PGTD;
         return;
       }
+      self.parse_block = vllm_parse_hybrid_block_send_p_lt_d;
+      self.tpkind = TPKind::PLTD;
+      return;
     }
     if (cache_shape == DPSK_V32_SPARSE_MLA_SHAPE) {
       if (sel_p_tp == dst_tp) {
@@ -548,6 +556,24 @@ private:
         self.tpkind = TPKind::PGTD;
         return;
       }
+      self.parse_block = vllm_parse_qwen3_next_flashinfer_block_send_p_lt_d;
+      self.tpkind = TPKind::PLTD;
+      return;
+    }
+    if (cache_shape == KIMI_K3_MLA_CACHE_SHAPE) {
+      if (sel_p_tp == dst_tp) {
+        self.parse_block = parse_kimi_k3_mla_block_send_p_eq_d;
+        self.tpkind = TPKind::PEQD;
+        return;
+      }
+      if (sel_p_tp > dst_tp) {
+        self.parse_block = parse_kimi_k3_mla_block_send_p_gt_d;
+        self.tpkind = TPKind::PGTD;
+        return;
+      }
+      self.parse_block = parse_kimi_k3_mla_block_send_p_lt_d;
+      self.tpkind = TPKind::PLTD;
+      return;
     }
     if (cache_shape == TURBOQUANT_CACHE_SHAPE) {
       if (sel_p_tp == dst_tp) {

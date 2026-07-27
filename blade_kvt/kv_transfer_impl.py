@@ -104,10 +104,39 @@ def support_transfers_protocols() -> List[KVTransferProtocolType]:
 
 def _get_layer_num_blocks(layers: List[torch.Tensor], block_bytes: int):
     # No need to check shape, we can just use layer_size/block_bytes to calculate num_blocks
-    layer_shape = layers[0].shape
-    for l in layers:
-        assert l.shape == layer_shape, "All layers should have the same shape"
-    return layers[0].nbytes // block_bytes
+    if block_bytes <= 0:
+        raise ValueError(f"block_bytes must be positive, got {block_bytes}")
+
+    first = layers[0]
+    first_signature = (
+        first.shape,
+        first.stride(),
+        first.dtype,
+        first.device,
+        first.nbytes,
+    )
+    for layer_idx, layer in enumerate(layers):
+        signature = (
+            layer.shape,
+            layer.stride(),
+            layer.dtype,
+            layer.device,
+            layer.nbytes,
+        )
+        if signature != first_signature:
+            raise ValueError(
+                "All registered KV layers must have identical layout; "
+                f"layer_idx={layer_idx}, expected={first_signature}, "
+                f"actual={signature}"
+            )
+        if layer.nbytes % block_bytes != 0:
+            raise ValueError(
+                "KV layer size is not divisible by block_bytes; "
+                f"layer_idx={layer_idx}, nbytes={layer.nbytes}, "
+                f"block_bytes={block_bytes}, shape={tuple(layer.shape)}, "
+                f"stride={layer.stride()}"
+            )
+    return first.nbytes // block_bytes
 
 class KVTransferClient:
     def __init__(
@@ -130,7 +159,15 @@ class KVTransferClient:
         conv_state_shape: Optional[List[int]] = None,
         ssm_state_shape: Optional[List[int]] = None,
         gdn_conv_channel_dims: Optional[List[int]] = None,
+        kda_conv_dim_first: bool = False,
+        hybrid_attn_token_size: int = 0,
+        kda_page_stride: int = 0,
         attn_pack_size: int = 1,
+        num_ple_layers: int = 0,
+        ple_block_group: int = 0,
+        ple_conv_elem_size: int = 1,
+        ple_conv_state_shape: Optional[List[int]] = None,
+        ple_conv_channel_dims: Optional[List[int]] = None,
     ):
         """
         Create and init a client used to send kv cache data to remote instances;
@@ -153,21 +190,28 @@ class KVTransferClient:
             token_bytes = [token_bytes]
             layers = [[layer] for layer in layers]
         else:
-            assert isinstance(block_bytes, list) and isinstance(token_bytes, list)
+            if not isinstance(block_bytes, list) or not isinstance(token_bytes, list):
+                raise TypeError("block_bytes and token_bytes must both be int or list")
 
-        for layer in layers:
-            assert len(layer) == len(layers[0]), "All layer should have the same number of cache tensors"
-        assert (len(block_bytes) == len(token_bytes) == len(layers[0]),
-                "block_bytes and token_bytes should align with layers' cache number")
+        if any(len(layer) != len(layers[0]) for layer in layers):
+            raise ValueError("All layers must have the same number of cache tensors")
+        if not len(block_bytes) == len(token_bytes) == len(layers[0]):
+            raise ValueError(
+                "block_bytes and token_bytes must align with the number of "
+                "cache tensors per layer"
+            )
 
         layer_num_blocks_list = [
             _get_layer_num_blocks([
                 layer[cache_index] for layer in layers
             ], block_bytes[cache_index]) for cache_index in range(len(block_bytes))
         ]
-        assert (all(layer_num_blocks == layer_num_blocks_list[0]
-                   for layer_num_blocks in layer_num_blocks_list),
-                "Currently all cache in one layer should have the same number of blocks")
+        if not all(layer_num_blocks == layer_num_blocks_list[0]
+                   for layer_num_blocks in layer_num_blocks_list):
+            raise ValueError(
+                "All cache tensors in one layer must have the same number "
+                f"of blocks, got {layer_num_blocks_list}"
+            )
         layer_num_blocks = layer_num_blocks_list[0]
 
         device_id = layers[0][0].get_device()
@@ -185,6 +229,17 @@ class KVTransferClient:
             [cache.dtype for cache in layers[0]],
             [cache.device for cache in layers[0]],
             layer_num_blocks, len(layers)
+        )
+        logger.info(
+            "init kvt client memory layout: "
+            "data_ptrs=%s nbytes=%s strides=%s storage_offsets=%s "
+            "contiguous=%s registered_bytes_per_tensor=%s",
+            [cache.data_ptr() for cache in layers[0]],
+            [cache.nbytes for cache in layers[0]],
+            [cache.stride() for cache in layers[0]],
+            [cache.storage_offset() for cache in layers[0]],
+            [cache.is_contiguous() for cache in layers[0]],
+            [layer_num_blocks * size for size in block_bytes],
         )
 
         self._num_layers = len(layers)
@@ -213,7 +268,15 @@ class KVTransferClient:
             conv_state_shape=conv_state_shape if conv_state_shape is not None else [],
             ssm_state_shape=ssm_state_shape if ssm_state_shape is not None else [],
             gdn_conv_channel_dims=gdn_conv_channel_dims if gdn_conv_channel_dims is not None else [],
+            kda_conv_dim_first=kda_conv_dim_first,
+            hybrid_attn_token_size=hybrid_attn_token_size,
+            kda_page_stride=kda_page_stride,
             attn_pack_size=attn_pack_size,
+            num_ple_layers=num_ple_layers,
+            ple_block_group=ple_block_group,
+            ple_conv_elem_size=ple_conv_elem_size,
+            ple_conv_state_shape=ple_conv_state_shape if ple_conv_state_shape is not None else [],
+            ple_conv_channel_dims=ple_conv_channel_dims if ple_conv_channel_dims is not None else [],
         )
         self._inited = True
         # None means that start_send is not invoked.
@@ -422,8 +485,9 @@ class KVTransferClient:
             # _disagg_step -> post_step
             return
 
-        # When async sched is not supported, model forward should be done when flush_send is called
-        # Check if the last layer event is ready
+        # Without async scheduling, model forward should have completed
+        # before flush_send is called. Check whether the last-layer event
+        # is ready.
         if not self._events[-1].query() and not self._async_sched_warned:
             self._async_sched_warned = True
             logger.warning(
@@ -531,7 +595,15 @@ class KVTransferServer:
         conv_state_shape: Optional[List[int]] = None,
         ssm_state_shape: Optional[List[int]] = None,
         gdn_conv_channel_dims: Optional[List[int]] = None,
+        kda_conv_dim_first: bool = False,
+        hybrid_attn_token_size: int = 0,
+        kda_page_stride: int = 0,
         attn_pack_size: int = 1,
+        num_ple_layers: int = 0,
+        ple_block_group: int = 0,
+        ple_conv_elem_size: int = 1,
+        ple_conv_state_shape: Optional[List[int]] = None,
+        ple_conv_channel_dims: Optional[List[int]] = None,
     ):
         # older version vllm, should only contain simple model architecture
         if isinstance(block_bytes, int) and isinstance(token_bytes, int):
@@ -539,21 +611,28 @@ class KVTransferServer:
             token_bytes = [token_bytes]
             layers = [[layer] for layer in layers]
         else:
-            assert isinstance(block_bytes, list) and isinstance(token_bytes, list)
+            if not isinstance(block_bytes, list) or not isinstance(token_bytes, list):
+                raise TypeError("block_bytes and token_bytes must both be int or list")
 
-        for layer in layers:
-            assert len(layer) == len(layers[0]), "All layer should have the same number of cache tensors"
-        assert (len(block_bytes) == len(token_bytes) == len(layers[0]),
-                "block_bytes and token_bytes should align with layers' cache number")
+        if any(len(layer) != len(layers[0]) for layer in layers):
+            raise ValueError("All layers must have the same number of cache tensors")
+        if not len(block_bytes) == len(token_bytes) == len(layers[0]):
+            raise ValueError(
+                "block_bytes and token_bytes must align with the number of "
+                "cache tensors per layer"
+            )
 
         layer_num_blocks_list = [
             _get_layer_num_blocks([
                 layer[cache_index] for layer in layers
             ], block_bytes[cache_index]) for cache_index in range(len(block_bytes))
         ]
-        assert (all(layer_num_blocks == layer_num_blocks_list[0]
-                   for layer_num_blocks in layer_num_blocks_list),
-                "Currently all cache in one layer should have the same number of blocks")
+        if not all(layer_num_blocks == layer_num_blocks_list[0]
+                   for layer_num_blocks in layer_num_blocks_list):
+            raise ValueError(
+                "All cache tensors in one layer must have the same number "
+                f"of blocks, got {layer_num_blocks_list}"
+            )
         layer_num_blocks = layer_num_blocks_list[0]
 
         device_id = layers[0][0].get_device()
@@ -572,6 +651,17 @@ class KVTransferServer:
             [cache.dtype for cache in layers[0]],
             [cache.device for cache in layers[0]],
             layer_num_blocks, len(layers)
+        )
+        logger.info(
+            "init kvt server memory layout: "
+            "data_ptrs=%s nbytes=%s strides=%s storage_offsets=%s "
+            "contiguous=%s registered_bytes_per_tensor=%s",
+            [cache.data_ptr() for cache in layers[0]],
+            [cache.nbytes for cache in layers[0]],
+            [cache.stride() for cache in layers[0]],
+            [cache.storage_offset() for cache in layers[0]],
+            [cache.is_contiguous() for cache in layers[0]],
+            [layer_num_blocks * size for size in block_bytes],
         )
 
         layer_addrs = [[l.data_ptr() for l in layer] for layer in layers]
@@ -597,6 +687,14 @@ class KVTransferServer:
             conv_state_shape=conv_state_shape if conv_state_shape is not None else [],
             ssm_state_shape=ssm_state_shape if ssm_state_shape is not None else [],
             gdn_conv_channel_dims=gdn_conv_channel_dims if gdn_conv_channel_dims is not None else [],
+            kda_conv_dim_first=kda_conv_dim_first,
+            hybrid_attn_token_size=hybrid_attn_token_size,
+            kda_page_stride=kda_page_stride,
             attn_pack_size=attn_pack_size,
+            num_ple_layers=num_ple_layers,
+            ple_block_group=ple_block_group,
+            ple_conv_elem_size=ple_conv_elem_size,
+            ple_conv_state_shape=ple_conv_state_shape if ple_conv_state_shape is not None else [],
+            ple_conv_channel_dims=ple_conv_channel_dims if ple_conv_channel_dims is not None else [],
         )
         self._inited = True

@@ -8,7 +8,7 @@ import msgspec
 import vllm.envs as envs
 from vllm.v1.request import RequestStatus
 
-from .. import PREALLOC_KEY, BackendMeta, HybridBackend
+from .. import PREALLOC_KEY, BackendMeta, HybridBackend, OperationPlan
 from ..engine_proxy import (
     EngineCoreOutputs,
     EngineCoreRequest,
@@ -147,6 +147,8 @@ SUSPEND_EVT = "__HybridConnector_Migration_Suspend_Event__"
 
 
 class MigrationBackend(HybridBackend):
+    SOURCE_LABEL = "migration"
+
     def __init__(
         self, vllm_config: VllmConfig, role: KVConnectorRole, ncli: Optional[Any] = None
     ):
@@ -690,13 +692,14 @@ class MigrationBackend(HybridBackend):
     # Scheduler-side methods
     # ==============================
 
-    def get_operations(self, req: Request) -> tuple[int, int]:
+    def get_operations(self, req: Request) -> OperationPlan:
         # logger.info(f">>>DBG: {self._reqstate.get(req.request_id)=}")
         assert req.request_id not in self._reqstate
         self._reqstate[req.request_id] = req
 
-        srcinfo = get_param(req, SRC_INFO)
-        return int(srcinfo is not None), 0
+        load_count = int(get_param(req, SRC_INFO) is not None)
+        load_sources = (self.source_label(),) if load_count > 0 else ()
+        return load_count, 0, load_sources, ()
 
     def build_backend_meta(self, sout: SchedulerOutput) -> BackendMeta:
         # In bypass loops, sout.finished_req_ids may be empty, but we still

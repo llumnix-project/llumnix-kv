@@ -1,6 +1,39 @@
 cmake_minimum_required(VERSION 3.16)
-set(CMAKE_CUDA_ARCHITECTURES 80 86 90)
+if (DEFINED CMAKE_CUDA_ARCHITECTURES AND NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "")
+    set(KVTRANSFER_CUDA_ARCHITECTURES_OVERRIDDEN TRUE)
+else ()
+    set(KVTRANSFER_CUDA_ARCHITECTURES_OVERRIDDEN FALSE)
+endif ()
 project(kvtransfer LANGUAGES CXX CUDA)
+
+set(KVTRANSFER_CUDA_ARCHITECTURES "80;89;90;100;110;103;120" CACHE STRING
+    "Preferred CUDA architectures for kvtransfer.")
+if (NOT KVTRANSFER_CUDA_ARCHITECTURES_OVERRIDDEN)
+    execute_process(
+            COMMAND "${CMAKE_CUDA_COMPILER}" --list-gpu-arch
+            RESULT_VARIABLE NVCC_LIST_GPU_ARCH_RESULT
+            OUTPUT_VARIABLE NVCC_SUPPORTED_GPU_ARCHS
+            ERROR_QUIET
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if (NVCC_LIST_GPU_ARCH_RESULT EQUAL 0)
+        foreach (CUDA_ARCH IN LISTS KVTRANSFER_CUDA_ARCHITECTURES)
+            if (NVCC_SUPPORTED_GPU_ARCHS MATCHES "(^|[\r\n])compute_${CUDA_ARCH}([\r\n]|$)")
+                list(APPEND KVTRANSFER_SUPPORTED_CUDA_ARCHITECTURES ${CUDA_ARCH})
+            else ()
+                message(STATUS "skip unsupported CUDA architecture ${CUDA_ARCH}")
+            endif ()
+        endforeach ()
+        if (NOT KVTRANSFER_SUPPORTED_CUDA_ARCHITECTURES)
+            message(FATAL_ERROR "none of the preferred CUDA architectures are supported by ${CMAKE_CUDA_COMPILER}")
+        endif ()
+        set(CMAKE_CUDA_ARCHITECTURES ${KVTRANSFER_SUPPORTED_CUDA_ARCHITECTURES})
+    else ()
+        message(WARNING "failed to query supported CUDA architectures from nvcc; use preferred list")
+        set(CMAKE_CUDA_ARCHITECTURES ${KVTRANSFER_CUDA_ARCHITECTURES})
+    endif ()
+endif ()
+message(STATUS "CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES}")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_SHARED_LINKER_FLAGS "-Wl,--no-undefined")

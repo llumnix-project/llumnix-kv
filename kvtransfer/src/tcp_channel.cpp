@@ -46,6 +46,9 @@ void TCPServer::start_server(Context *ctx) {
   WorkerInfo *winfo = ctx->worker_info_mutable();
   auto layer_num_blocks = ctx->layer_num_blocks();
   auto layer_ptr = ctx->layer_data_address();
+  for (const size_t block_size : ctx->block_sizes()) {
+    info.layer_blk_sizes.emplace_back(block_size * layer_num_blocks);
+  }
 
   auto proto = TransferProtocol::tcp();
   auto proto_ctx = ctx->get_protocol_ctx<BarexProtoContext>(proto);
@@ -58,18 +61,18 @@ void TCPServer::start_server(Context *ctx) {
   self.num_layers_ = winfo->num_layers;
 
 
+  // per-layer, per-tensor GPU cache base pointers (supports multi-tensor layers)
   info.ptrs.reserve(layer_ptr.size());
-  // Decode currently initializes with 1 layer n tensors
   for (size_t layer_idx = 0; layer_idx < layer_ptr.size(); ++layer_idx) {
-    auto &layer_mrs = barex_ctx->layer_mrs()[layer_idx];
     RTASSERT(layer_ptr[layer_idx].size() <= MAX_CACHE_NUM_PER_LAYER);
-    RTASSERT_EQ(layer_ptr[layer_idx].size(), layer_mrs.size());
+    std::vector<void *> tensor_ptrs;
+    tensor_ptrs.reserve(layer_ptr[layer_idx].size());
     for (size_t cache_idx = 0; cache_idx < layer_ptr[layer_idx].size();
         cache_idx++) {
-      auto &out = layer_mrs[cache_idx].mr();
       auto layer_blk_p = reinterpret_cast<void *>(layer_ptr[layer_idx][cache_idx]);
-      info.ptrs.emplace_back(layer_blk_p);
+      tensor_ptrs.emplace_back(layer_blk_p);
     }
+    info.ptrs.emplace_back(std::move(tensor_ptrs));
   }
   RTASSERT_EQ(info.ptrs.size(), layer_ptr.size());
 
@@ -143,52 +146,38 @@ void TCPServer::CtxCallback::handle_kv_cache_data(
   const auto h2d_start_ts = std::chrono::system_clock::now(); // t4
   
   auto& self = *this;
-  // Parse header: [magic (uint32_t)] [reqid (uint64_t)] [layer_idx (size_t)] 
-  //               [metadata_size (size_t)] [IpcBlock array] [tensor data]
+  // Parse header: [magic (uint32_t)] [reqid (uint64_t)] [layer_idx (size_t)] [num_tensors (size_t)]
+  //   then per tensor: [metadata_size (size_t)] [IpcBlock array] [tensor_data_size (size_t)] [tensor data]
   if (len < RPC_HEADER + sizeof(size_t) + sizeof(size_t)) {
     LOG(ERROR) << "TCP handle_kv_cache_data: message too short, len=" << len;
     return;
   }
   char* buf_ptr = in_buf;
+  char* const buf_end = in_buf + len;
   // Parse RPC header: magic + reqid
   auto [magic, reqid] = deser_rpc_header(buf_ptr);
   buf_ptr += RPC_HEADER;
   assert(magic == KV_CACHE_DATA_MAGIC);
-  
+
   size_t layer_idx;
   memcpy(&layer_idx, buf_ptr, sizeof(size_t));
   buf_ptr += sizeof(size_t);
-  
-  size_t metadata_size;
-  memcpy(&metadata_size, buf_ptr, sizeof(size_t));
+
+  size_t num_tensors;
+  memcpy(&num_tensors, buf_ptr, sizeof(size_t));
   buf_ptr += sizeof(size_t);
-  
-  size_t metadata_bytes = metadata_size * sizeof(IpcBlock);
-  size_t expected_len = RPC_HEADER + sizeof(size_t) + sizeof(size_t) + metadata_bytes;
-  if (len < expected_len) {
-    LOG(ERROR) << "TCP handle_kv_cache_data: incomplete metadata, expected=" << expected_len << ", actual=" << len;
-    return;
-  }
-  std::vector<IpcBlock> blocks;
-  blocks.reserve(metadata_size);
-  for (size_t i = 0; i < metadata_size; ++i) {
-    size_t src_offset, dst_offset, length;
-    memcpy(&src_offset, buf_ptr + i * sizeof(IpcBlock), sizeof(size_t));
-    memcpy(&dst_offset, buf_ptr + i * sizeof(IpcBlock) + sizeof(size_t), sizeof(size_t));
-    memcpy(&length, buf_ptr + i * sizeof(IpcBlock) + 2 * sizeof(size_t), sizeof(size_t));
-    blocks.emplace_back(src_offset, dst_offset, length);
-  }
-  buf_ptr += metadata_bytes;
-  size_t tensor_data_size = len - expected_len;
 
   auto& ptrs = self.server_->info_.ptrs;
   if (layer_idx >= ptrs.size()) {
     LOG(ERROR) << "TCP handle_kv_cache_data: invalid layer_idx=" << layer_idx << " max=" << ptrs.size();
     return;
   }
-  void* layer_gpu_ptr = ptrs[layer_idx];
-  assert(layer_gpu_ptr != nullptr);
-  
+  if (num_tensors != ptrs[layer_idx].size()) {
+    LOG(ERROR) << "TCP handle_kv_cache_data: num_tensors mismatch, got=" << num_tensors
+               << " expected=" << ptrs[layer_idx].size() << " layer_idx=" << layer_idx;
+    return;
+  }
+
   // Get thread-local preallocated buffer for kernel metadata
   int device_id = self.server_->ctx_->device_id();
   auto [device_blk_buffer, host_blk_buffer] = get_kernel_copy_buffer(device_id);
@@ -198,17 +187,78 @@ void TCPServer::CtxCallback::handle_kv_cache_data(
   // Use thread-local stream to allow concurrent H2D copies from different threads
   cudaStream_t h2d_stream = TCPServer::get_h2d_stream();
 
-  cudaError_t cuda_rt = copy_handle_data_with_kernel(
-    buf_ptr, layer_gpu_ptr, 
-    blocks, 
-    tensor_data_size, 
-    CopyDirection::H2D, 
-    device_id, 
-    h2d_stream,
-    device_blk_buffer_ptr,
-    host_blk_buffer_ptr
-  );
-  RTASSERT(cuda_rt == cudaSuccess);
+  for (size_t t = 0; t < num_tensors; ++t) {
+    if (buf_ptr + sizeof(size_t) > buf_end) {
+      LOG(ERROR) << "TCP handle_kv_cache_data: truncated at tensor=" << t << " metadata_size";
+      return;
+    }
+    size_t metadata_size;
+    memcpy(&metadata_size, buf_ptr, sizeof(size_t));
+    buf_ptr += sizeof(size_t);
+
+    size_t metadata_bytes = metadata_size * sizeof(IpcBlock);
+    if (buf_ptr + metadata_bytes + sizeof(size_t) > buf_end) {
+      LOG(ERROR) << "TCP handle_kv_cache_data: incomplete metadata at tensor=" << t;
+      return;
+    }
+    std::vector<IpcBlock> blocks;
+    blocks.reserve(metadata_size);
+    for (size_t i = 0; i < metadata_size; ++i) {
+      size_t src_offset, dst_offset, length;
+      memcpy(&src_offset, buf_ptr + i * sizeof(IpcBlock), sizeof(size_t));
+      memcpy(&dst_offset, buf_ptr + i * sizeof(IpcBlock) + sizeof(size_t), sizeof(size_t));
+      memcpy(&length, buf_ptr + i * sizeof(IpcBlock) + 2 * sizeof(size_t), sizeof(size_t));
+      blocks.emplace_back(src_offset, dst_offset, length);
+    }
+    buf_ptr += metadata_bytes;
+
+    size_t tensor_data_size;
+    memcpy(&tensor_data_size, buf_ptr, sizeof(size_t));
+    buf_ptr += sizeof(size_t);
+    if (buf_ptr + tensor_data_size > buf_end) {
+      LOG(ERROR) << "TCP handle_kv_cache_data: truncated tensor data, tensor=" << t
+                 << " size=" << tensor_data_size;
+      return;
+    }
+    char* tensor_buf = buf_ptr;
+    buf_ptr += tensor_data_size;
+
+    void* tensor_gpu_ptr = ptrs[layer_idx][t];
+    assert(tensor_gpu_ptr != nullptr);
+
+    const auto& layer_capacities = self.server_->info_.layer_blk_sizes;
+    if (t >= layer_capacities.size()) {
+      LOG(ERROR) << "TCP H2D missing registered capacity"
+                 << ",layer_idx=" << layer_idx
+                 << ",tensor_idx=" << t
+                 << ",capacity_count=" << layer_capacities.size();
+      return;
+    }
+    try {
+      validate_ipc_block_bounds(
+          blocks, layer_capacities[t], IpcBlockOffset::DESTINATION,
+          "tcp_h2d", layer_idx, t);
+    } catch (const std::exception& ex) {
+      LOG(ERROR) << "TCP H2D rejected invalid copy metadata"
+                 << ",reqid=" << reqid << ",ex=" << ex.what();
+      return;
+    }
+
+    cudaError_t cuda_rt = copy_handle_data_with_kernel(
+      tensor_buf, tensor_gpu_ptr,
+      blocks,
+      tensor_data_size,
+      CopyDirection::H2D,
+      device_id,
+      h2d_stream,
+      device_blk_buffer_ptr,
+      host_blk_buffer_ptr
+    );
+    RTASSERT(cuda_rt == cudaSuccess);
+    // host_blk_buffer_ptr is thread-local scratch reused by the next tensor;
+    // sync so this tensor's async metadata H2D finishes before it is overwritten.
+    RTASSERT(cudaStreamSynchronize(h2d_stream) == cudaSuccess);
+  }
 
   // TODO: add resp code to check success
   // Send response after copy operation completes
@@ -256,8 +306,7 @@ void TCPServer::CtxCallback::handle_kv_cache_data(
                << ", layer_idx=" << layer_idx
                << ", device_id=" << device_id
                << ", h2d_stream=" << reinterpret_cast<void*>(h2d_stream)
-               << ", tensor_data_size=" << tensor_data_size
-               << ", blocks_count=" << blocks.size()
+               << ", num_tensors=" << num_tensors
                << ", error=" << cudaGetErrorString(cuda_rt_sync)
                << " (" << cuda_rt_sync << ")";
   }
@@ -300,8 +349,6 @@ void TCPChannel::register_data(std::vector<std::vector<IpcBlock>>& data, TPKind 
   auto& self = *this;
 
   assert(!data.empty());
-  // TCP Currently not support dpsk v32
-  assert(data.size() == 1);
 
   assert(self.data_ == nullptr);
   self.data_ = &data;
@@ -364,25 +411,41 @@ void TCPChannel::register_data(std::vector<std::vector<IpcBlock>>& data, TPKind 
   // both fp8 length
   assert(total_len_debug == self.sb_size_total_);
 
-  if (self.cast2fp8_) {
+  // per-tensor wire blob bytes (Σ block.length). For fp8 these are the
+  // fp8-length sums produced by parse_block.
+  self.tensor_send_bytes_ = tensor_sizes;
+
+  // fp8 conversion is only supported for single-tensor layers; disable it for
+  // multi-tensor cache shapes (e.g. DPSK_V32) and send the raw dtype instead.
+  const bool multi_tensor = data.size() > 1;
+  if (multi_tensor && self.cast2fp8_) {
+    LOG(WARNING) << "TCPChannel: cast2fp8 not supported with multi-tensor layer (num_tensors="
+                 << data.size() << "), sending raw dtype";
+  }
+  const bool use_fp8 = self.cast2fp8_ && !multi_tensor;
+
+  if (use_fp8) {
     // block's length generated by parse_block is fp8 dtype length
-    // multiply by 2 to get the actual length
+    // multiply by 2 to get the actual (bf16 source) length
     self.sb_size_total_ *= 2;
   }
 
-  const auto& tensor_data = data[0];
-
-  // TODO: TCP adopt multi-tensor per layer
-  // Allocate CPU buffer for each thread, and use as thread-local buffer
+  // Allocate CPU host buffer per layer. Multi-tensor wire layout:
+  //   [RPC_HEADER][layer_idx][num_tensors]
+  //   per tensor: [metadata_size][IpcBlock array][tensor_data_size][blob]
   if (self.host_buffers_.size() == 0 && self.sb_size_total_ > 0) {
     self.host_buffers_.reserve(self.dst_layer_num_); // prepare for each layer previously
-    size_t metadata_size = tensor_data.size();
-    size_t header_bytes = RPC_HEADER + sizeof(size_t);  // magic + reqid + layer_idx
-    size_t metadata_bytes = sizeof(size_t) + metadata_size * sizeof(IpcBlock);
-    const size_t tensor_bytes = self.cast2fp8_ ? (self.sb_size_total_ / 2) : self.sb_size_total_;
+    const size_t header_bytes =
+        RPC_HEADER + sizeof(size_t) /*layer_idx*/ + sizeof(size_t) /*num_tensors*/;
+    size_t body_bytes = 0;
+    for (size_t t = 0; t < data.size(); ++t) {
+      body_bytes += sizeof(size_t)                     // metadata_size
+                  + data[t].size() * sizeof(IpcBlock)  // IpcBlock array
+                  + sizeof(size_t)                     // tensor_data_size
+                  + self.tensor_send_bytes_[t];        // blob
+    }
+    size_t total_bytes = header_bytes + body_bytes;
 
-    size_t total_bytes = header_bytes + metadata_bytes + tensor_bytes;
-    
     uint64_t alloc_us_min = UINT64_MAX, alloc_us_max = 0, alloc_us_total = 0;
 
     for (size_t i = 0; i < self.dst_layer_num_; ++i) {
@@ -398,119 +461,107 @@ void TCPChannel::register_data(std::vector<std::vector<IpcBlock>>& data, TPKind 
       alloc_us_total += alloc_elapsed_us;
     }
     LOG(INFO) << "TCPChannel::do_init: alloc cuda host buffer total_bytes=" << total_bytes
-              << " time min=" << alloc_us_min 
-              << " max=" << alloc_us_max 
+              << " time min=" << alloc_us_min
+              << " max=" << alloc_us_max
               << " total=" << alloc_us_total
               << " avg=" << alloc_us_total / self.dst_layer_num_ << " us"
               << " dst_layer_num=" << self.dst_layer_num_
-              << " metadata_size=" << metadata_size
+              << " num_tensors=" << data.size()
               << " header_bytes=" << header_bytes
-              << " metadata_bytes=" << metadata_bytes
-              << " tensor_bytes=" << tensor_bytes;
+              << " body_bytes=" << body_bytes;
   }
   assert(self.host_buffers_.size() == self.dst_layer_num_);
   return ;
 }
 
-// Current TCP only support single tensor per layer
 void TCPChannel::send_data(size_t layer_idx) {
   auto &self = *this;
   assert(layer_idx < self.dst_layer_num_);
   assert(self.dst_layer_num_ == self.ctx_->layer_mrs().size());
 
-  // TCP Currently not support dpsk v32
   assert(self.data_ != nullptr);
-  assert(self.data_->size() > 0);
-  const auto& data = (*self.data_)[0];
-  assert(!data.empty());
+  const auto& data = *self.data_;
+  const size_t num_tensors = data.size();
+  assert(num_tensors > 0);
 
   const auto send_data_start_ts = std::chrono::system_clock::now();  // t1
 
-  // Prepare data to send: magic + reqid + layer_idx + metadata (IpcBlock array) + tensor data
-  // Format: [magic (uint32_t)] [reqid (uint64_t)] [layer_idx (size_t)] [metadata_size (size_t)] [IpcBlock array] [tensor data]
+  // Wire format: [magic (uint32_t)] [reqid (uint64_t)] [layer_idx (size_t)] [num_tensors (size_t)]
+  //   per tensor: [metadata_size (size_t)] [IpcBlock array] [tensor_data_size (size_t)] [tensor data]
   const uint32_t magic = KV_CACHE_DATA_MAGIC;
   const uint64_t reqid = new_id();
-  const size_t metadata_size = data.size();
-  const size_t header_bytes = RPC_HEADER + sizeof(size_t);  // magic + reqid + layer_idx
-  const size_t metadata_bytes = sizeof(size_t) + metadata_size * sizeof(IpcBlock);  // metadata_size + IpcBlock array
-  
-  const bool cast2fp8 = self.cast2fp8_;
-  const size_t tensor_send_size = cast2fp8 ? (self.sb_size_total_ / 2) : self.sb_size_total_;
-  
-  const size_t total_send_size = header_bytes + metadata_bytes + tensor_send_size;
-  assert(self.host_buffers_.size() == self.dst_layer_num_ - layer_idx);
-  assert(self.host_buffers_.back().buf_len >= total_send_size);
-
-  // Copy all GPU data to host_buffer in continuous memory
-  char* buf_ptr = self.host_buffers_.back().buf;
-  char* meta_buf_ptr = buf_ptr + header_bytes;  // Skip header for metadata
-  char* tensor_buf_ptr = buf_ptr + header_bytes + metadata_bytes;  // Skip header and metadata for tensor data
+  const bool use_fp8 = self.cast2fp8_ && (num_tensors == 1);
 
   const auto& src_mrs = self.ctx_->layer_mrs()[layer_idx];
-  const auto& src_mr_guard = src_mrs[0];
-  const auto& src_mr_base = src_mr_guard.mr();
-  
-  // Copy GPU data to host buffer and prepare metadata
-  const auto d2h_start_ts = std::chrono::system_clock::now();   // t2
-  
-  std::vector<IpcBlock> kernel_blocks;
-  kernel_blocks.reserve(metadata_size);
-  for (const auto& block : data) {
-    kernel_blocks.emplace_back(0, block.src_offset, block.length * (cast2fp8 ? 2 : 1));
-  }
-  
-  int device_id = self.ctx_->device_id();
+  assert(src_mrs.size() == num_tensors);
 
-  void* gpu_src_ptr = reinterpret_cast<void*>(const_cast<char*>(src_mr_base.buf));
-
-  // Get thread-local preallocated buffer for kernel metadata
+  const int device_id = self.ctx_->device_id();
+  // Get thread-local preallocated buffer for kernel metadata (reused per tensor)
   auto [device_blk_buffer, host_blk_buffer] = get_kernel_copy_buffer(device_id);
   int64_t* device_blk_buffer_ptr = reinterpret_cast<int64_t*>(device_blk_buffer);
   int64_t* host_blk_buffer_ptr = reinterpret_cast<int64_t*>(host_blk_buffer);
-
   cudaStream_t d2h_stream = TCPChannel::get_d2h_stream();
 
-  cudaError_t cuda_rt;
-  if (cast2fp8) {
-    cuda_rt = copy_d2h_bf16_to_fp8(
-      tensor_buf_ptr,           // CPU destination buffer (FP8 E4M3)
-      gpu_src_ptr,               // GPU source base pointer (BF16)
-      kernel_blocks,             // Blocks: src_offset=CPU offset, dst_offset=GPU src_offset
-      self.sb_size_total_,       // Total BF16 tensor data size (in bytes)
-      device_id,                 // Target CUDA device ID
-      d2h_stream,                // CUDA stream
-      device_blk_buffer_ptr,     // Preallocated GPU buffer for metadata
-      host_blk_buffer_ptr        // Preallocated host pinned buffer for metadata
-    );
-  } else {
-    cuda_rt = copy_handle_data_with_kernel(
-      tensor_buf_ptr,           // CPU destination buffer (contiguous)
-      gpu_src_ptr,              // GPU source base pointer
-      kernel_blocks,            // Blocks: src_offset=CPU offset, dst_offset=GPU src_offset
-      self.sb_size_total_,      // Total tensor data size
-      CopyDirection::D2H,       // D2H direction
-      device_id,                // Target CUDA device ID
-      d2h_stream,               // CUDA stream
-      device_blk_buffer_ptr,    // Preallocated GPU buffer for metadata
-      host_blk_buffer_ptr       // Preallocated host pinned buffer for metadata
-    );
-  }
-  RTCHECK(cuda_rt == cudaSuccess);
+  char* const base = self.host_buffers_.back().buf;
+  char* p = base;
+  // header: magic + reqid + layer_idx + num_tensors
+  ser_rpc_header(p, magic, reqid);
+  p += RPC_HEADER;
+  memcpy(p, &layer_idx, sizeof(size_t));
+  p += sizeof(size_t);
+  memcpy(p, &num_tensors, sizeof(size_t));
+  p += sizeof(size_t);
 
-  // Write RPC header: magic + reqid
-  ser_rpc_header(buf_ptr, magic, reqid);
-  buf_ptr += RPC_HEADER;
-  // Write layer_idx
-  memcpy(buf_ptr, &layer_idx, sizeof(size_t));
-  buf_ptr += sizeof(size_t);
-  
-  // Write metadata: metadata_size + IpcBlock array
-  memcpy(meta_buf_ptr, &metadata_size, sizeof(size_t));
-  meta_buf_ptr += sizeof(size_t);
-  memcpy(meta_buf_ptr, data.data(), metadata_size * sizeof(IpcBlock));
-  
-  auto cuda_rt_sync = cudaStreamSynchronize(d2h_stream);
-  RTCHECK(cuda_rt_sync == cudaSuccess);
+  const auto d2h_start_ts = std::chrono::system_clock::now();   // t2
+
+  for (size_t t = 0; t < num_tensors; ++t) {
+    const auto& tensor_data = data[t];
+    assert(!tensor_data.empty());
+    const size_t metadata_size = tensor_data.size();
+    const size_t sent_bytes = self.tensor_send_bytes_[t];           // wire blob bytes (fp8 length when fp8)
+    const size_t d2h_total = use_fp8 ? sent_bytes * 2 : sent_bytes; // copy-kernel total (bf16 source for fp8)
+
+    // metadata_size
+    memcpy(p, &metadata_size, sizeof(size_t));
+    p += sizeof(size_t);
+    // IpcBlock array (original blocks; server uses dst_offset for H2D scatter)
+    memcpy(p, tensor_data.data(), metadata_size * sizeof(IpcBlock));
+    p += metadata_size * sizeof(IpcBlock);
+    // tensor_data_size
+    memcpy(p, &sent_bytes, sizeof(size_t));
+    p += sizeof(size_t);
+    // tensor blob destination
+    char* tensor_buf_ptr = p;
+    p += sent_bytes;
+
+    // kernel blocks: dst_offset = GPU source offset; length = GPU-side (bf16 for fp8) length
+    std::vector<IpcBlock> kernel_blocks;
+    kernel_blocks.reserve(metadata_size);
+    for (const auto& block : tensor_data) {
+      kernel_blocks.emplace_back(0, block.src_offset, block.length * (use_fp8 ? 2 : 1));
+    }
+    void* gpu_src_ptr = reinterpret_cast<void*>(const_cast<char*>(src_mrs[t].mr().buf));
+
+    cudaError_t cuda_rt;
+    if (use_fp8) {
+      cuda_rt = copy_d2h_bf16_to_fp8(
+        tensor_buf_ptr, gpu_src_ptr, kernel_blocks, d2h_total,
+        device_id, d2h_stream, device_blk_buffer_ptr, host_blk_buffer_ptr);
+    } else {
+      cuda_rt = copy_handle_data_with_kernel(
+        tensor_buf_ptr, gpu_src_ptr, kernel_blocks, d2h_total,
+        CopyDirection::D2H, device_id, d2h_stream,
+        device_blk_buffer_ptr, host_blk_buffer_ptr);
+    }
+    RTCHECK(cuda_rt == cudaSuccess);
+    // host_blk_buffer_ptr is thread-local scratch reused by the next tensor;
+    // sync so this tensor's async metadata H2D finishes before it is overwritten.
+    RTCHECK(cudaStreamSynchronize(d2h_stream) == cudaSuccess);
+  }
+
+  const size_t total_send_size = static_cast<size_t>(p - base);
+  assert(self.host_buffers_.size() == self.dst_layer_num_ - layer_idx);
+  assert(self.host_buffers_.back().buf_len >= total_send_size);
   const auto d2h_end_ts = std::chrono::system_clock::now(); // t3
 
   self.host_buffers_.back().buf_len = total_send_size;

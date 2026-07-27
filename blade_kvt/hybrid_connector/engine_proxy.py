@@ -6,6 +6,7 @@
 import functools
 import os
 from collections import defaultdict, deque
+from math import lcm
 from typing import TYPE_CHECKING, Any, Iterable, Optional, Union
 
 import vllm.envs as envs
@@ -29,6 +30,7 @@ from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, get_open_port
 from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
@@ -43,9 +45,12 @@ from vllm.v1.engine import (
     FinishReason,
 )
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
+    MLAAttentionSpec,
+    Qwen3NextIndexerAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -77,11 +82,98 @@ def _sched() -> V1Scheduler:
     return sched
 
 
+@functools.cache
+def is_kvt_consumer_backend(self: V1Scheduler) -> bool:
+    kv_cfg = self.vllm_config.kv_transfer_config
+    if kv_cfg is None or kv_cfg.kv_role != "kv_consumer":
+        return False
+    return kv_cfg.get_from_extra_config("backend", None) == "kvt"
+
+
+@functools.cache
+def use_kvt_decode_prefix_cache(self: V1Scheduler) -> bool:
+    return (
+        self.kv_cache_manager.enable_caching
+        and self.vllm_config.model_config.is_hybrid
+        and self.kv_cache_manager.has_mamba_layers
+        and isinstance(
+            self.kv_cache_manager.coordinator, HybridKVCacheCoordinator
+        )
+    )
+
+
+def _get_computed_blocks_for_kvt(
+    self: V1Scheduler,
+    req: Request,
+    save: bool,
+    is_kvt_consumer: bool,
+) -> tuple[KVCacheBlocks, int]:
+    coordinator = self.kv_cache_manager.coordinator
+    if not is_kvt_consumer or save:
+        return self.kv_cache_manager.get_computed_blocks(req)
+    assert isinstance(coordinator, HybridKVCacheCoordinator)
+
+    computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
+        req.block_hashes, req.num_tokens - 1
+    )
+    group_specs = self.kv_cache_manager.kv_cache_config.kv_cache_groups
+
+    def _token_cache_block_size(spec: FullAttentionSpec) -> int:
+        block_size = spec.block_size
+        if not isinstance(
+            spec, (MLAAttentionSpec, Qwen3NextIndexerAttentionSpec)
+        ):
+            block_size *= coordinator.dcp_world_size
+        return block_size
+
+    # KVT's seen_tokens is used by attention and indexer parsers.
+    # GDN/Mamba state is not part of this boundary; it will be
+    # always be transferred at request completion
+    token_group_hits: list[int] = []
+    token_group_block_sizes: list[int] = []
+    for i, group in enumerate(group_specs):
+        spec = group.kv_cache_spec
+        if isinstance(spec, FullAttentionSpec):
+            token_group_hits.append(per_group_hits[i])
+            token_group_block_sizes.append(_token_cache_block_size(spec))
+
+    if token_group_hits:
+        # KVT can only use FullAttentionSpec's hits to determine the seen_tokens
+        seen_tokens = min(token_group_hits)
+        token_group_alignment = lcm(*token_group_block_sizes)
+        seen_tokens = seen_tokens // token_group_alignment * token_group_alignment
+    else:
+        seen_tokens = 0
+
+    filtered: list[list[Any]] = []
+    for i, group_blocks in enumerate(computed):
+        spec = group_specs[i].kv_cache_spec
+        if seen_tokens > 0 and isinstance(spec, FullAttentionSpec):
+            block_size = _token_cache_block_size(spec)
+            filtered.append(list(group_blocks[:seen_tokens // block_size]))
+        else:
+            filtered.append([])
+
+    if self.kv_cache_manager.log_stats:
+        assert self.kv_cache_manager.prefix_cache_stats is not None
+        self.kv_cache_manager.prefix_cache_stats.record(
+            num_tokens=req.num_tokens,
+            num_hits=seen_tokens,
+            preempted=req.num_preemptions > 0,
+        )
+
+    return self.kv_cache_manager.create_kv_cache_blocks(tuple(filtered)), seen_tokens
+
+
 def sched_allocate_slots(req: Request, load: bool, save: bool,
                          prealloc: int = 0, gamma: int = 0) -> Optional[KVCacheBlocks]:
     self = _sched()
+    is_kvt_consumer = load and is_kvt_consumer_backend(self)
+    use_decode_prefix_cache = (
+        is_kvt_consumer and use_kvt_decode_prefix_cache(self)
+    )
     new_computed_blocks, num_new_local_computed_tokens = \
-        self.kv_cache_manager.get_computed_blocks(req)
+        _get_computed_blocks_for_kvt(self, req, save, use_decode_prefix_cache)
 
     num_computed_tokens = num_new_local_computed_tokens
     num_new_tokens = req.num_tokens - num_computed_tokens
@@ -89,11 +181,14 @@ def sched_allocate_slots(req: Request, load: bool, save: bool,
     if save:
         num_new_tokens += gamma + 1
 
-    kv_cfg = self.vllm_config.kv_transfer_config
-    # Only D-side KVT receive blocks skip zeroing. P-side save/prefill blocks
-    # still need normal zeroing before forward, even though caching is delayed.
-    skip_zero_for_kvt_recv = bool(
-        load and kv_cfg is not None and kv_cfg.is_kv_consumer)
+    # Blocks filled by hybrid-connector load must not also be zeroed. With
+    # bypass enabled, a KVS/KVT load can start before the next SchedulerOutput
+    # drains pending zero IDs, so zeroing can race with or wipe the loaded KV.
+    # For KVT consumer, skip zeroing at allocation time (coarse-grained).
+    # For KVS-like backends, allocation-time skip is not possible since block
+    # IDs are determined later; they call sched_discard_zero_block_ids() instead
+    # (fine-grained). P-side save/prefill blocks still need normal zeroing.
+    skip_zero_for_kvt_recv = is_kvt_consumer
     skip_new_block_zeroing = (
         skip_zero_for_kvt_recv or not envs.VLLM_ZERO_HYBRID_KV_CACHE)
     new_blocks = self.kv_cache_manager.allocate_slots(
@@ -109,6 +204,18 @@ def sched_allocate_slots(req: Request, load: bool, save: bool,
     req.num_computed_tokens = num_new_local_computed_tokens
     req.skip_reading_prefix_cache = True
     return new_computed_blocks + new_blocks
+
+
+def sched_discard_zero_block_ids(block_ids: Iterable[int]) -> None:
+    """Remove hybrid-connector load targets from pending KV zeroing."""
+    self = _sched()
+    self.kv_cache_manager.discard_new_block_ids(block_ids)
+
+
+def sched_cache_blocks(req: Request, num_computed_tokens: int):
+    """Cache blocks for the request after KV transfer completes."""
+    self = _sched()
+    self.kv_cache_manager.cache_blocks(req, num_computed_tokens)
 
 
 def _blk_check(oblks, nblks):
@@ -220,7 +327,7 @@ def core_abort_req(reqid: str, reason: str, output: bool):
 def get_p_node_pop_len(vllm_config: VllmConfig) -> int:
     pop_len = 1
     # We enable the logic only for hybrid models at current time, as it breaks
-    # normal P/D for other models, both offline and on dash.
+    # normal P/D for other models, both offline and in dual-request mode.
     if (vllm_config.model_config.is_hybrid
         and vllm_config.speculative_config
         and vllm_config.speculative_config.num_speculative_tokens
@@ -354,18 +461,50 @@ def use_flashinfer() -> bool:
     if use_flashinfer:
         from vllm.platforms import current_platform
         capability = current_platform.get_device_capability()
-        if capability is None or capability.major != 10:
+        if capability is None or capability.major not in [10, 12]:
             cap_str = (
                 f"SM{capability.major}.{capability.minor}"
                 if capability is not None else "unknown"
             )
             raise ValueError(
-                "FlashInfer KVT path requires Blackwell (SM 10.x); "
+                "FlashInfer KVT path requires Blackwell (SM 10.x) or Luna (SM 12.x); "
                 f"detected device capability = {cap_str}. "
                 f"Set VLLM_ATTENTION_BACKEND to a non-FlashInfer backend "
-                f"(e.g. FLASH_ATTN, FLASH_MLA_SPARSE) to run on this device."
+                f"(e.g. FLASH_ATTN) to run on this device."
             )
     return use_flashinfer
+
+def _flashinfer_kvt_cache_shape(is_hybrid: bool) -> str:
+    """
+    FlashInferAttentionBackend.get_required_kv_cache_layout() forces HND only
+    on Blackwell (SM 10.x, SM 12.x) keeps the default NHD layout.
+
+    Hybrid:
+      SM10 HND → QWEN3_NEXT_FLASHINFER_CACHE_SHAPE (=7)
+      SM12 NHD → QWEN3_NEXT_FLASH_CACHE_SHAPE (=3)  # same physical layout
+    Non-hybrid:
+      SM10 HND → FLASHINFER_CACHE_SHAPE (=5)
+      SM12 NHD → unsupported (blade-kvt has no non-hybrid NHD FlashInfer shape)
+    """
+    from vllm.platforms import current_platform
+    capability = current_platform.get_device_capability()
+    assert capability is not None
+    if capability.major == 10:
+        return "7" if is_hybrid else "5"
+    if capability.major == 12:
+        if is_hybrid:
+            return "3"
+        raise ValueError(
+            "Non-hybrid FlashInfer KVT only supports HND, "
+            f"detected device capability = SM{capability.major}.{capability.minor}."
+        )
+    raise ValueError(
+        f"FlashInfer KVT path requires Blackwell (SM 10.x or SM 12.x);"
+        f"detected device capability = "
+        f"SM{capability.major}.{capability.minor}. "
+        f"Set VLLM_ATTENTION_BACKEND to a non-FlashInfer backend "
+        f"(e.g. FLASH_ATTN) to run on this device."
+    )
 
 def use_turboquant(cfg: VllmConfig) -> bool:
     import vllm.envs as envs

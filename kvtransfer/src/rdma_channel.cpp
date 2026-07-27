@@ -25,7 +25,7 @@ static constexpr uint32_t MEM_HANDLES_REQ_MAGIC = 0x20181218;
 // +--------+---------+--------+--------+--------+--------+
 //    crc       cnt       off1     len1    off2     len2
 // crc: uint32_t.
-// cnt: uint32_t specifying the number of subsequent off/len pairs.
+// cnt: uint32_t specifying the number of following off/len pairs.
 // off, len; uint64_t.
 // resp:
 // crc: uint32_t
@@ -155,8 +155,8 @@ uint32_t get_remote_crc(CliBarexCtx* ctx, std::shared_ptr<XChannel>& dst, const 
   // (magic + reqid) + lcrc + tensor_cnt 
   // + [tensor0_block_cnt + off1+len1 + off2+len2 + ...] + [tensor1_block_cnt + ...] + ...
   const auto bodysize = sizeof(uint32_t) + // tensor_cnt
-                        tensor_cnt * sizeof(uint32_t) + // number of blocks per tensor
-                        total_blocks * (sizeof(uint64_t) + sizeof(uint64_t)); // all offset/length pairs
+                        tensor_cnt * sizeof(uint32_t) + // Block count per tensor.
+                        total_blocks * (sizeof(uint64_t) + sizeof(uint64_t)); // All offset/length pairs.
   memp_t bufmr = AllocCPUBuffer(dst, RPC_HEADER + sizeof(uint32_t) + bodysize);
   ser_rpc_header(bufmr.buf, REMOTE_CRC_REQ_MAGIC, reqid);
   char* bufstart = bufmr.buf + RPC_HEADER;
@@ -518,7 +518,8 @@ WriteSingle(XChannel *ch, memp_t sdata, uint64_t raddr, uint32_t rkey) {
   const auto write_start_ts = SteadyClock::now();
   auto result = ch->WriteBatch(std::move(datas),
                                [pr = std::move(pr), d = std::move(datasp), write_start_ts](Status s) mutable {
-                                 // WriteBatch requires datasp to remain valid until the callback.
+                                 // WriteBatch requires datasp to remain alive
+                                 // until the callback.
                                  if (!s.IsOk()) {
                                    auto ex = std::make_exception_ptr(std::runtime_error("Write ERR: " + s.ErrMsg()));
                                    pr->set_exception(std::move(ex));
@@ -547,10 +548,11 @@ std::shared_ptr<accl::barex::XChannel>& RDMAChannel::sch() noexcept {
   return self.chs_[idx].sch();
 }
 
-// After grouping, input looks like:
+// After grouping, input has the following form:
 // <src_off_1, dst_off_0, len1>
 // <src_off_2, dst_off_0, len2>
-// This means src_off_1,len1; src_off_2,len2 will be written to dst_off_0
+// This means the contents of (src_off_1, len1) and (src_off_2, len2)
+// are written to dst_off_0.
 // <src_off_3, dst_off_1, len3>
 // <src_off_4, dst_off_1, len4>
 // <src_off_5, dst_off_1, len5>
@@ -714,7 +716,7 @@ void RDMAChannel::send_data(size_t layer_idx) {
     assert(tensor_cnt < dst_layer_handle.ptrs.size());
     assert(tensor_cnt < temp_src_mrs.size());
 
-    // Get the current tensor CPU pointer for CRC calculation
+    // Get the current tensor's CPU pointer for CRC calculation.
     const Bytef *const tensor_cpu_ptr = get_layer_tensor_cpu_ptr(self.ctx_, layer_idx, tensor_cnt);
     if (tensor_cpu_ptr == nullptr && self.enable_crc_) {
       LOG(WARNING) << "disable crc check. layer_idx=" << layer_idx << ", tensor_cnt=" << tensor_cnt;
@@ -722,15 +724,6 @@ void RDMAChannel::send_data(size_t layer_idx) {
     }
 
     for (const auto &[src_offset, dst_offset, len] : per_tensor_data) {
-      const uint64_t layer_blk_size = self.ctx_->layer_blk_sizes[tensor_cnt];
-      const uint64_t dst_layer_blk_size = self.dst_layer_blk_sizes_[tensor_cnt];
-      assert(len > 0);
-      assert(src_offset < layer_blk_size);
-      assert(len < layer_blk_size);
-      assert(src_offset + len <= layer_blk_size);
-      assert(dst_offset < dst_layer_blk_size);
-      assert(dst_offset + len <= dst_layer_blk_size);
-
       auto *rladdr = reinterpret_cast<char *>(dst_layer_handle.ptrs[tensor_cnt]);
       const auto &src_mr_guard = temp_src_mrs[tensor_cnt];
       const auto &src_mr = src_mr_guard.mr();
@@ -787,7 +780,7 @@ void RDMAChannel::send_data(size_t layer_idx) {
       /* signal_peer */ false,
       /* imm_data */ 0,
       [prefills = std::move(prefills), pr = std::move(pr), start_ts](Status s) {
-        // WriteBySgList requires prefills to remain valid until the callback.
+        // WriteBySgList requires prefills to remain alive until the callback.
         if (!s.IsOk()) {
           auto ex = std::make_exception_ptr(
               std::runtime_error("Write ERR: " + s.ErrMsg())

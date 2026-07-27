@@ -7,7 +7,12 @@ import torch
 
 from vllm import envs
 
-from .. import BackendMeta, HybridBackend
+from .. import (
+    BackendMeta,
+    HybridBackend,
+    OperationPlan,
+    merge_operation_plans,
+)
 from ..engine_proxy import (
     KVCacheBlocks,
     KVCacheConfig,
@@ -117,14 +122,14 @@ class KVTMigration(HybridBackend):
             )
         return r
 
-    def get_operations(self, req: Request) -> tuple[int, int]:
-        m_load, m_save = self._m.get_operations(req)
+    def get_operations(self, req: Request) -> OperationPlan:
+        m_ops = self._m.get_operations(req)
         if get_param(req, P_KVT_STATE, None) is not None \
             or get_param(req, P_REMOTE_DECODE, None) is not None:
-            kvt_load, kvt_save = self._p.get_operations(req)
+            kvt_ops = self._p.get_operations(req)
         else:
-            kvt_load, kvt_save = self._d.get_operations(req)
-        return m_load + kvt_load, m_save + kvt_save
+            kvt_ops = self._d.get_operations(req)
+        return merge_operation_plans(m_ops, kvt_ops)
 
     def build_backend_meta(self, sout: SchedulerOutput) -> BackendMeta:
         ret = self._d.build_backend_meta(sout)

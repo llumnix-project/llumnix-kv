@@ -10,7 +10,7 @@
 namespace blade_llm {
 
 struct RDMAInfo {
-  char ip[INET_ADDRSTRLEN]{'\0'};  // decode listen ip, null-terminated.
+  char ip[INET_ADDRSTRLEN]{'\0'};  // Decode listen IP, terminated by '\0'.
   int port = 0;  // decode listen port
   std::vector<RDMAMemHandle> handles;
 };
@@ -25,9 +25,9 @@ class RDMAChannel : public IChannel, public noncopyable {
 
   ~RDMAChannel() override;
 
-  // connect is called on the main thread, should not block.
-  // write is called on the background thread, may block.
-  // The caller ensures connect happens-before write.
+  // connect is called on the main thread and should avoid blocking.
+  // write is called on a background thread and may block.
+  // The caller guarantees that connect happens before write.
   void connect(const WorkerInfo &dst_info) override;
 
   void register_data(std::vector<std::vector<IpcBlock>>& data, TPKind kind) override;

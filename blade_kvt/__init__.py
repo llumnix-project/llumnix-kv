@@ -45,7 +45,8 @@ def set_envs():
 
     os.environ.setdefault('BLLM_KVTRANS_RDMA_SP', '2')
     os.environ.setdefault('ACCL_TCP_TIMEOUT_MS', '1500')
-    os.environ.setdefault('ACCL_MAX_USER_MR_GB', '10')
+    os.environ.setdefault('ACCL_MAX_USER_MR_GB', '50')
+    os.environ.setdefault('ACCL_IBV_MTU', '9000')
     os.environ.setdefault('ACCL_WRITEBATCH_OPT', '2')
     os.environ.setdefault('ACCL_TX_DEPTH', '1024')
     os.environ.setdefault('ACCL_TX_CONN_DEPTH', '1024')  # eic

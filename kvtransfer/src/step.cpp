@@ -8,16 +8,17 @@
 namespace blade_llm {
 
 Step::~Step() noexcept {
-  // When a step is destructed, all related activities have finished; suitable for metric output.
+  // Destruction means all step activity has completed, so this is a suitable
+  // point to emit metrics.
   auto& self = *this;
   const auto last_send_ts = self.last_send_finish_ts();
 
-  // Only log when sub_queue_time_us is not empty
+  // Log only when sub_queue_time_us is not empty.
   if (self.sub_queue_time_us.empty()) {
     return;
   }
 
-  // Compute statistics
+  // Compute statistics.
   int64_t min_queue_us = 0, max_queue_us = 0, avg_queue_us = 0;
   if (!self.sub_queue_time_us.empty()) {
     min_queue_us = *std::min_element(self.sub_queue_time_us.begin(), self.sub_queue_time_us.end());

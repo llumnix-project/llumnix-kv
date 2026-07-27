@@ -71,7 +71,15 @@ static std::unique_ptr<Context> create_context(
     std::vector<size_t> conv_state_shape,
     std::vector<size_t> ssm_state_shape,
     std::vector<size_t> gdn_conv_channel_dims,
-    uint32_t attn_pack_size) {
+    bool kda_conv_dim_first,
+    uint32_t hybrid_attn_token_size,
+    uint64_t kda_page_stride,
+    uint32_t attn_pack_size,
+    uint32_t num_ple_layers,
+    uint32_t ple_block_group,
+    uint32_t ple_conv_elem_size,
+    std::vector<size_t> ple_conv_state_shape,
+    std::vector<size_t> ple_conv_channel_dims) {
 
   assert(block_sizes.size() == token_sizes.size());
   for (size_t i = 0; i < block_sizes.size(); i++) {
@@ -108,6 +116,14 @@ static std::unique_ptr<Context> create_context(
   wi->conv_state_shape = std::move(conv_state_shape);
   wi->ssm_state_shape = std::move(ssm_state_shape);
   wi->gdn_conv_channel_dims = std::move(gdn_conv_channel_dims);
+  wi->kda_conv_dim_first = kda_conv_dim_first;
+  wi->hybrid_attn_token_size = hybrid_attn_token_size;
+  wi->kda_page_stride = kda_page_stride;
+  wi->num_ple_layers = num_ple_layers;
+  wi->ple_block_group = ple_block_group;
+  wi->ple_conv_elem_size = ple_conv_elem_size;
+  wi->ple_conv_state_shape = std::move(ple_conv_state_shape);
+  wi->ple_conv_channel_dims = std::move(ple_conv_channel_dims);
 
   return context;
 }
@@ -133,7 +149,15 @@ void init_kv_transfer_client(const std::string &inst_name,
                              std::vector<size_t> conv_state_shape,
                              std::vector<size_t> ssm_state_shape,
                              std::vector<size_t> gdn_conv_channel_dims,
-                             uint32_t attn_pack_size) {
+                             bool kda_conv_dim_first,
+                             uint32_t hybrid_attn_token_size,
+                             uint64_t kda_page_stride,
+                             uint32_t attn_pack_size,
+                             uint32_t num_ple_layers,
+                             uint32_t ple_block_group,
+                             uint32_t ple_conv_elem_size,
+                             std::vector<size_t> ple_conv_state_shape,
+                             std::vector<size_t> ple_conv_channel_dims) {
 
   if (KV_CLIENT == nullptr) {
     // Note: valid_ranks, kvt_tp_size (effective) and kvt_tp_rank are
@@ -150,7 +174,15 @@ void init_kv_transfer_client(const std::string &inst_name,
                                   std::move(conv_state_shape),
                                   std::move(ssm_state_shape),
                                   std::move(gdn_conv_channel_dims),
-                                  attn_pack_size);
+                                  kda_conv_dim_first,
+                                  hybrid_attn_token_size,
+                                  kda_page_stride,
+                                  attn_pack_size,
+                                  num_ple_layers,
+                                  ple_block_group,
+                                  ple_conv_elem_size,
+                                  std::move(ple_conv_state_shape),
+                                  std::move(ple_conv_channel_dims));
 
     context->set_cuda_barrier(std::make_unique<CudaEventBarrier>(events));
 
@@ -274,7 +306,15 @@ void init_kv_transfer_server(const std::string &inst_name,
                              std::vector<size_t> conv_state_shape,
                              std::vector<size_t> ssm_state_shape,
                              std::vector<size_t> gdn_conv_channel_dims,
-                             uint32_t attn_pack_size) {
+                             bool kda_conv_dim_first,
+                             uint32_t hybrid_attn_token_size,
+                             uint64_t kda_page_stride,
+                             uint32_t attn_pack_size,
+                             uint32_t num_ple_layers,
+                             uint32_t ple_block_group,
+                             uint32_t ple_conv_elem_size,
+                             std::vector<size_t> ple_conv_state_shape,
+                             std::vector<size_t> ple_conv_channel_dims) {
   if (KV_SERVER == nullptr) {
     auto context = create_context(inst_name, tp_size, worker_id, worker_tp_rank,
                                   device_id, block_sizes, token_sizes,
@@ -285,7 +325,15 @@ void init_kv_transfer_server(const std::string &inst_name,
                                   std::move(conv_state_shape),
                                   std::move(ssm_state_shape),
                                   std::move(gdn_conv_channel_dims),
-                                  attn_pack_size);
+                                  kda_conv_dim_first,
+                                  hybrid_attn_token_size,
+                                  kda_page_stride,
+                                  attn_pack_size,
+                                  num_ple_layers,
+                                  ple_block_group,
+                                  ple_conv_elem_size,
+                                  std::move(ple_conv_state_shape),
+                                  std::move(ple_conv_channel_dims));
 
     if (protocols.size() > 1) {
       throw std::runtime_error("multi-protocols server not support temporarily");
@@ -330,7 +378,7 @@ void init_kv_transfer_server(const std::string &inst_name,
   monitor_init();
 }
 
-// Empty means not running in a kvt environment.
+// Empty means KVT is not active.
 std::string current_worker_info(const std::string& kind = "any") {
     Context* ctx = nullptr;
 
@@ -379,7 +427,7 @@ PYBIND11_MODULE(kvtransfer_ops, m) {
       .export_values();
 
   py::class_<blade_llm::ReqMeta>(m, "ReqMeta")
-      .def(py::init<>())  // default constructor
+      .def(py::init<>())  // Default constructor.
       .def_readwrite("dst_inst", &blade_llm::ReqMeta::dst_inst)
       .def_readwrite("dst_worker", &blade_llm::ReqMeta::dst_worker)
       .def_readwrite("reqid", &blade_llm::ReqMeta::reqid)
@@ -426,7 +474,15 @@ PYBIND11_MODULE(kvtransfer_ops, m) {
       py::arg("conv_state_shape") = std::vector<size_t>{},
       py::arg("ssm_state_shape") = std::vector<size_t>{},
       py::arg("gdn_conv_channel_dims") = std::vector<size_t>{},
-      py::arg("attn_pack_size") = 1);
+      py::arg("kda_conv_dim_first") = false,
+      py::arg("hybrid_attn_token_size") = 0,
+      py::arg("kda_page_stride") = 0,
+      py::arg("attn_pack_size") = 1,
+      py::arg("num_ple_layers") = 0,
+      py::arg("ple_block_group") = 0,
+      py::arg("ple_conv_elem_size") = 1,
+      py::arg("ple_conv_state_shape") = std::vector<size_t>{},
+      py::arg("ple_conv_channel_dims") = std::vector<size_t>{});
   m.def("add_target", &blade_llm::add_target, "add target to kv client;");
   m.def("submit_req_send2", &blade_llm::submit_req_send2, "submit kv send to kv client;");
   m.def("start_req_send", &blade_llm::start_req_send, "submit kv send to kv client;");
@@ -451,7 +507,15 @@ PYBIND11_MODULE(kvtransfer_ops, m) {
       py::arg("conv_state_shape") = std::vector<size_t>{},
       py::arg("ssm_state_shape") = std::vector<size_t>{},
       py::arg("gdn_conv_channel_dims") = std::vector<size_t>{},
-      py::arg("attn_pack_size") = 1);
+      py::arg("kda_conv_dim_first") = false,
+      py::arg("hybrid_attn_token_size") = 0,
+      py::arg("kda_page_stride") = 0,
+      py::arg("attn_pack_size") = 1,
+      py::arg("num_ple_layers") = 0,
+      py::arg("ple_block_group") = 0,
+      py::arg("ple_conv_elem_size") = 1,
+      py::arg("ple_conv_state_shape") = std::vector<size_t>{},
+      py::arg("ple_conv_channel_dims") = std::vector<size_t>{});
   // common
   m.def("current_worker_info", &blade_llm::current_worker_info, "get current worker info;", py::arg("kind") = "any");
   m.def("lib_support_transfer_protocols", &blade_llm::support_transfer_protocols, "get supported transfer types");

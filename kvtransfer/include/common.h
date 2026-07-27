@@ -149,6 +149,28 @@ struct WorkerInfo {
   std::vector<size_t> conv_state_shape;
   std::vector<size_t> ssm_state_shape;
   std::vector<size_t> gdn_conv_channel_dims;
+  uint32_t num_ple_layers{0};
+  uint32_t ple_block_group{0};
+  uint32_t ple_conv_elem_size{1};
+  std::vector<size_t> ple_conv_state_shape;
+  std::vector<size_t> ple_conv_channel_dims;
+
+  // KDA reuses the GDN state metadata above because both page layouts are
+  // [conv][recurrent][padding]. This KDA-only flag is the one extra piece of
+  // metadata needed for community vLLM's optional DS conv layout. Existing
+  // GDN parsing remains SD-only and does not read this field.
+  bool kda_conv_dim_first{false};
+
+  // Real per-token byte size of the rank-replicated MLA cache stored at the
+  // beginning of a KDA-sized physical page. Local-only, not serialized.
+  uint32_t hybrid_attn_token_size{0};
+
+  // Physical byte stride between KDA blocks. Kimi K3 may expose the same
+  // backing allocation through smaller logical MLA blocks, so block_sizes[0]
+  // is not necessarily the correct stride for recurrent-state block IDs.
+  // Serialized so a P sender can address the D allocation correctly when
+  // P/D tensor-parallel sizes differ.
+  uint64_t kda_page_stride{0};
 
   // todo
   WorkerInfo() :
@@ -239,16 +261,17 @@ public:
   friend inline std::ostream& operator<<(std::ostream& os, const ReqSendTask& task);
 };
 
-// RequestInfo can only be used in the Python main thread.
+// RequestInfo may only be used on the Python main thread.
 class RequestInfo {
  public:
   const InstanceId dst_inst_id;
   const WorkerId dst_worker_id;
   const std::optional<WorkerInfo> dst_worker_info;
   const RequestId req_id;
-  // src_blocks/dst_blocks are passed in from vllm.
-  // Outer vector represents different kv cache groups, each with its own block ids
-  // Block ids should be the same across cache tensors (QSA shares tensors, so one cache tensor per layer)
+  // src_blocks/dst_blocks are passed in from vLLM.
+  // The outer vector represents KV cache groups, each with its own block IDs.
+  // Different cache tensors must use the same block IDs. QSA shares tensors,
+  // so each layer contains only one cache tensor.
   const BlockIds src_blocks;
   const BlockIds dst_blocks;
  private:

@@ -2,5 +2,5 @@
 set -e
 
 apt remove -y accl-barex-cuda
-wget https://eflop.oss-cn-beijing.aliyuncs.com/accl-barex/tcp/accl-barex-pkg-test-tcp-v1.1.7/mlx/accl-barex-cuda12.2-devel-1.5.3-1.deb
-dpkg -i accl-barex-cuda12.2-devel-1.5.3-1.deb
+wget https://eflop.oss-cn-beijing.aliyuncs.com/accl-barex/accl-barex-pkg-release_v1.5.3-0-hotfix0325/mlx/cuda12/cxx11/accl-barex-cuda12-devel-1.5.3-0.deb
+dpkg -i accl-barex-cuda12-devel-1.5.3-0.deb

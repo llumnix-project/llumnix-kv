@@ -3,7 +3,12 @@ from typing import AsyncGenerator, Optional
 
 import torch
 
-from . import BackendMeta, HybridBackend
+from . import (
+    BackendMeta,
+    HybridBackend,
+    OperationPlan,
+    merge_operation_plans,
+)
 from .engine_proxy import (
     KVCacheBlocks,
     KVCacheConfig,
@@ -82,6 +87,9 @@ class KVSP(HybridBackend):
         self._p.async_save_kv_layer(layer_name, kv_layer, m.p)
         return self._s.async_save_kv_layer(layer_name, kv_layer, m.s)
 
+    def save_done_source(self) -> str | None:
+        return self._s.save_done_source()
+
     # ==============================
     # Scheduler-side methods
     # ==============================
@@ -97,11 +105,11 @@ class KVSP(HybridBackend):
             request, blocks, num_external_tokens
         )
 
-    def get_operations(self, req: Request) -> tuple[int, int]:
+    def get_operations(self, req: Request) -> OperationPlan:
         # p has to go first bc kvt will modify the request
-        p_load, p_save = self._p.get_operations(req)
-        s_load, s_save = self._s.get_operations(req)
-        return p_load + s_load, p_save + s_save
+        p_ops = self._p.get_operations(req)
+        s_ops = self._s.get_operations(req)
+        return merge_operation_plans(s_ops, p_ops)
 
     def build_backend_meta(self, sout: SchedulerOutput) -> BackendMeta:
         return KVSPMeta(

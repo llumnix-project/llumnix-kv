@@ -86,6 +86,9 @@ class TCPChannel : public IChannel, public noncopyable {
   size_t sb_size_min_ = 0;
   size_t sb_size_max_ = 0;
   size_t sb_size_total_ = 0;
+  // per-tensor bytes actually put on the wire (Σ block.length for that tensor;
+  // fp8 length when fp8 is enabled). Computed in register_data, used by send_data.
+  std::vector<size_t> tensor_send_bytes_;
   // write_us: (reqid, future) pairs for timeout handling
   std::vector<std::pair<uint64_t, std::future<TCPTimePoints>>> write_futs_;
   std::vector<std::future<void>> send_futs_;
@@ -98,9 +101,12 @@ class TCPChannel : public IChannel, public noncopyable {
 };
 
 struct TCPInfo {
-  char ip[INET_ADDRSTRLEN]{'\0'};  // decode listen ip, null-terminated.
+  char ip[INET_ADDRSTRLEN]{'\0'};  // Decode listen IP, terminated by '\0'.
   int port = 0;  // decode listen port
-  std::vector<void *> ptrs;
+  // per-layer, per-tensor GPU cache base pointers: ptrs[layer_idx][tensor_idx]
+  std::vector<std::vector<void *>> ptrs;
+  // Registered byte capacity for each cache tensor in a layer.
+  std::vector<size_t> layer_blk_sizes;
 };
 
 class TCPServer: public ITransferServer {

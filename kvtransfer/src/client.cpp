@@ -74,7 +74,7 @@ void KvTransferClient::TargetMgr::do_submit(std::shared_ptr<Step>& step, StepTas
   const auto stepid = step->step_idx;
   const auto substepid = steptasks.substepid;
 
-  // Compute and store sub_queue_time_us
+  // Compute and store sub_queue_time_us.
   const auto submit_ts = SteadyClock::now();
   const auto queue_time_us = elapse_us(steptasks.send_ts, submit_ts);
   step->sub_queue_time_us.push_back(queue_time_us);
@@ -339,7 +339,7 @@ void KvTransferClient::submit_req_send(InstanceId dst_inst_name,
   RTASSERT(new_tokens > 0);
   auto parsed_dst_worker_info = parse_worker_info(dst_worker_info);
 
-  // Verify stepid/substepid matches targets_tasks_buf_
+  // Verify that stepid/substepid match targets_tasks_buf_.
   if (!targets_tasks_buf_.empty()) {
     RTASSERT_EQ(targets_tasks_buf_.stepid, stepid);
     RTASSERT_EQ(targets_tasks_buf_.substepid, substepid);
@@ -373,7 +373,7 @@ void KvTransferClient::submit_delta_send(const RequestId &req_id,
                                          size_t stepid,
                                          uint32_t substepid) {
   assert(substepid == 0);
-  // Verify stepid/substepid matches targets_tasks_buf_
+  // Verify that stepid/substepid match targets_tasks_buf_.
   if (!targets_tasks_buf_.empty()) {
     RTASSERT_EQ(targets_tasks_buf_.stepid, stepid);
     RTASSERT_EQ(targets_tasks_buf_.substepid, substepid);
@@ -424,8 +424,9 @@ void KvTransferClient::start_send_substep(size_t stepid, uint32_t substepid, std
   {
     std::lock_guard<std::mutex> guard(self.coord_lock_);
     if (stepid < self.coord_step_id_) {
-      // Worker has already started the next step, meaning stepid's step is complete
-      // Convert metas to has_last_token=true call, create a new Step
+      // The worker has started the next step, so the step identified by
+      // stepid has completed. Convert metas into a has_last_token=true call,
+      // which requires creating a new Step.
       action = Action::kNewFreeze;
     } else if (stepid > self.coord_step_id_) {
       if (!self.pending_step_metas_.empty()) {
@@ -436,7 +437,7 @@ void KvTransferClient::start_send_substep(size_t stepid, uint32_t substepid, std
       self.pending_step_metas_.emplace_back(StepMetas{stepid, substepid, std::move(metas)});
       return;
     } else if (self.last_step_guard_) {
-      // stepid == coord_step_id_: directly append to the current step
+      // stepid == coord_step_id_: append directly to the current step.
       step = self.last_step_guard_->step();
       action = Action::kAttachCurrent;
     } else {
@@ -447,7 +448,7 @@ void KvTransferClient::start_send_substep(size_t stepid, uint32_t substepid, std
   }
 
   if (action == Action::kNewFreeze) {
-    // Lock released, call start_req_send to create a new Step and send
+    // The lock is released; call start_req_send to create and send a new Step.
     start_req_send(metas, stepid, substepid);
     return;
   }
@@ -461,7 +462,7 @@ void KvTransferClient::start_send_substep(size_t stepid, uint32_t substepid, std
 static constexpr size_t EMPTY_STEP_ID = 9223372036854775807;
 
 size_t KvTransferClient::start_send(size_t stepid, size_t sched_tokens) {
-  // sched_tokens == 0: optimization, skip Step/StepGuard creation
+  // sched_tokens == 0: skip Step/StepGuard creation as an optimization.
   if (sched_tokens == 0 && targets_tasks_buf_.empty()) {
     return EMPTY_STEP_ID;
   }
@@ -471,6 +472,7 @@ size_t KvTransferClient::start_send(size_t stepid, size_t sched_tokens) {
   auto ctx = context();
   auto step_guard = std::make_shared<StepGuard>(ctx, step);
   single_thd_.spawn([step_guard]() {
+    // A completed step may already have been replaced by its successor.
     fault_inject_sleep(10 * 1000);
 
     step_guard->step()->wait_layers_start_ts = SteadyClock::now();
@@ -488,7 +490,7 @@ size_t KvTransferClient::start_send(size_t stepid, size_t sched_tokens) {
     }
   }
 
-  // Process coordination state under lock
+  // Update coordination state while holding the lock.
   auto tmp_reqmetas = std::vector<StepMetas>();
   {
     auto& self = *this;
@@ -531,9 +533,9 @@ void KvTransferClient::flush_send(size_t step_id) {
   {
     auto& self = *this;
     std::lock_guard<std::mutex> guard(self.coord_lock_);
-    // Assert freeze must be true
+    // freeze must be true.
     // assert(self.last_step_guard_->freeze);
-    // pending_step_metas_ must be empty
+    // pending_step_metas_ must be empty.
     assert(self.pending_step_metas_.empty());
 
     self.last_step_guard_.reset();

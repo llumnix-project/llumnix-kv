@@ -20,9 +20,15 @@ from vllm.utils import EventPool
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.hybrid_connector import BackendMeta, HybridBackend, IoRet
+from vllm.v1.hybrid_connector import (
+    BackendMeta,
+    HybridBackend,
+    IoRet,
+    OperationPlan,
+)
 from vllm.v1.hybrid_connector.engine_proxy import (
     get_p_node_pop_len,
+    sched_discard_zero_block_ids,
     sched_get_kvblk_ids,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -103,6 +109,7 @@ class VineyardKVSBackendMetadata(BackendMeta):
 
 
 class VineyardKVSBackend(HybridBackend):
+    SOURCE_LABEL = "kvs"
 
     def __init__(
         self,
@@ -349,8 +356,13 @@ class VineyardKVSBackend(HybridBackend):
 
         return _save_kv_layer(event)
 
-    def get_operations(self, req: Request) -> tuple[int, int]:
-        return int(should_load(req)), int(should_save(req))
+    def get_operations(self, req: Request) -> OperationPlan:
+        load_count = int(should_load(req))
+        save_count = int(should_save(req))
+        source = self.source_label()
+        load_sources = (source,) if load_count > 0 else ()
+        save_sources = (source,) if save_count > 0 else ()
+        return load_count, save_count, load_sources, save_sources
 
     async def async_get_num_new_matched_tokens(
         self,
@@ -387,6 +399,7 @@ class VineyardKVSBackend(HybridBackend):
             
             block_ids = blocks.get_block_ids()[0][:block_num]
             assert len(block_ids) == block_num
+            sched_discard_zero_block_ids(block_ids)
             trace_headers = request.trace_wrapper.traceparent("kv_load")
             self.metas_to_recv.append(
                 ReqMeta(request.request_id, False, tokens,
@@ -403,7 +416,7 @@ class VineyardKVSBackend(HybridBackend):
             await asyncio.sleep(envs.VLLM_KVS_IO_TIMEOUT_SECONDS + 1)
 
             for req in reqs:
-                mark_backend_save_done(req)
+                mark_backend_save_done(req, source=self.source_label())
 
         from .engine_proxy import get_hybrid_sched_loop
         if scheduler_output.hc_aborted_save:
