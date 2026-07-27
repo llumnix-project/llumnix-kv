@@ -334,18 +334,6 @@ bool env_bf162fp8_conversion() noexcept {
   return val;
 }
 
-bool env_tx_use_cache_transfer_spec() noexcept {
-  static constexpr bool DEFVAL = false;  // Disabled by default
-  static bool val = DEFVAL;
-  static std::once_flag flag;
-  std::call_once(flag, [] () {
-    // Use numeric switch to share env2posint logging behavior.
-    // 0 = main parse path (default), non-zero = cache_transfer_spec path.
-    val = env2posint("BLLM_KVTRANS_TX_PARSE_MODE", static_cast<int>(DEFVAL)) != 0;
-  });
-  return val;
-}
-
 bool env_pad_last_attn_block() noexcept {
   static constexpr bool DEFVAL = true;  // Enabled by default
   static bool val = DEFVAL;
@@ -362,6 +350,21 @@ bool env_rdma_staged() noexcept {
   static std::once_flag flag;
   std::call_once(flag, [] () {
     val = env2posint("BLLM_KVTRANS_RDMA_STAGED", static_cast<int>(DEFVAL)) != 0;
+  });
+  return val;
+}
+
+// Use for non-tcp path. Set the NIC name to use for RDMA.
+const char* env_nic_name() noexcept {
+  static const char* val = nullptr;
+  static std::once_flag flag;
+  std::call_once(flag, [] () {
+    const char* env = getenv("BLADE_KVT_NIC_NAME");
+    fprintf(stdout, "kvtenv: env=BLADE_KVT_NIC_NAME val=%s\n", (env == nullptr ? "NULL" : env));
+    fflush(stdout);
+    if (env != nullptr && env[0] != '\0') {
+      val = env;
+    }
   });
   return val;
 }

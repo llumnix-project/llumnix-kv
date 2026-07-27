@@ -43,8 +43,11 @@ void vllm_parse_block_send_p_eq_d(
 
   send_blocks.resize(kv_token_sizes.size());
   std::vector<IpcBlock> &per_cache_send_blocks = send_blocks.at(0);
+  const auto bounds = make_ipc_block_bounds(
+      *src_worker_info, *dst_worker_info, 0);
   size_t sb_idx = per_cache_send_blocks.size();  // sb: send block~
-  do_parse_block_send_p_eq_d(k_block_size, k_token_size, task, per_cache_send_blocks);
+  do_parse_block_send_p_eq_d(
+      k_block_size, k_token_size, task, bounds, per_cache_send_blocks);
   size_t const sb_end_idx = per_cache_send_blocks.size();
 
   // emplace_back v tensor block, which is non-contigious with k tensor
@@ -53,7 +56,8 @@ void vllm_parse_block_send_p_eq_d(
     auto sb = per_cache_send_blocks.at(sb_idx);
     sb.src_offset += src_layer_size;
     sb.dst_offset += dst_layer_size;
-    per_cache_send_blocks.emplace_back(std::move(sb));
+    append_ipc_block_checked(
+        per_cache_send_blocks, bounds, sb.src_offset, sb.dst_offset, sb.length);
   }
 }
 
@@ -104,11 +108,13 @@ void vllm_parse_block_send_p_gt_d(
 
   send_blocks.resize(p_token_sizes.size());
   std::vector<IpcBlock> &per_cache_send_blocks = send_blocks.at(0);
+  const auto bounds = make_ipc_block_bounds(*p_info, *d_info, 0);
   size_t sb_idx = per_cache_send_blocks.size();  // sb: send block~
   parse_block_send_gt(
     p_k_size, p_k_size, d_k_size, ntpb, group_off,
     task->src_blocks()[0], task->dst_blocks()[0],
-    task->seen_tokens, task->new_tokens, per_cache_send_blocks);
+    task->seen_tokens, task->new_tokens, bounds, false,
+    per_cache_send_blocks);
   size_t const sb_end_idx = per_cache_send_blocks.size();
   size_t const pk_layer_size = ntpb * p_k_size * p_info->layer_num_blocks;
   size_t const dk_layer_size = ntpb * d_k_size * d_info->layer_num_blocks;
@@ -118,7 +124,8 @@ void vllm_parse_block_send_p_gt_d(
     auto sb = per_cache_send_blocks.at(sb_idx);
     sb.src_offset += pk_layer_size;
     sb.dst_offset += dk_layer_size;
-    per_cache_send_blocks.emplace_back(std::move(sb));
+    append_ipc_block_checked(
+        per_cache_send_blocks, bounds, sb.src_offset, sb.dst_offset, sb.length);
   }
 }
 

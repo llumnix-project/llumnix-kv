@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import struct
+from collections import deque
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Optional
@@ -22,12 +23,14 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.hybrid_connector import (
     _SAVE_DONE_REQ,
     _SAVE_DONE_RESP,
+    HB_IORET,
     HB_SAVE_IORET,
     BackendMeta,
     HCSchedOutput,
     HybridBackend,
     IoDoneReqs,
     IoRet,
+    OperationPlan,
     get_param,
     hybridworker,
     kill_me_if_exception,
@@ -36,6 +39,7 @@ from vllm.v1.hybrid_connector.engine_proxy import (
     MsgpackDecoder,
     _sched,
     get_hybrid_worker_loop,
+    sched_discard_zero_block_ids,
     sched_rpc_server,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -49,6 +53,17 @@ logger = init_logger(__name__)
 _V6D_READY_REQ = 0x20181228
 _V6D_READY_RESP = 0x91218103
 
+# Bypass-substep aborts are normally drained at the tail of the next main
+# step's _async_do_store. If the engine goes idle right after the abort
+# (the aborted request was the only one running), no such store ever
+# arrives; after this delay the abort is drained directly. The delay is
+# far longer than one engine step, so any store meta for the aborted
+# request that was built before the abort has long been bound, launched
+# and registered in _inflight_save_tasks by then — _drain_aborted_save
+# awaits those tasks, preserving the "discard only after the swap DMA
+# finished" guarantee.
+_BYPASS_ABORT_FALLBACK_DELAY_S = 30.0
+
 
 @dataclass
 class V6dObjectBackendMeta(BackendMeta):
@@ -60,6 +75,16 @@ class V6dObjectBackendMeta(BackendMeta):
     # would discard the v6d blob while the GPU is still writing into
     # its memory (use-after-free against v6d's dlmalloc).
     aborted_save_ids: list[str] = field(default_factory=list)
+    # NaN check (VLLM_V6D_STORE_NAN_CHECK): gpu_model_runner sets this to
+    # an async isnan(hidden_states).any() GPU flag tensor after forward,
+    # on the worker-side bound meta object (never serialized — always
+    # None on the scheduler side).  Read by _async_do_store.
+    nan_flag: Optional[torch.Tensor] = None
+
+    @property
+    def wants_nan_flag(self) -> bool:
+        """True when this step has store work, i.e. a NaN flag is useful."""
+        return bool(self.inner is not None and self.inner.reqs_to_store)
 
     def __bool__(self):
         if self.inner is None:
@@ -70,6 +95,7 @@ class V6dObjectBackendMeta(BackendMeta):
 
 
 class V6dObjectBackend(HybridBackend):
+    SOURCE_LABEL = "v6d_object"
 
     def __init__(
         self,
@@ -121,15 +147,21 @@ class V6dObjectBackend(HybridBackend):
         # last_save RPC.
         self._failed_store_reqs: set[str] = set()
 
+        if envs.VLLM_V6D_STORE_NAN_CHECK and role == KVConnectorRole.WORKER:
+            logger.info("V6D store NaN check on hidden states enabled")
+
         # Per-req in-flight save tasks; abort drain awaits these so the
         # GPU swap finishes before the scheduler discards the v6d blob.
         self._inflight_save_tasks: dict[str, list[asyncio.Task]] = {}
 
         # Substep aborts arrive on the bypass loop thread where bind/clear
-        # short-circuit; buffer them here (mutated only on the asyncio loop
-        # thread via call_soon_threadsafe) and drain at the tail of the
-        # next _async_do_store.
-        self._bypass_pending_aborts: list[str] = []
+        # short-circuit. Buffered in a deque per the cross-thread buffering
+        # convention in hybrid_connector/__init__.py (thread-safe
+        # append/pop); consumers only pop/remove — NEVER rebind this
+        # attribute. Drained at the tail of the next _async_do_store via
+        # _take_pending_aborts, or by _bypass_abort_fallback if no store
+        # step follows.
+        self._bypass_pending_aborts: deque[str] = deque()
 
     def _ensure_block_pool(self):
         """Lazily set block_pool on the inner scheduler connector."""
@@ -197,18 +229,58 @@ class V6dObjectBackend(HybridBackend):
         # Bypass substep: must not touch _bound_meta (owned by the main step),
         # otherwise it would stomp on the main step's in-flight metadata and
         # silently drop its reqs_to_store, leaking entries in
-        # HybridScheduler._saving. Only forward substep aborts to the loop
-        # thread.
+        # HybridScheduler._saving. Only buffer substep aborts for a later
+        # drain.
         if (isinstance(meta, V6dObjectBackendMeta)
                 and meta.aborted_save_ids):
-            # Copy: the loop thread reads after we return.
             ids = list(meta.aborted_save_ids)
+            # deque.extend is thread-safe and consumers only pop/remove
+            # (never rebind the attribute), so buffering directly from this
+            # thread cannot lose ids to a concurrent drain.
+            self._bypass_pending_aborts.extend(ids)
+            # Arm the idle fallback; call_later must run on the loop thread.
             self._loop.call_soon_threadsafe(
-                self._bypass_pending_aborts.extend, ids)
+                self._loop.call_later,
+                _BYPASS_ABORT_FALLBACK_DELAY_S,
+                self._bypass_abort_fallback, ids)
 
     def bypass_clear(self):
         # Bypass substep has no deferred store to trigger.
         return
+
+    def _take_pending_aborts(self) -> list[str]:
+        """Pop all buffered bypass aborts (loop thread only).
+
+        popleft-based so the buffer object is never rebound — a concurrent
+        bypass_bind extend lands either before the loop exits (taken now)
+        or in the same deque (taken by the next drain / the fallback).
+        """
+        taken: list[str] = []
+        while self._bypass_pending_aborts:
+            taken.append(self._bypass_pending_aborts.popleft())
+        return taken
+
+    def _bypass_abort_fallback(self, ids: list[str]) -> None:
+        """Drain bypass aborts that no main-step store ever picked up.
+
+        Runs on the loop thread via call_later. Only touches ids from its
+        own bypass_bind batch that are still pending: ids already taken by
+        a tail drain are skipped, and ids buffered by later bypass_bind
+        calls wait for their own timer, so every id ages the full delay
+        before being drained outside a store step.
+        """
+        pending = [i for i in ids if i in self._bypass_pending_aborts]
+        if not pending:
+            return
+        for i in pending:
+            self._bypass_pending_aborts.remove(i)
+        logger.warning(
+            "bypass abort fallback: no store step within %.0fs, draining "
+            "%d aborted save(s): %s",
+            _BYPASS_ABORT_FALLBACK_DELAY_S, len(pending), pending)
+        self._loop.create_task(
+            self._drain_aborted_save(
+                pending, get_tensor_model_parallel_rank()))
 
     def clear_backend_metadata(self):
         """Trigger deferred store if there is pending store work.
@@ -229,6 +301,9 @@ class V6dObjectBackend(HybridBackend):
         if not inner.reqs_to_store and not aborted_save_ids:
             return
 
+        # Set by gpu_model_runner after forward when the NaN check is on;
+        # the isnan kernel precedes the save event on the same stream.
+        nan_flag = meta.nan_flag
         if inner.reqs_to_store:
             event = (self._save_event_pool.pop()
                      if self._save_event_pool else torch.cuda.Event())
@@ -236,7 +311,8 @@ class V6dObjectBackend(HybridBackend):
         else:
             event = None
         asyncio.run_coroutine_threadsafe(
-            self._async_do_store(event, inner, aborted_save_ids), self._loop)
+            self._async_do_store(event, inner, aborted_save_ids, nan_flag),
+            self._loop)
 
     async def _send_save_done(self, req_id: str, tprank: int):
         n: Optional[int] = None
@@ -248,7 +324,7 @@ class V6dObjectBackend(HybridBackend):
                 f"for req={req_id}")
         savereq = IoDoneReqs(
             worker_tprank=tprank,
-            reqids=[IoRet(reqid=req_id, n=n)])
+            reqids=[IoRet(reqid=req_id, n=n, source=self.source_label())])
         await hybridworker().io_done_rpc(savereq, _SAVE_DONE_REQ, _SAVE_DONE_RESP)
 
     def _register_inflight(self, req_id: str, task: asyncio.Task) -> None:
@@ -294,16 +370,37 @@ class V6dObjectBackend(HybridBackend):
         self, event: Optional[torch.cuda.Event],
         inner: V6dObjectConnectorMetadata,
         aborted_save_ids: list[str],
+        nan_flag: Optional[torch.Tensor] = None,
     ):
         """Run deferred store on disaggw thread, send RPC for last-save reqs."""
         assert self._worker is not None
         try:
+            # NaN check verdict: .item() runs on this disaggw thread, so
+            # the implied device sync never blocks the main loop / async
+            # scheduling.  The isnan kernel precedes the save event on the
+            # same stream, so it is already (nearly) complete here.
+            nan_detected = (nan_flag is not None and bool(nan_flag.item()))
+
             noop_last_save_reqs: set[str] = set()
             real_reqs_to_store: dict[str, tuple] = {}
             for req_id, (groups_data, is_last_save) in (
                     inner.reqs_to_store.items()):
                 if not groups_data and is_last_save:
                     noop_last_save_reqs.add(req_id)
+                elif nan_detected or req_id in self._failed_store_reqs:
+                    # NaN in this step's hidden states (or an earlier chunk
+                    # of this request already failed): skip the store and
+                    # latch the failure; the last_save RPC reports n=0 so
+                    # async_cleanup discards all pending v6d objects.
+                    if nan_detected:
+                        logger.warning(
+                            "NaN detected in hidden states: failing v6d "
+                            "store for req=%s (is_last_save=%s, "
+                            "num_blocks=%d)", req_id, is_last_save,
+                            sum(len(k) for k, _ in groups_data.values()))
+                    self._failed_store_reqs.add(req_id)
+                    if is_last_save:
+                        noop_last_save_reqs.add(req_id)
                 else:
                     real_reqs_to_store[req_id] = (groups_data, is_last_save)
 
@@ -328,6 +425,9 @@ class V6dObjectBackend(HybridBackend):
                 logger.debug(
                     f"_async_do_store: starting store for "
                     f"reqs={list(real_reqs_to_store.keys())}")
+                # Launch only non-failed reqs (NaN-failed ones were
+                # filtered out of real_reqs_to_store above).
+                inner.reqs_to_store = real_reqs_to_store
                 req_tasks = self._worker.async_start_store_kv(inner)
                 if req_tasks:
                     for _rid, _t in req_tasks.items():
@@ -360,9 +460,7 @@ class V6dObjectBackend(HybridBackend):
                     f"last_save req={req_id}, sending RPC anyway")
                 await self._send_save_done(req_id, tprank)
 
-            if self._bypass_pending_aborts:
-                aborted_save_ids.extend(self._bypass_pending_aborts)
-                self._bypass_pending_aborts = []
+            aborted_save_ids.extend(self._take_pending_aborts())
 
             if aborted_save_ids:
                 await self._drain_aborted_save(aborted_save_ids, tprank)
@@ -374,18 +472,20 @@ class V6dObjectBackend(HybridBackend):
     # Scheduler-side methods
     # ==============================
 
-    def get_operations(self, req: Request) -> tuple[int, int]:
+    def get_operations(self, req: Request) -> OperationPlan:
         if not self._v6d_ready:
-            return 0, 0
+            return 0, 0, (), ()
         # Skip v6d entirely for short prompts (aligns with VLLM_KVS_ON_MIN_LENGTH
         # semantics used by kvsbackend / mooncake_kvsbackend).
         if req.num_prompt_tokens <= envs.VLLM_KVS_ON_MIN_LENGTH + 1:
-            return 0, 0
+            return 0, 0, (), ()
         # All requests go through async lookup
         load_count = 1
         # Save if prefill not done
         save_count = 1 if req.num_computed_tokens < req.num_prompt_tokens else 0
-        return load_count, save_count
+        source = self.source_label()
+        save_sources = (source,) if save_count > 0 else ()
+        return load_count, save_count, (source,), save_sources
 
     def _check_v6d_ready(self) -> None:
         if self._v6d_ready:
@@ -453,6 +553,16 @@ class V6dObjectBackend(HybridBackend):
                 f"{type(e).__name__}: {e}")
             self._scheduler._v6d_mamba_hit_reqs.discard(req_id)
             return IoRet(reqid=req_id, n=0)
+        load_groups = self._scheduler._reqs_to_load.get(req_id)
+        if load_groups:
+            # The v6d scheduler records the exact GPU blocks that worker-side
+            # async_load_kv will fill. Drop them from pending zeroing so a
+            # bypass/main-step zero pass cannot wipe the loaded KV.
+            sched_discard_zero_block_ids(
+                block_id
+                for _, gpu_block_ids in load_groups.values()
+                for block_id in gpu_block_ids
+            )
         if num_external_tokens > 0:
             self._num_external_tokens[req_id] = num_external_tokens
         # Return None so HybridScheduler puts the request into _prepared
@@ -521,6 +631,16 @@ class V6dObjectBackend(HybridBackend):
         aborted_save_ids: list[str] = [
             areq.request_id for areq in sout.hc_aborted_save
         ]
+
+        # A mamba-hit candidate is recorded before worker-side loading. Drop
+        # it unless this scheduling round follows a confirmed V6D load.
+        for req_id in self._scheduler._v6d_mamba_hit_reqs.intersection(
+                sout.num_scheduled_tokens):
+            request = self._scheduler._requests.get(req_id)
+            load_result = (get_param(request, HB_IORET, None)
+                           if request is not None else None)
+            if load_result is None or not load_result.n:
+                self._scheduler._v6d_mamba_hit_reqs.discard(req_id)
 
         inner = self._scheduler.build_connector_meta(sout)
         # Drain external_tokens for requests in this meta's load set

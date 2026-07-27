@@ -4,7 +4,13 @@ from typing import AsyncGenerator, Optional
 
 import torch
 
-from . import BackendMeta, HybridBackend, IoRet
+from . import (
+    BackendMeta,
+    HybridBackend,
+    IoRet,
+    OperationPlan,
+    merge_operation_plans,
+)
 from .engine_proxy import (
     KVCacheBlocks,
     KVCacheConfig,
@@ -54,8 +60,10 @@ class FilePBackend(HybridBackend):
         )
         return
 
-    def get_operations(self, req: Request) -> tuple[int, int]:
-        return 1, 1
+    def get_operations(self, req: Request) -> OperationPlan:
+        file_ops = self._file.get_operations(req)
+        kvt_ops = self._kvtp.get_operations(req)
+        return merge_operation_plans(file_ops, kvt_ops)
 
     def build_backend_meta(self, sout: SchedulerOutput) -> BackendMeta:
         file = self._file.build_backend_meta(sout)
@@ -102,3 +110,6 @@ class FilePBackend(HybridBackend):
         self._kvtp.async_save_kv_layer(layer_name, kv_layer, m.kvtp)
         r = self._file.async_save_kv_layer(layer_name, kv_layer, m.file)
         return r
+
+    def save_done_source(self) -> str | None:
+        return self._file.save_done_source()

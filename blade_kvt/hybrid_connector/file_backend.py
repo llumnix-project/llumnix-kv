@@ -7,7 +7,7 @@ from typing import Any, AsyncGenerator, Optional
 
 import torch
 
-from . import BackendMeta, HybridBackend, IoRet
+from . import BackendMeta, HybridBackend, IoRet, OperationPlan
 from .engine_proxy import (
     KVCacheBlocks,
     KVCacheConfig,
@@ -18,6 +18,7 @@ from .engine_proxy import (
     get_logger,
     get_p_node_pop_len,
     get_tensor_model_parallel_rank,
+    sched_discard_zero_block_ids,
     sched_get_kvblk_ids,
     sched_get_req,
 )
@@ -60,6 +61,8 @@ def _mark_blk_ready(blkdir):
 
 
 class FileBackend(HybridBackend):
+    SOURCE_LABEL = "local_file"
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -145,11 +148,13 @@ class FileBackend(HybridBackend):
             assert len(tokens) == self._blksize
             blkhash = _get_blk_hash(tokens)
             blks.append((blkids[blkidx], blkhash))
+        sched_discard_zero_block_ids(blkid for blkid, _ in blks)
         self._load_req.append(_ReqMeta(reqid=req.request_id, is_store=False, blks=blks))
         return
 
-    def get_operations(self, req: Request) -> tuple[int, int]:
-        return 1, 1
+    def get_operations(self, req: Request) -> OperationPlan:
+        source = self.source_label()
+        return 1, 1, (source,), (source,)
 
     def build_backend_meta(self, sout: SchedulerOutput) -> BackendMeta:
         ret: list[_ReqMeta] = []

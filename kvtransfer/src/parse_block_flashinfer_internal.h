@@ -28,6 +28,8 @@ void parse_flashinfer_HND_block(
   uint32_t attn_group_n,
   uint32_t attn_group_off,
   int num_kv_heads,
+  const IpcBlockBounds& bounds,
+  bool swap_offsets,
   std::vector<IpcBlock> &per_cache_send_blocks
 );
 
@@ -53,6 +55,8 @@ void parse_hybrid_flashinfer_HND_block(
   uint32_t src_attn_kernel_blk_ntpb,
   uint32_t dst_attn_kernel_blk_ntpb,
   int num_kv_heads,
+  const IpcBlockBounds& bounds,
+  bool swap_offsets,
   std::vector<IpcBlock> &per_cache_send_blocks
 );
 
@@ -73,6 +77,7 @@ void fill_last_hybrid_flashinfer_HND_block(
   uint32_t total_tokens,
   uint32_t attn_group_off,
   int num_kv_heads,
+  const IpcBlockBounds& bounds,
   std::vector<IpcBlock> &per_cache_send_blocks
 );
 

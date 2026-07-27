@@ -33,7 +33,8 @@ class Step {
  public:
   const size_t step_idx;
   const Timepoint start_send_ts = SteadyClock::now();
-  // sub_queue_time_us[i] = sub_submit_ts - sub_send_ts, appended in substep submission order
+  // sub_queue_time_us[i] = sub_submit_ts - sub_send_ts, appended in substep
+  // submission order.
   // write by target mgr thread (do_submit)
   std::vector<int64_t> sub_queue_time_us;
   // write by python main thread
@@ -43,7 +44,7 @@ class Step {
   Timepoint wait_layers_end_ts;
  private:
   // write by multi send stub thread.
-  // std::atomic<Timepoint> last_send_finish_ts_; causes compile error on g++9.
+  // std::atomic<Timepoint> last_send_finish_ts_; does not compile with g++ 9.
   std::atomic<Timepoint> last_send_finish_ts_{Timepoint::min()};
  private:
   static_assert(std::atomic<Timepoint>::is_always_lock_free);

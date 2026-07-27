@@ -24,7 +24,8 @@ logger = init_logger(__name__)
 def kill_me_if_exception(async_func):
     async def wrapper(*args, **kwargs):
         try:
-            # more detail see https://ata.atatech.org/articles/11020396051
+            # Use a monotonic timeout so wall-clock adjustments do not affect
+            # connection establishment.
             loop = asyncio.get_running_loop()
             if not hasattr(loop, "__kill_me_running_tasks"):
                 loop.__kill_me_running_tasks = set()  # type: ignore
@@ -49,11 +50,7 @@ def _loop_on_ex(_loop, context):
 
 def _asyncio_loop_main(loop, vllm_config, local_rank):
     if vllm_config and local_rank:
-        if envs.VLLM_USE_SWAP_ENGINE:
-            device = vllm_config.device_config.device
-        else:
-            device = torch.device(f"cuda:{local_rank}")
-        current_platform.set_device(device)
+        current_platform.set_device(torch.device(f"cuda:{local_rank}"))
 
     asyncio.set_event_loop(loop)
     loop.run_forever()
@@ -423,6 +420,7 @@ class IoRet(
     # ex over io_done_rpc will crash the worker process.
     ex: Optional[Exception] = None
     n: Optional[int] = None
+    source: Optional[str] = None
 
 
 class IoState:
@@ -431,24 +429,30 @@ class IoState:
         self.signals_per_worker = signals_per_worker
         # worker_tprank -> list of iorets received from this worker
         self._worker_signals: dict[int, list[IoRet]] = {}
+        # Protects _worker_signals when stats are sampled from the core thread.
+        self._signals_lock = threading.Lock()
 
     @property
     def _ready_workers(self) -> list[tuple[int, IoRet]]:
-        result = []
-        for tprank, iorets in self._worker_signals.items():
-            if len(iorets) >= self.signals_per_worker:
-                result.append((tprank, iorets[-1]))
-        return result
+        with self._signals_lock:
+            result = []
+            for tprank, iorets in self._worker_signals.items():
+                if len(iorets) >= self.signals_per_worker:
+                    result.append((tprank, iorets[-1]))
+            return result
 
     def merge(self) -> IoRet:
-        # can not merge signals from multiple backends
-        assert self.signals_per_worker == 1
-
-        ready = self._ready_workers
-        assert ready
-        _, ret = ready[0]
-        for idx in range(1, len(ready)):
-            _, wio = ready[idx]
+        # Collect every signal from all ready workers. With
+        # signals_per_worker > 1 a single worker (P rank) reports one signal
+        # per fan-out target (P_tp < D_tp); the req is only done once all of
+        # them arrived, and any failure among them must surface.
+        iorets: list[IoRet] = []
+        for signals in self._worker_signals.values():
+            if len(signals) >= self.signals_per_worker:
+                iorets.extend(signals)
+        assert iorets
+        ret = iorets[0]
+        for wio in iorets[1:]:
             # assert ret.reqid == wio.reqid
             if wio.ex is not None and ret.ex is None:
                 ret.ex = wio.ex
@@ -467,7 +471,11 @@ class IoState:
 
 
 def try_advance(
-    state_dict: dict[str, Any], ioret: IoRet, worker_tprank: int, tpsize: int
+    state_dict: dict[str, Any],
+    ioret: IoRet,
+    worker_tprank: int,
+    tpsize: int,
+    on_signal_advanced: Optional[Callable[[Any, IoRet], None]] = None,
 ) -> Optional[Any]:
     reqid = ioret.reqid
     assert reqid is not None
@@ -476,30 +484,72 @@ def try_advance(
         logger.warning("try_advance: unknown ioret=%s tprank=%s", ioret, worker_tprank)
         return None
 
-    if worker_tprank not in state._worker_signals:
-        state._worker_signals[worker_tprank] = []
-    
-    worker_signals = state._worker_signals[worker_tprank]
-    
-    if len(worker_signals) >= state.signals_per_worker:
-        logger.warning(
-            "try_advance: dup worker=%s ioret=%s signals=%s",
-            worker_tprank,
-            ioret,
-            worker_signals,
-        )
-        return None
+    with state._signals_lock:
+        if worker_tprank not in state._worker_signals:
+            state._worker_signals[worker_tprank] = []
 
-    worker_signals.append(ioret)
-    
-    ready_workers_count = sum(
-        1 for signals in state._worker_signals.values()
-        if len(signals) >= state.signals_per_worker
-    )
-    
-    if ready_workers_count < tpsize:
-        return None
-    return state
+        worker_signals = state._worker_signals[worker_tprank]
+        expected_sources = tuple(getattr(state, "expected_sources", ()) or ())
+        if expected_sources:
+            if ioret.source is None:
+                logger.warning(
+                    "try_advance: missing source ioret=%s expected=%s",
+                    ioret,
+                    expected_sources,
+                )
+                return None
+            if ioret.source not in expected_sources:
+                logger.warning(
+                    "try_advance: unexpected source=%s ioret=%s expected=%s",
+                    ioret.source,
+                    ioret,
+                    expected_sources,
+                )
+                return None
+            if any(sig.source == ioret.source for sig in worker_signals):
+                logger.warning(
+                    "try_advance: dup source worker=%s ioret=%s signals=%s",
+                    worker_tprank,
+                    ioret,
+                    worker_signals,
+                )
+                return None
+
+            worker_signals.append(ioret)
+            if on_signal_advanced is not None:
+                on_signal_advanced(state, ioret)
+            ready_workers_count = sum(
+                1 for signals in state._worker_signals.values()
+                if all(
+                    any(sig.source == source for sig in signals)
+                    for source in expected_sources
+                )
+            )
+            if ready_workers_count < tpsize:
+                return None
+            return state
+
+        if len(worker_signals) >= state.signals_per_worker:
+            logger.warning(
+                "try_advance: dup worker=%s ioret=%s signals=%s",
+                worker_tprank,
+                ioret,
+                worker_signals,
+            )
+            return None
+
+        worker_signals.append(ioret)
+        if on_signal_advanced is not None:
+            on_signal_advanced(state, ioret)
+
+        ready_workers_count = sum(
+            1 for signals in state._worker_signals.values()
+            if len(signals) >= state.signals_per_worker
+        )
+
+        if ready_workers_count < tpsize:
+            return None
+        return state
 
 
 class CodeError(Exception):

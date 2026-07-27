@@ -77,6 +77,7 @@ class RDMAStagedServer : public RDMAServer {
 
  private:
   std::vector<void*> gpu_ptrs_;
+  size_t layer_blk_size_{0};
   mutable std::mutex staged_mtx_;
   mutable std::unordered_map<uintptr_t, std::shared_ptr<StagedBufferGuard>> staged_guards_;
 };

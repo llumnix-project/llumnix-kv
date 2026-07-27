@@ -6,9 +6,66 @@
 #include "common.h"
 #include "envcfg.h"
 #include "channel.h"
+#include "thrid_party/logging.h"
+#include <limits>
+#include <stdexcept>
 #include <vector>
 
 namespace blade_llm {
+
+// Per-layer address ranges used while parse_block emits IpcBlocks.  Capacity
+// is computed once for each cache tensor; every emitted range is checked
+// before it is appended, avoiding a second O(number_of_ipc_blocks) pass.
+struct IpcBlockBounds {
+  size_t src_capacity;
+  size_t dst_capacity;
+  size_t src_length_scale;
+  size_t cache_idx;
+};
+
+IpcBlockBounds make_ipc_block_bounds(
+    const WorkerInfo& src_worker_info,
+    const WorkerInfo& dst_worker_info,
+    size_t cache_idx);
+
+inline void append_ipc_block_checked(
+    std::vector<IpcBlock>& blocks,
+    const IpcBlockBounds& bounds,
+    size_t src_offset,
+    size_t dst_offset,
+    size_t length) {
+  const bool src_length_overflow = bounds.src_length_scale == 0 ||
+      length > std::numeric_limits<size_t>::max() / bounds.src_length_scale;
+  const size_t effective_src_length = src_length_overflow
+      ? std::numeric_limits<size_t>::max()
+      : length * bounds.src_length_scale;
+  const bool src_invalid = length == 0 || src_length_overflow ||
+      src_offset > bounds.src_capacity ||
+      effective_src_length > bounds.src_capacity - src_offset;
+  const bool dst_invalid = length == 0 ||
+      dst_offset > bounds.dst_capacity ||
+      length > bounds.dst_capacity - dst_offset;
+  if (src_invalid || dst_invalid) {
+    const bool source_failed = src_invalid;
+    LOG(ERROR) << "KVT GPU buffer range validation failed"
+               << ",copy_path=parse_block_generation"
+               << ",layer_idx=0"
+               << ",tensor_idx=" << bounds.cache_idx
+               << ",block_idx=" << blocks.size()
+               << ",offset_kind=" << (source_failed ? "src" : "dst")
+               << ",src_offset=" << src_offset
+               << ",dst_offset=" << dst_offset
+               << ",length=" << length
+               << ",length_scale="
+               << (source_failed ? bounds.src_length_scale : 1)
+               << ",effective_length="
+               << (source_failed ? effective_src_length : length)
+               << ",capacity="
+               << (source_failed ? bounds.src_capacity : bounds.dst_capacity);
+    throw std::out_of_range("KVT GPU buffer range validation failed");
+  }
+  blocks.emplace_back(src_offset, dst_offset, length);
+}
 
 // ParseBlock function type: parse KV cache blocks for transfer.
 //
@@ -45,6 +102,7 @@ void do_parse_block_send_p_eq_d(
   size_t block_size,
   size_t token_size,
   const ReqSendTask *task,
+  const IpcBlockBounds& bounds,
   std::vector<IpcBlock> &per_cache_send_blocks
 );
 
@@ -59,6 +117,8 @@ void parse_block_send_gt(
   const std::vector<uint32_t>& d_blocks,
   uint32_t wrote_tokens,
   uint32_t left_tokens,
+  const IpcBlockBounds& bounds,
+  bool swap_offsets,
   std::vector<IpcBlock> &per_cache_send_blocks
 );
 
@@ -75,6 +135,7 @@ void emit_zero_fill_segments(
   size_t dst_off,
   size_t length,
   size_t max_seg,
+  const IpcBlockBounds& bounds,
   std::vector<IpcBlock> &per_cache_send_blocks
 );
 
@@ -165,6 +226,83 @@ void vllm_parse_hybrid_block_send_p_gt_d(
   std::vector<std::vector<IpcBlock>> &send_blocks
 );
 
+void vllm_parse_hybrid_block_send_p_lt_d(
+  const WorkerInfo *src_worker_info,
+  const WorkerInfo *dst_worker_info,
+  const std::bitset<MAX_TP_SIZE>& valid_ranks,
+  uint32_t kvt_tp_size,
+  uint32_t kvt_tp_rank,
+  const ReqSendTask *task,
+  std::vector<std::vector<IpcBlock>> &send_blocks
+);
+
+// KDA state pages (community vLLM layout). These functions intentionally
+// parse only the leading `num_gdn_layers` linear-attention block groups. They
+// reuse GDN's state-shape metadata without calling or changing GDN helpers.
+// They are exported now so the KDA layout and TP remapping can be tested
+// independently; cache-shape registration and the hybrid attention wrapper
+// are added with the vLLM connector integration.
+void parse_kda_block_send_p_eq_d(
+  const WorkerInfo *src_worker_info,
+  const WorkerInfo *dst_worker_info,
+  const std::bitset<MAX_TP_SIZE>& valid_ranks,
+  uint32_t kvt_tp_size,
+  uint32_t kvt_tp_rank,
+  const ReqSendTask *task,
+  std::vector<std::vector<IpcBlock>> &send_blocks
+);
+
+void parse_kda_block_send_p_gt_d(
+  const WorkerInfo *src_worker_info,
+  const WorkerInfo *dst_worker_info,
+  const std::bitset<MAX_TP_SIZE>& valid_ranks,
+  uint32_t kvt_tp_size,
+  uint32_t kvt_tp_rank,
+  const ReqSendTask *task,
+  std::vector<std::vector<IpcBlock>> &send_blocks
+);
+
+void parse_kda_block_send_p_lt_d(
+  const WorkerInfo *src_worker_info,
+  const WorkerInfo *dst_worker_info,
+  const std::bitset<MAX_TP_SIZE>& valid_ranks,
+  uint32_t kvt_tp_size,
+  uint32_t kvt_tp_rank,
+  const ReqSendTask *task,
+  std::vector<std::vector<IpcBlock>> &send_blocks
+);
+
+// KIMI_K3_MLA_CACHE_SHAPE: leading KDA groups + one replicated MLA group.
+void parse_kimi_k3_mla_block_send_p_eq_d(
+  const WorkerInfo *src_worker_info,
+  const WorkerInfo *dst_worker_info,
+  const std::bitset<MAX_TP_SIZE>& valid_ranks,
+  uint32_t kvt_tp_size,
+  uint32_t kvt_tp_rank,
+  const ReqSendTask *task,
+  std::vector<std::vector<IpcBlock>> &send_blocks
+);
+
+void parse_kimi_k3_mla_block_send_p_gt_d(
+  const WorkerInfo *src_worker_info,
+  const WorkerInfo *dst_worker_info,
+  const std::bitset<MAX_TP_SIZE>& valid_ranks,
+  uint32_t kvt_tp_size,
+  uint32_t kvt_tp_rank,
+  const ReqSendTask *task,
+  std::vector<std::vector<IpcBlock>> &send_blocks
+);
+
+void parse_kimi_k3_mla_block_send_p_lt_d(
+  const WorkerInfo *src_worker_info,
+  const WorkerInfo *dst_worker_info,
+  const std::bitset<MAX_TP_SIZE>& valid_ranks,
+  uint32_t kvt_tp_size,
+  uint32_t kvt_tp_rank,
+  const ReqSendTask *task,
+  std::vector<std::vector<IpcBlock>> &send_blocks
+);
+
 // DPSK_V32_SPARSE_MLA_SHAPE
 void vllm_parse_block_send_multi_tensor_p_eq_d(
   const WorkerInfo *src_worker_info,
@@ -229,6 +367,16 @@ void vllm_parse_qwen3_next_flashinfer_block_send_p_eq_d(
 );
 
 void vllm_parse_qwen3_next_flashinfer_block_send_p_gt_d(
+  const WorkerInfo *src_worker_info,
+  const WorkerInfo *dst_worker_info,
+  const std::bitset<MAX_TP_SIZE>& valid_ranks,
+  uint32_t kvt_tp_size,
+  uint32_t kvt_tp_rank,
+  const ReqSendTask *task,
+  std::vector<std::vector<IpcBlock>> &send_blocks
+);
+
+void vllm_parse_qwen3_next_flashinfer_block_send_p_lt_d(
   const WorkerInfo *src_worker_info,
   const WorkerInfo *dst_worker_info,
   const std::bitset<MAX_TP_SIZE>& valid_ranks,

@@ -25,6 +25,8 @@ void parse_flashinfer_HND_block(
   uint32_t attn_group_n,
   uint32_t attn_group_off,
   int num_kv_heads,
+  const IpcBlockBounds& bounds,
+  bool swap_offsets,
   std::vector<IpcBlock> &per_cache_send_blocks
 ) {
   assert(num_kv_heads > 0);
@@ -55,8 +57,14 @@ void parse_flashinfer_HND_block(
                           + static_cast<size_t>(head_idx) * d_head_section_size
                           + static_cast<size_t>(token_idx) * head_dim_size;
       const size_t dv_off = dk_off + d_kv_section_size;
-      per_cache_send_blocks.emplace_back(pk_off, dk_off, length);
-      per_cache_send_blocks.emplace_back(pv_off, dv_off, length);
+      append_ipc_block_checked(
+          per_cache_send_blocks, bounds,
+          swap_offsets ? dk_off : pk_off,
+          swap_offsets ? pk_off : dk_off, length);
+      append_ipc_block_checked(
+          per_cache_send_blocks, bounds,
+          swap_offsets ? dv_off : pv_off,
+          swap_offsets ? pv_off : dv_off, length);
     }
     wrote_tokens += tokens;
     left_tokens -= tokens;
@@ -66,9 +74,11 @@ void parse_flashinfer_HND_block(
 // used for qwen3-next's flashinfer attn block parsing
 // kv cache stride per kernel block:
 //   (num_kernel_blocks, 2, num_kv_heads, kernel_block_size, head_dim)
-// Within a kernel block: K first then V; each head's kbs * head_dim is contiguous per segment.
-// K/V segments in dst kernel block are merged by attn_group_n TP groups:
-//   K: [K_group0(num_kv_heads * dst_kbs * head_dim), K_group1, ...] V follows the same pattern
+// Within one kernel block, K comes before V. Each head occupies a contiguous
+// kbs * head_dim region in each section. In the destination kernel block,
+// the K/V sections from attn_group_n TP groups are merged:
+//   K: [K_group0(num_kv_heads * dst_kbs * head_dim), K_group1, ...],
+// followed by V in the same layout.
 void parse_hybrid_flashinfer_HND_block(
   size_t p_token_size,
   size_t d_token_size,
@@ -85,32 +95,34 @@ void parse_hybrid_flashinfer_HND_block(
   uint32_t src_attn_kernel_blk_ntpb,
   uint32_t dst_attn_kernel_blk_ntpb,
   int num_kv_heads,
+  const IpcBlockBounds& bounds,
+  bool swap_offsets,
   std::vector<IpcBlock> &per_cache_send_blocks
 ) {
   // parse attention block
   const auto p_kernel_blk_size = src_attn_kernel_blk_ntpb * p_token_size;
   const auto d_kernel_blk_size = dst_attn_kernel_blk_ntpb * d_token_size;
-  // K and V each occupy half of the kernel block
+  // K and V each occupy half of the kernel block.
   const auto p_kv_section_size = p_kernel_blk_size / 2;
   const auto d_kv_section_size = d_kernel_blk_size / 2;
   assert(p_kv_section_size * 2 == p_kernel_blk_size);
   assert(d_kv_section_size * 2 == d_kernel_blk_size);
-  // p_token_size = 2 * num_kv_heads * head_dim  =>  head_dim byte size
+  // p_token_size = 2 * num_kv_heads * head_dim; derive head_dim in bytes.
   assert(num_kv_heads > 0);
   assert(p_token_size % (2 * static_cast<size_t>(num_kv_heads)) == 0);
   const size_t head_dim_size = p_token_size / 2 / static_cast<size_t>(num_kv_heads);
-  // Bytes occupied by each head within a kernel block (K or V side only)
+  // Bytes occupied by each head in one K or V side of a kernel block.
   const auto p_head_section_size = src_attn_kernel_blk_ntpb * head_dim_size;
   const auto d_head_section_size = dst_attn_kernel_blk_ntpb * head_dim_size;
-  // Bytes per TP group in dst kernel block for K (or V)
+  // K (or V) bytes occupied by each TP group in the destination kernel block.
   const auto per_group_kv_size = static_cast<size_t>(num_kv_heads) * d_head_section_size;
   assert(per_group_kv_size * attn_group_n == d_kv_section_size);
 
   while (left_tokens > 0) {
-    // kv manager allocates blocks using the original block size
-    // but the internal layout of each block is reshaped by attn_kernel_blk_ntpb
-    // token idx is relative to the kernel block, not the entire block
-    // kernel_blk_idx: kernel block id within the block
+    // The KV manager allocates blocks using the original block size, while
+    // attn_kernel_blk_ntpb reshapes the layout within each block. token_idx
+    // is therefore relative to a kernel block rather than the whole block.
+    // kernel_blk_idx is the kernel-block ID within the block.
     const auto p_blk_idx = wrote_tokens / p_ntpb;
     const auto p_kernel_blk_idx = (wrote_tokens - p_blk_idx * p_ntpb) / src_attn_kernel_blk_ntpb;
     const auto p_token_idx_base = wrote_tokens % src_attn_kernel_blk_ntpb;
@@ -128,7 +140,8 @@ void parse_hybrid_flashinfer_HND_block(
       {src_attn_kernel_blk_ntpb - p_token_idx_base, dst_attn_kernel_blk_ntpb - d_token_idx_base, left_tokens}
     );
 
-    // In HND layout, data for 'tokens' tokens within each head is physically contiguous in src/dst
+    // In HND layout, token data within each head is physically contiguous
+    // in both source and destination.
     const auto length = static_cast<size_t>(tokens) * head_dim_size;
     for (int head_idx = 0; head_idx < num_kv_heads; ++head_idx) {
       const size_t pk_off = p_kernel_blk_off
@@ -140,10 +153,14 @@ void parse_hybrid_flashinfer_HND_block(
                           + static_cast<size_t>(head_idx) * d_head_section_size
                           + d_token_idx_base * head_dim_size;
       const size_t dv_off = dk_off + d_kv_section_size;
-      // K
-      per_cache_send_blocks.emplace_back(pk_off, dk_off, length);
-      // V
-      per_cache_send_blocks.emplace_back(pv_off, dv_off, length);
+      append_ipc_block_checked(
+          per_cache_send_blocks, bounds,
+          swap_offsets ? dk_off : pk_off,
+          swap_offsets ? pk_off : dk_off, length);
+      append_ipc_block_checked(
+          per_cache_send_blocks, bounds,
+          swap_offsets ? dv_off : pv_off,
+          swap_offsets ? pv_off : dv_off, length);
     }
 
     wrote_tokens += tokens;
@@ -151,15 +168,16 @@ void parse_hybrid_flashinfer_HND_block(
   }
 }
 
-// Fill tail empty slots of the last decode block in qwen3-next FlashInfer HND (P>D).
-// Token-granularity transfer only writes seen+new tokens; the last dst block has only
-// total % d_ntpb tokens written; tail slots [filled, d_ntpb) remain uninitialized.
+// Fill unused tail slots in the final qwen3-next FlashInfer HND decode block
+// for P>D. Token-granularity transfer writes only seen+new tokens, so the
+// final destination block contains total % d_ntpb initialized tokens and
+// leaves [filled, d_ntpb) uninitialized.
 //
-// Since prefill block 0 (src_blocks[0]) is all zeros, the goal is to zero out the decode side's
-// last block unfilled portion; no need for per-token parsing: in HND layout
-// tokens within each head are contiguous, so the unfilled tail is a single contiguous range;
-// just send one IpcBlock per head for K/V. src points to the zero data at block 0 start
-// (block is all zeros, any equal-length range will do).
+// Prefill block 0 (src_blocks[0]) contains only zeros. Since the goal is to
+// clear the unfilled tail of the final decode block, token-by-token parsing
+// is unnecessary: tokens are contiguous within each head in HND layout, so
+// one IpcBlock for each head's K and V tail is sufficient. Every source points
+// at zero data at the beginning of block 0; any equal-length region would work.
 void fill_last_hybrid_flashinfer_HND_block(
   size_t p_token_size,
   size_t d_token_size,
@@ -171,6 +189,7 @@ void fill_last_hybrid_flashinfer_HND_block(
   uint32_t total_tokens,
   uint32_t attn_group_off,
   int num_kv_heads,
+  const IpcBlockBounds& bounds,
   std::vector<IpcBlock> &per_cache_send_blocks
 ) {
   if (total_tokens == 0) {
@@ -178,11 +197,11 @@ void fill_last_hybrid_flashinfer_HND_block(
   }
   const uint32_t filled = total_tokens % d_ntpb;
   if (filled == 0) {
-    // The last dst block is exactly full, no padding needed
+    // The final destination block is full; no padding is needed.
     return;
   }
   const uint32_t remaining = d_ntpb - filled;
-  const uint32_t d_blk_idx = total_tokens / d_ntpb;  // the last (partially filled) block
+  const uint32_t d_blk_idx = total_tokens / d_ntpb;  // Final partially filled block.
   assert(d_blk_idx < dst_blocks.size());
   assert(num_kv_heads > 0);
   assert(p_token_size % (2 * static_cast<size_t>(num_kv_heads)) == 0);
@@ -193,7 +212,7 @@ void fill_last_hybrid_flashinfer_HND_block(
   const size_t per_group_kv_size = static_cast<size_t>(num_kv_heads) * d_head_section_size;
   const size_t length = static_cast<size_t>(remaining) * head_dim_size;
 
-  // Block 0 is all zeros; any start position is zero data, just use block start.
+  // Block 0 contains only zeros, so always use its beginning.
   const size_t zero_src_off = src_blocks.at(0) * p_block_size;
   const size_t d_blk_off = dst_blocks.at(d_blk_idx) * d_block_size;
 
@@ -203,10 +222,15 @@ void fill_last_hybrid_flashinfer_HND_block(
                         + static_cast<size_t>(head_idx) * d_head_section_size
                         + filled * head_dim_size;
     const size_t dv_off = dk_off + d_kv_section_size;
-    // K / V tail: one contiguous range each, overwritten with zeros. If segment exceeds block 0 size,
-    // (extreme asymmetric config) split by p_block_size to keep each src segment within block 0.
-    emit_zero_fill_segments(zero_src_off, dk_off, length, p_block_size, per_cache_send_blocks);
-    emit_zero_fill_segments(zero_src_off, dv_off, length, p_block_size, per_cache_send_blocks);
+    // Each K/V tail is contiguous and overwritten with zeros. If one segment
+    // exceeds the size of block 0 under an extremely asymmetric configuration,
+    // split it by p_block_size so every source segment remains within block 0.
+    emit_zero_fill_segments(
+        zero_src_off, dk_off, length, p_block_size, bounds,
+        per_cache_send_blocks);
+    emit_zero_fill_segments(
+        zero_src_off, dv_off, length, p_block_size, bounds,
+        per_cache_send_blocks);
   }
 }
 
@@ -255,6 +279,7 @@ void vllm_parse_flashinfer_block_send_p_eq_d(
 
   send_blocks.resize(1);
   std::vector<IpcBlock> &per_cache_send_blocks = send_blocks.at(0);
+  const auto bounds = make_ipc_block_bounds(*p_info, *d_info, 0);
   parse_flashinfer_HND_block(
     p_token_size, d_token_size,
     p_block_size, d_block_size,
@@ -264,6 +289,8 @@ void vllm_parse_flashinfer_block_send_p_eq_d(
     1, // attn_group_n
     0, // attn_group_off
     per_tp_kv_heads,
+    bounds,
+    false,
     per_cache_send_blocks
   );
 }
@@ -320,6 +347,7 @@ void vllm_parse_flashinfer_block_send_p_gt_d(
 
   send_blocks.resize(1);
   std::vector<IpcBlock> &per_cache_send_blocks = send_blocks.at(0);
+  const auto bounds = make_ipc_block_bounds(*p_info, *d_info, 0);
   parse_flashinfer_HND_block(
     p_token_size, d_token_size,
     p_block_size, d_block_size,
@@ -329,6 +357,8 @@ void vllm_parse_flashinfer_block_send_p_gt_d(
     attn_group_n,
     attn_group_off,
     per_tp_kv_heads,
+    bounds,
+    false,
     per_cache_send_blocks
   );
 }

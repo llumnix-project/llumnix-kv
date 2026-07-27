@@ -37,21 +37,21 @@ struct ReqMeta {
   std::optional<WorkerInfo> dst_worker_info;
 };
 
-// Holds meta information for a specific step/substep
+// Metadata for a specific step/substep.
 struct StepMetas {
   size_t stepid;
   uint32_t substepid;
   std::vector<ReqMeta> metas;
 };
 
-// StepTasks struct, contains substep-related information
+// StepTasks contains substep-related information.
 struct StepTasks {
-  // Maps InstanceId -> [(WorkerId, BatchSendTask)]
+  // Maps InstanceId to [(WorkerId, BatchSendTask)].
   std::unordered_map<InstanceId, std::vector<std::pair<WorkerId, BatchSendTask>>> tasks;
-  // substep identifier
+  // Substep identifier.
   size_t stepid = 0;
   uint32_t substepid = 0;
-  // sub_send_ts: substep task submission timestamp
+  // sub_send_ts: submission time of the substep task.
   const Timepoint send_ts;
 
 public:
@@ -87,7 +87,7 @@ class KvTransferClient : public noncopyable {
                   const std::optional<std::string> &dst_worker_info = std::nullopt);
   void remove_target(const InstanceId &, const WorkerId &);
 
-  // ReqMeta will be moved.
+  // ReqMeta is moved.
   // thread safe
   void start_req_send(std::vector<ReqMeta>& metas, size_t stepid, uint32_t substepid);
 
@@ -110,18 +110,19 @@ class KvTransferClient : public noncopyable {
                          size_t stepid,
                          uint32_t substepid);
 
-  // start_send begins a new step
-  // stepid: step identifier, passed from the caller
-  // sched_tokens: number of tokens scheduled in this step, used for optimization
-  //   - sched_tokens == 0: skip Step/StepGuard creation, return EMPTY_STEP_ID
-  //   - sched_tokens > 0: create Step/StepGuard even if targets_tasks_buf_ is empty
+  // start_send begins a step.
+  // stepid: step identifier supplied by the caller.
+  // sched_tokens: number of tokens scheduled in this step, used for optimization.
+  //   - sched_tokens == 0: skip Step/StepGuard creation and return EMPTY_STEP_ID.
+  //   - sched_tokens > 0: create Step/StepGuard even if targets_tasks_buf_ is empty.
   size_t start_send(size_t stepid, size_t sched_tokens);
 
   void notify_event_record(size_t step_id);
   void flush_send(size_t step_id);
 
-  // start_send_substep appends send tasks to the current step (called from disaggw thread)
-  // metas: nonfreeze_metas, has_freeze=false, has_last_token may be false
+  // start_send_substep appends send tasks to the current step; it is called
+  // from the disagg worker thread.
+  // metas: nonfreeze_metas with has_freeze=false; has_last_token may be false.
   void start_send_substep(size_t stepid, uint32_t substepid, std::vector<ReqMeta>& metas);
 
   Context *context() { return ctx_.get(); };
@@ -152,7 +153,7 @@ class KvTransferClient : public noncopyable {
     }
   };
 
-  // All state transitions happen in mgr_thd_.
+  // All operation state transitions happen in mgr_thd_.
   class TargetMgr {
     // OWNER: GLOBAL
     Context* const ctx_ = nullptr;
@@ -209,15 +210,15 @@ class KvTransferClient : public noncopyable {
   static_assert(std::atomic<size_t>::is_always_lock_free);
   std::unique_ptr<Context> ctx_;
   std::unordered_map<RequestId, std::vector<std::shared_ptr<RequestInfo>>> reqs_;
-  // Temporary buffer for send tasks created by submit_req_send/submit_delta_send.
-  // start_send() clears this field.
-  // Semantically corresponds to substep with substepid=0
+  // Temporarily stores send tasks created by submit_req_send/submit_delta_send.
+  // start_send() clears this field. Semantically this is the substep with
+  // substepid=0.
   StepTasks targets_tasks_buf_;
   ThreadPool single_thd_;
   TargetMgr mgr_;
 
   // ========== Thread coordination state ==========
-  // lock protects the following fields
+  // lock protects the following fields.
   mutable std::mutex coord_lock_;
   size_t coord_step_id_{0};
   std::shared_ptr<StepGuard> last_step_guard_;

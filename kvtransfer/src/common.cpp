@@ -63,7 +63,8 @@ std::string WorkerInfo::to_string() const {
      << (uint32_t)transfer_protocols << ","
      << attn_kernel_blk_ntpb << ","
      << indexer_blk_ntpb << ","
-     << attn_pack_size;
+     << attn_pack_size << ","
+     << kda_page_stride;
   if (!addr.empty()) {
     if (addr.size() > MAX_ADDRESS_LEN) {
       throw std::runtime_error("invalid worker address, too large;");
@@ -76,7 +77,7 @@ std::string WorkerInfo::to_string() const {
 WorkerInfo WorkerInfo::from_string(const std::string &src) {
   WorkerInfo w;
   std::vector<std::string> tmp;
-  tmp.reserve(13);
+  tmp.reserve(14);
 
   size_t start = 0;
   size_t end = src.find(',');
@@ -91,8 +92,10 @@ WorkerInfo WorkerInfo::from_string(const std::string &src) {
   //   - 11 fields: legacy payload without attn_pack_size and without addr
   //   - 12 fields: either legacy {..., indexer_blk_ntpb, addr} OR new
   //                {..., indexer_blk_ntpb, attn_pack_size}
-  //   - 13 fields: new {..., indexer_blk_ntpb, attn_pack_size, addr}
-  if (tmp.size() < 11 || tmp.size() > 13) {
+  //   - 13 fields: either {..., attn_pack_size, addr} OR
+  //                {..., attn_pack_size, kda_page_stride}
+  //   - 14 fields: {..., attn_pack_size, kda_page_stride, addr}
+  if (tmp.size() < 11 || tmp.size() > 14) {
     throw std::runtime_error("invalid worker info string;");
   }
 
@@ -112,6 +115,7 @@ WorkerInfo WorkerInfo::from_string(const std::string &src) {
   w.indexer_blk_ntpb = stoul(tmp[10]);
   // Default for missing attn_pack_size or older payloads.
   w.attn_pack_size = 1;
+  w.kda_page_stride = 0;
   if (tmp.size() == 11) {
     // legacy without addr, nothing more to parse
   } else if (tmp.size() == 12) {
@@ -121,10 +125,18 @@ WorkerInfo WorkerInfo::from_string(const std::string &src) {
     } else {
       w.addr = tmp[11];
     }
-  } else {
-    // 13 fields: attn_pack_size then addr
+  } else if (tmp.size() == 13) {
     w.attn_pack_size = stoul(tmp[11]);
-    w.addr = tmp[12];
+    if (is_numeric_token(tmp[12])) {
+      w.kda_page_stride = stoull(tmp[12]);
+    } else {
+      w.addr = tmp[12];
+    }
+  } else {
+    // 14 fields: attn_pack_size, kda_page_stride, then addr
+    w.attn_pack_size = stoul(tmp[11]);
+    w.kda_page_stride = stoull(tmp[12]);
+    w.addr = tmp[13];
   }
   if (w.attn_pack_size == 0) {
     w.attn_pack_size = 1;

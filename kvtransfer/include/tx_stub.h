@@ -32,11 +32,14 @@ struct BatchSendTask {
 public:
   std::shared_ptr<Step> step;
   std::vector<ReqSendTask> tasks;
-  // substepid is used for logging
+  // substepid is used for logging.
   uint32_t substepid = 0;
-  // send_ts records the sub_submit_ts of the corresponding substep
-  // Used to compute queue_us = iter_start_ts - send_ts
-  Timepoint send_ts;
+  // send_ts records the corresponding substep's sub_submit_ts value and is
+  // used to compute queue_us = iter_start_ts - send_ts.
+  // TargetMgr overwrites this with the actual submit timestamp in production.
+  // The default keeps direct send_batch() callers (including unit tests) from
+  // reporting time since the steady-clock epoch as queue latency.
+  Timepoint send_ts = SteadyClock::now();
 };
 
 class ISendStub {

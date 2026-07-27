@@ -234,7 +234,7 @@ def _local_version(version) -> str:
     version_parts = [local_ver]
     if int(os.environ.get("BLADELLM_CMAKE_DEBUG", 0)):
         version_parts.append('debug')
-    # NOTE: abusing python local version scheme... needs fix
+    # This repurposes the Python local version field and should be corrected.
     version_parts.append(f"barex.{_barex_ver()}")
     return '.'.join(version_parts)
 

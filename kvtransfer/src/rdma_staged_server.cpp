@@ -141,6 +141,9 @@ void RDMAStagedServer::start_server(Context *ctx) {
   WorkerInfo *winfo = ctx->worker_info_mutable();
   auto layer_num_blocks = ctx->layer_num_blocks();
   auto layer_ptr = ctx->layer_data_address();
+  RTASSERT(ctx->block_sizes().size() == 1 &&
+           "staged RDMA currently supports one cache tensor per layer");
+  self.layer_blk_size_ = ctx->block_sizes()[0] * layer_num_blocks;
   auto proto = TransferProtocol::rdma_direct();
   auto proto_ctx = ctx->get_protocol_ctx<BarexProtoContext>(proto);
   if (proto_ctx == nullptr) {
@@ -427,6 +430,22 @@ void RDMAStagedServer::StagedCtxCallback::handle_kv_cache_data(
   }
   void* layer_gpu_ptr = ptrs[layer_idx];
   assert(layer_gpu_ptr != nullptr);
+
+  const size_t layer_capacity = self.staged_server_->layer_blk_size_;
+  if (layer_capacity == 0) {
+    LOG(ERROR) << "RDMA staged H2D missing registered capacity"
+               << ",layer_idx=" << layer_idx << ",reqid=" << reqid;
+    return;
+  }
+  try {
+    validate_ipc_block_bounds(
+        blocks, layer_capacity, IpcBlockOffset::DESTINATION,
+        "rdma_staged_h2d", layer_idx, 0);
+  } catch (const std::exception& ex) {
+    LOG(ERROR) << "RDMA staged H2D rejected invalid copy metadata"
+               << ",reqid=" << reqid << ",ex=" << ex.what();
+    return;
+  }
 
   int device_id = self.staged_server_->ctx_->device_id();
   auto [device_blk_buffer, host_blk_buffer] = get_kernel_copy_buffer(device_id);

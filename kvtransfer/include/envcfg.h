@@ -14,11 +14,11 @@ int env_conn_tpsize();
 int env_h2d_sync_tpsize();
 int env_fsnaming_keepalive_interval_s();
 int env_fsnaming_tolerate_interval_s();
-// tx stub send failure rate: (RETURN - 1) / 100
+// Tx stub send failure rate: (RETURN - 1) / 100.
 int env_debug_tx_failrate();
 int env_debug_tx_delay_ms();
 
-// RETURN addr points to global memory, do not modify.
+// RETURN addr points to global storage and must not be modified.
 // NULL means the send-done mechanism is disabled.
 const struct sockaddr_in* env_send_done_addr();
 
@@ -46,6 +46,10 @@ constexpr int TURBOQUANT_CACHE_SHAPE = 6;
 // GDN/indexer follow QWEN3_NEXT layout; attn uses FLASHINFER HND:
 // (num_blocks, 2, num_kv_heads, block_size, head_dim)
 constexpr int QWEN3_NEXT_FLASHINFER_CACHE_SHAPE = 7;
+// Kimi K3 hybrid layout: leading KDA state block groups followed by one
+// rank-replicated MLA block group. Physical pages are sized by KDA and may
+// differ across P/D TP; only the real MLA prefix is copied for the MLA group.
+constexpr int KIMI_K3_MLA_CACHE_SHAPE = 8;
 
 int env_cache_shape();
 
@@ -53,8 +57,9 @@ constexpr int SEND_DONE_HEAD_KIND = 1;
 constexpr int SEND_SAVE_DONE_HEAD_KIND = 2;
 int env_send_done_head_kind();
 
-// RETURN addr points to global memory, do not modify.
-// Example: "4096,8000;8192,1000;" means pre-allocate 8000 buffers of 4096 bytes and 1000 of 8192 bytes.
+// RETURN addr points to global storage and must not be modified.
+// Example: "4096,8000;8192,1000;" preallocates 8000 4096-byte buffers and
+// 1000 8192-byte buffers.
 const std::vector<std::pair<uint64_t, int>>* env_reserve();
 
 int env_rpc_timeout_s();
@@ -86,10 +91,6 @@ double env_kernel_copy_sm_usage() noexcept;
 // 0 = disabled (default), 1 = enabled
 bool env_bf162fp8_conversion() noexcept;
 
-// Enable cache_transfer_spec path in tx_stub when
-// BLLM_KVTRANS_TX_PARSE_MODE=cache_spec.
-bool env_tx_use_cache_transfer_spec() noexcept;
-
 // For qwen3_next P>D token-granularity attn transfer: fill the unfilled tail
 // slots of the last decode-side attn block using the request's block 0 data,
 // so the decode kernel never reads uninitialized KV in the padded tail.
@@ -99,6 +100,8 @@ bool env_pad_last_attn_block() noexcept;
 // RDMA staged send: D2H to CPU buffer, then Send via RDMA Send/Recv
 // 0 = disabled (default, use GDR WriteBatch), 1 = enabled (staged D2H + Send)
 bool env_rdma_staged() noexcept;
+
+const char* env_nic_name() noexcept;
 
 
 }  // namespace blade_llm {

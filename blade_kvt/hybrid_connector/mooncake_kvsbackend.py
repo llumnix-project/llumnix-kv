@@ -20,9 +20,15 @@ from vllm.utils import EventPool
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.hybrid_connector import BackendMeta, HybridBackend, IoRet
+from vllm.v1.hybrid_connector import (
+    BackendMeta,
+    HybridBackend,
+    IoRet,
+    OperationPlan,
+)
 from vllm.v1.hybrid_connector.engine_proxy import (
     get_p_node_pop_len,
+    sched_discard_zero_block_ids,
     sched_get_kvblk_ids,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -164,6 +170,8 @@ class MooncakeKVSBackendMetadata(BackendMeta):
         return bool(self.metas)
 
 class MooncakeKVSBackend(HybridBackend):
+    SOURCE_LABEL = "kvs"
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -428,8 +436,13 @@ class MooncakeKVSBackend(HybridBackend):
 
         return _save_kv_layer(event)
 
-    def get_operations(self, req: Request) -> tuple[int, int]:
-        return int(should_load(req)), int(should_save(req))
+    def get_operations(self, req: Request) -> OperationPlan:
+        load_count = int(should_load(req))
+        save_count = int(should_save(req))
+        source = self.source_label()
+        load_sources = (source,) if load_count > 0 else ()
+        save_sources = (source,) if save_count > 0 else ()
+        return load_count, save_count, load_sources, save_sources
 
     async def async_get_num_new_matched_tokens(
         self,
@@ -485,6 +498,7 @@ class MooncakeKVSBackend(HybridBackend):
             num_computed_blocks : num_computed_blocks + num_matched_blocks]
         block_hashes_to_load = block_hashes[
             num_computed_blocks : num_computed_blocks + num_matched_blocks]
+        sched_discard_zero_block_ids(block_ids_to_load)
         self.metas_to_recv.append(
             ReqMeta(
                 request.request_id,
@@ -511,7 +525,11 @@ class MooncakeKVSBackend(HybridBackend):
                 ):
                     tasks.append(
                         hybridsched._do_save_done(
-                            rank, ioret=IoRet(req.request_id)
+                            rank,
+                            ioret=IoRet(
+                                reqid=req.request_id,
+                                source=self.source_label(),
+                            ),
                         )
                     )
 

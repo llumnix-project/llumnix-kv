@@ -188,8 +188,9 @@ BarexMRGuard::~BarexMRGuard() {
   RTASSERT(result == accl::barex::BAREX_SUCCESS);
 }
 
-// GPU 0 maps to NIC: RET[0]
-// filename format: vsolar_1,vsolar_1,...,vsolar_0,...
+// GPU 0 corresponds to NIC RET[0].
+// filename format:
+// vsolar_1,vsolar_1,vsolar_1,vsolar_1,vsolar_0,vsolar_0,vsolar_0,vsolar_0
 static std::vector<std::string> load_nic_affinity(const char* filename) {
   auto file = std::ifstream(filename);
   if (!file.is_open()) {
@@ -222,7 +223,7 @@ static const std::vector<std::string>& get_nic_affinity() noexcept {
 }
 
 // CUDA_VISIBLE_DEVICES=4,5,6,7
-// Returns empty if CUDA_VISIBLE_DEVICES is not set.
+// Return an empty value when CUDA_VISIBLE_DEVICES is not set.
 static std::vector<int> parse_cuda_visible_devs() {
   const char* env_data = getenv("CUDA_VISIBLE_DEVICES");
   if (env_data == nullptr) {
@@ -262,6 +263,21 @@ static XDevice* choose_nic(const std::vector<XDevice *> &nic_devs, int gpu_dev) 
   assert(gpu_dev >= 0);
   assert(!nic_devs.empty());
 
+  const char* nic_override = blade_llm::env_nic_name();
+  if (nic_override != nullptr) {
+    std::string target_nic(nic_override);
+    for (auto* nic_dev : nic_devs) {
+      if (nic_dev->GetName().find(target_nic) != std::string::npos) {
+        LOG(INFO) << "choose_nic override. gpu_dev=" << gpu_dev
+                  << ", target_nic=" << target_nic
+                  << ", matched=" << nic_dev->GetName();
+        return nic_dev;
+      }
+    }
+    LOG(WARNING) << "choose_nic override nic not found: " << target_nic
+                 << ", falling back to affinity";
+  }
+
   int real_gpu_rank = gpu_dev;
   const auto& cuda_visible_env = get_cuda_visible_devs();
   if (!cuda_visible_env.empty()) {
@@ -277,7 +293,8 @@ static XDevice* choose_nic(const std::vector<XDevice *> &nic_devs, int gpu_dev) 
     }
   }
 
-  // XPU requires NIC affinity; kvtransfer may fail to send data without it.
+  // XPU transfers require explicit NIC affinity.
+  // XPU requires NIC affinity; without it, KV transfer may be unable to send.
   auto* dev = uint32_t(gpu_dev) >= nic_devs.size() ? nic_devs[0] : nic_devs[gpu_dev];
   LOG(WARNING) << "choose_nic fallback, may not work on XPU. gpu_dev=" << gpu_dev
                << ", dev=" << dev->GetName();
@@ -403,10 +420,11 @@ BarexCtx::BarexCtx(std::string mp_name,
   mp_reserve(mp);
 
   const auto &layer_infos = ctx->all_layer_infos();
-  // accl.barex max MR count is 65536, so registered cache tensor count must be <= 65536.
-  // Since LAYER_NUM_MAX is far below 65536, the LAYER_NUM_MAX limit suffices.
+  // accl.barex supports at most 65536 registered MRs, so the number of
+  // registered cache tensors must not exceed 65536. Since LAYER_NUM_MAX is
+  // much smaller, enforcing LAYER_NUM_MAX is sufficient.
   RTASSERT(layer_infos.size() * layer_infos[0].size() <= LAYER_NUM_MAX);
-  // Each MR has a default size limit of 1GB.
+  // Each MR has a default size limit of 1 GiB.
   size_t max_mr_size = 1L * 1024 * 1024 * 1024;
   const char *max_mr_gb_str = getenv("ACCL_MAX_USER_MR_GB");
   if (max_mr_gb_str != nullptr) {
@@ -421,7 +439,7 @@ BarexCtx::BarexCtx(std::string mp_name,
     auto layer_blk_size = block_sizes[i] * ctx->layer_num_blocks();
     LOG(INFO) << "layer size(layer_blk_size) = " << layer_blk_size
                           << ", max_mr_size = " << max_mr_size;
-    // If this fails, set the ACCL_MAX_USER_MR_GB environment variable
+    // If this fails, configure ACCL_MAX_USER_MR_GB.
     RTASSERT(layer_blk_size <= max_mr_size);
   }
 
@@ -436,8 +454,8 @@ BarexCtx::BarexCtx(std::string mp_name,
       auto layer_blk_p = reinterpret_cast<void *>(info.layer_addr);
       auto layer_blk_size = info.block_size * ctx->layer_num_blocks(); // size_t * uint32_t = size_t
       if (kind == TransferProtocol::Kind::RDMA_DIRECT){
-        // Although docs say RegUserMr requires alignment, cudaMalloc
-        // addresses are always acceptable. layer_blk_size of each tensor in one layer may
+        // RegUserMr documentation mentions alignment, but any address returned
+        // by cudaMalloc is accepted. layer_blk_size of each tensor in one layer may
         // not be the same so we need to register each tensor as a separate mr
         auto result = self.mp_->RegUserMr(out, layer_blk_p, layer_blk_size, GPU,
                                           ctx->device_id());
@@ -449,7 +467,7 @@ BarexCtx::BarexCtx(std::string mp_name,
         LOG(INFO) << "RegUserMr. layer_blk_p=" << layer_blk_p
                   << ", layer_blk_size=" << layer_blk_size
                   << ", gpuid=" << ctx->device_id();
-        if (env_crc()) { // TODO: TCP CRC could be simplified by comparing with the allocated CPU buffer
+        if (env_crc()) { // TODO: Simplify TCP CRC by comparing the allocated CPU buffer directly?
           auto desc = gdrcpy_mmap(layer_blk_p, layer_blk_size);
           layer_gdrcpy_mem.emplace_back(std::move(desc));
         } else {
@@ -594,8 +612,8 @@ static int get_port() {
   return portno;
 }
 
-// barex listen binds INADDR_ANY, so we return any externally reachable IP.
-// Same rule as vllm get_ip
+// Barex listen binds INADDR_ANY, so any externally reachable IP is valid.
+// Follow the same selection rule as vLLM get_ip.
 void get_ip(char *info_ip, size_t bufcap) {
   const auto* vllm_host_ip = getenv("VLLM_HOST_IP");
   if (vllm_host_ip != nullptr && vllm_host_ip[0] != '\0') {
@@ -674,7 +692,7 @@ Connect(XConnector &self, std::string server_addr, int port) {
 void delete_channels(CliBarexCtx* ctx, std::vector<BarexChannel> chs) {
   auto& tp = ctx->close_tp();
   tp.spawn([chs=std::move(chs)] () {
-    // Destroy channels in background thread.
+    // Destroy chs on a background thread.
   });
   assert(chs.empty());
   return;
@@ -761,7 +779,7 @@ struct DataPtrCtx {
 public:
   DataPtrCtx(void* p, XAllocator* a, int g, size_t s) noexcept:
     ptr(p), allocator(a), gpu_id(g), size(s) {
-    // DataPtrCtx construction is rare, logging is fine.
+    // DataPtrCtx construction is rare, so logging here is acceptable.
     auto& self = *this;
     LOG(INFO) << "DataPtrCtx. ptr=" << self.ptr
               << ", allocator=" << self.allocator
@@ -773,7 +791,7 @@ public:
   ~DataPtrCtx() {
     auto& self = *this;
     self.allocator->Release(self.ptr);
-    // DataPtrCtx destruction is rare, logging is fine.
+    // DataPtrCtx destruction is rare, so logging here is acceptable.
     LOG(INFO) << "~DataPtrCtx. ptr=" << self.ptr
               << ", allocator=" << self.allocator
               << ", gpu_id=" << self.gpu_id
@@ -798,7 +816,8 @@ PyObject* alloc_phy_cont_mem(size_t size, PyObject* device) {
   auto [_, mp] = g_mp_manager.get_gpu_ctx(gpu_id, TransferProtocol::Kind::RDMA_DIRECT);
   auto result = mp->GetXAllocator(gpu_allocator, GPU);
   RTASSERT(result == accl::barex::BAREX_SUCCESS);
-  // cudaMalloc guarantees at least 256-byte alignment. Alignment does not apply on PPU.
+  // cudaMalloc is at least 256-byte aligned. align is ineffective on PPU,
+  // where KV cache alignment is not guaranteed.
   void* const buf = gpu_allocator->Alloc(size, gpu_id, nullptr /* attr */, 512 /* align */);
   auto* dpctx = new DataPtrCtx(buf, gpu_allocator, gpu_id, size);
   auto data_ptr = c10::DataPtr(buf, dpctx, DataPtrCtxDeleter, dev->device);

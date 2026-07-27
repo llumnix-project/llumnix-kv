@@ -43,7 +43,7 @@ namespace blade_llm {
 // +-------+-------+------------+
 // | magic | reqid |  rpc body  |
 // rpc header: magic: 4 bytes. reqid: 8 bytes.
-// rpc body: req/resp body decoded according to magic.
+// RPC body: decode the request/response body according to its magic value.
 inline constexpr size_t RPC_HEADER = sizeof(uint32_t) + sizeof(uint64_t);
 
 inline std::pair<uint32_t, uint64_t> deser_rpc_header(const char* buf) noexcept {
@@ -121,8 +121,8 @@ private:
 class BarexMRGuard : public noncopyable {
   accl::barex::memp_t mr_;
   accl::barex::XSimpleMempool *mp_ = nullptr; // owner: BarexCtx
-  bool const release_; // if true, use ReleaseAndDeregBuffer; otherwise only DeregUserMr
-  bool const dereg_; // TCP hostbuffers need release but not deregistration
+  bool const release_; // Use ReleaseAndDeregBuffer when true; otherwise DeregUserMr.
+  bool const dereg_; // TCP host buffers need release but not MR deregistration.
  private:
   BarexMRGuard(accl::barex::memp_t &&mr, accl::barex::XSimpleMempool *mp, bool r, bool d) noexcept:
       mr_(std::move(mr)),
@@ -194,7 +194,7 @@ struct BarexCtx : public noncopyable {
   }
   
  private:
-  // Member order determines destruction order.
+  // Member order determines destruction order; keep it intentional.
   int device_id_{-1};  // Device ID from Context, set via ctx->device_id()
   bool is_server_{true};  // Flag indicating if initialized by BarexCtx itself (true) or CliBarexCtx (false)
   accl::barex::XSimpleMempool* mp_ = nullptr;
@@ -206,10 +206,10 @@ struct BarexCtx : public noncopyable {
   std::vector<std::vector<std::unique_ptr<GdrMemDesc>>> layer_gdrcpy_mem_;
 };
 
-// Maximum number of cache tensors per layer
+// Maximum number of cache tensors per layer.
 static constexpr size_t MAX_CACHE_NUM_PER_LAYER = 2;
 
-// Use fixed-size array to ensure RDMAMemHandle is memcpy-safe
+// Store these in a fixed-size array so RDMAMemHandle remains memcpy-safe.
 struct RDMAMemHandle {
   std::array<void*, MAX_CACHE_NUM_PER_LAYER> ptrs{};
   std::array<uint32_t, MAX_CACHE_NUM_PER_LAYER> rkeys{};

@@ -747,7 +747,9 @@ cudaError_t copy_handle_data_with_kernel(
     }
 
     initialize_copy_method_profile(target_device);
-    if (select_copy_method(blocks, direction) == CopyMethod::MemcpyLoop) {
+    const CopyLayoutSummary summary = summarize_layout(blocks);
+    const CopyMethod selected_method = select_copy_method(blocks, direction);
+    if (selected_method == CopyMethod::MemcpyLoop) {
         return enqueue_memcpy_loop(
             tensor_buf_ptr, layer_gpu_ptr, blocks, tensor_data_size, direction, stream);
     }
@@ -755,7 +757,6 @@ cudaError_t copy_handle_data_with_kernel(
     char* buffer = reinterpret_cast<char*>(preallocated_buffer);
     size_t max_blocks_per_batch = env_kernel_copy_max_block_num();
 
-    CopyLayoutSummary summary = summarize_layout(blocks);
     if (!summary.all_same_size) {
         bool handled = false;
         cudaError_t hybrid_err = enqueue_hybrid_copy(
